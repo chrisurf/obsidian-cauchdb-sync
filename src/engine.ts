@@ -53,6 +53,7 @@ export class SyncEngine {
 	private db: SyncDatabase;
 	private settings: CouchDBSyncSettings;
 	private setStatus: StatusFn;
+	private onReady: () => void;
 
 	private syncHandler: PouchDB.Replication.Sync<FileDoc> | null = null;
 	private eventRefs: EventRef[] = [];
@@ -71,11 +72,18 @@ export class SyncEngine {
 	private resolveSoon = debounce(() => void this.resolveConflicts(), 800, false);
 	private saveStateSoon = debounce(() => void this.persistSyncState(), 1500, false);
 
-	constructor(app: App, db: SyncDatabase, settings: CouchDBSyncSettings, setStatus: StatusFn) {
+	constructor(
+		app: App,
+		db: SyncDatabase,
+		settings: CouchDBSyncSettings,
+		setStatus: StatusFn,
+		onReady: () => void = () => undefined
+	) {
 		this.app = app;
 		this.db = db;
 		this.settings = settings;
 		this.setStatus = setStatus;
+		this.onReady = onReady;
 	}
 
 	// --- lifecycle ---------------------------------------------------------
@@ -105,6 +113,7 @@ export class SyncEngine {
 			await this.indexLocalFiles();
 			await this.retryPending();
 			await this.resolveConflicts();
+			if (!this.aborted) this.onReady(); // reached a safe steady state -> clear crash guard
 		} catch (e) {
 			if (!this.aborted) this.fail("initial index", e);
 		}

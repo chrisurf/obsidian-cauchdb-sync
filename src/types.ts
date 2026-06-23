@@ -26,6 +26,17 @@ export interface CouchDBSyncSettings {
 
 	/** whether live (continuous) sync is enabled */
 	liveSync: boolean;
+
+	/** start synchronizing automatically when Obsidian launches */
+	autoStart: boolean;
+
+	/**
+	 * Crash guard. Set to true while a sync session is starting/running and cleared
+	 * once it reaches a safe steady state. If it is still true at launch, the previous
+	 * session did not finish cleanly (hang/crash), so we start in safe mode (no
+	 * auto-start) to keep the recovery buttons reachable.
+	 */
+	unsafeShutdown: boolean;
 }
 
 export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
@@ -40,6 +51,8 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	deviceId: "",
 	ignorePatterns: [".obsidian/", ".trash/", ".git/"],
 	liveSync: true,
+	autoStart: true,
+	unsafeShutdown: false,
 };
 
 /**

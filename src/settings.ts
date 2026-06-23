@@ -132,6 +132,20 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		containerEl.createEl("h2", { text: "Sync" });
 
 		new Setting(containerEl)
+			.setName("Start sync automatically")
+			.setDesc(
+				"Start synchronizing when Obsidian launches. Turn off if you want to control " +
+					"when sync runs (e.g. to safely wipe/reset first). Note: after a sync that " +
+					"did not finish cleanly, the plugin starts in safe mode and does not auto-start."
+			)
+			.addToggle((t) =>
+				t.setValue(s.autoStart).onChange(async (v) => {
+					s.autoStart = v;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
 			.setName("Live sync")
 			.setDesc("Continuously sync in real time. Turn off to sync only on command.")
 			.addToggle((t) =>

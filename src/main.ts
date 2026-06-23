@@ -67,8 +67,29 @@ export default class CouchDBSyncPlugin extends Plugin {
 			},
 		});
 
-		// Start after the layout is ready so the initial scan sees a settled vault.
-		this.app.workspace.onLayoutReady(() => void this.restartSync());
+		// Crash guard: if the previous session never reached a safe state, it left
+		// unsafeShutdown=true. In that case do NOT auto-start (so the recovery buttons
+		// stay reachable). Clear the flag now so a manual Restart/Wipe can run.
+		const crashed = this.settings.unsafeShutdown;
+		if (crashed) {
+			this.settings.unsafeShutdown = false;
+			await this.saveSettings();
+		}
+
+		const shouldAutoStart = this.settings.autoStart && !crashed;
+		if (shouldAutoStart) {
+			// Start after the layout is ready so the initial scan sees a settled vault.
+			this.app.workspace.onLayoutReady(() => void this.restartSync());
+		} else {
+			this.setStatus(SYNC_STATE.IDLE, crashed ? "safe mode (previous run did not finish)" : "auto-start off");
+			if (crashed) {
+				new Notice(
+					"CouchDB Sync started in SAFE MODE: the previous sync did not finish cleanly. " +
+						"Use Restart, Reset, or Wipe in the settings.",
+					10000
+				);
+			}
+		}
 	}
 
 	async onunload(): Promise<void> {
@@ -78,6 +99,9 @@ export default class CouchDBSyncPlugin extends Plugin {
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
 		this.db = null;
+		// clean shutdown -> not a crash
+		this.settings.unsafeShutdown = false;
+		await this.saveSettings().catch(() => undefined);
 	}
 
 	private setStatus(state: SyncState, detail?: string): void {
@@ -118,8 +142,20 @@ export default class CouchDBSyncPlugin extends Plugin {
 			return;
 		}
 
+		// Arm the crash guard BEFORE doing any heavy work, and persist it to disk.
+		// If this run hangs/crashes before reaching a safe state, the next launch
+		// sees the flag and starts in safe mode.
+		this.settings.unsafeShutdown = true;
+		await this.saveSettings();
+
 		const db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
-		const engine = new SyncEngine(this.app, db, this.settings, (s, d) => this.setStatus(s, d));
+		const engine = new SyncEngine(
+			this.app,
+			db,
+			this.settings,
+			(s, d) => this.setStatus(s, d),
+			() => void this.markCleanState() // initial index finished -> disarm guard
+		);
 		this.db = db;
 		this.engine = engine;
 		try {
@@ -128,6 +164,13 @@ export default class CouchDBSyncPlugin extends Plugin {
 			this.setStatus(SYNC_STATE.ERROR, String(e));
 			new Notice(`CouchDB Sync failed to start: ${e}`);
 		}
+	}
+
+	/** Clear the crash guard once a session has reached a safe steady state. */
+	private async markCleanState(): Promise<void> {
+		if (!this.settings.unsafeShutdown) return;
+		this.settings.unsafeShutdown = false;
+		await this.saveSettings();
 	}
 
 	/**
