@@ -265,9 +265,18 @@ export default class CouchDBSyncPlugin extends Plugin {
 		}
 	}
 
-	/** Paths currently being transferred (for live "working on it" highlighting). */
-	getActivePaths(): string[] {
-		return this.engine?.getActivePaths() ?? [];
+	/** Files currently being transferred with chunk progress (for live highlighting). */
+	getActiveTransfers(): { path: string; done: number; total: number }[] {
+		return this.engine?.getActiveTransfers() ?? [];
+	}
+
+	/** Force (re)sync a single file. Starts a session first if none is running. */
+	async forceSyncPath(path: string): Promise<void> {
+		if (!this.engine) {
+			await this.restartSync();
+			return;
+		}
+		await this.engine.forceSync(path);
 	}
 
 	async loadSettings(): Promise<void> {

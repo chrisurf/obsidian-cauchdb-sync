@@ -307,14 +307,24 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		this.activeTimer = window.setInterval(() => this.highlightActive(), 600);
 	}
 
-	/** Toggle a "working on it" highlight on list/tree rows for the active paths. */
+	/** Highlight rows being worked on and show live chunk progress (done/total · %). */
 	private highlightActive(): void {
-		const active = new Set(this.plugin.getActivePaths());
+		const transfers = new Map(
+			this.plugin.getActiveTransfers().map((t) => [t.path, t] as const)
+		);
 		const root = this.driftEl?.parentElement;
 		if (!root) return;
 		root.querySelectorAll<HTMLElement>("[data-couchdb-path]").forEach((el) => {
-			const on = active.has(el.dataset.couchdbPath ?? "");
-			el.toggleClass("couchdb-sync-active", on);
+			const t = transfers.get(el.dataset.couchdbPath ?? "");
+			el.toggleClass("couchdb-sync-active", !!t);
+			let prog = el.querySelector<HTMLElement>(".couchdb-sync-prog");
+			if (t) {
+				if (!prog) prog = el.createSpan({ cls: "couchdb-sync-prog" });
+				const pct = t.total ? Math.round((t.done / t.total) * 100) : 0;
+				prog.setText(`  ${t.done}/${t.total} chunks · ${pct}%`);
+			} else if (prog) {
+				prog.remove();
+			}
 		});
 	}
 
@@ -421,9 +431,19 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		det.createEl("summary", { text: `${title} (${paths.length})` });
 		const ul = det.createEl("ul");
 		for (const p of paths) {
-			const li = ul.createEl("li");
+			const li = ul.createEl("li", { cls: "couchdb-sync-drift-item" });
 			li.createSpan({ cls: "couchdb-sync-dot" }); // pulses when active
-			li.createSpan({ text: p });
+			li.createSpan({ text: p, cls: "couchdb-sync-drift-name" });
+			const btn = li.createEl("button", { text: "Sync", cls: "couchdb-sync-rowbtn" });
+			btn.onclick = async () => {
+				btn.disabled = true;
+				btn.setText("Syncing…");
+				try {
+					await this.plugin.forceSyncPath(p);
+				} finally {
+					this.driftSig = ""; // force the lists to refresh on the next tick
+				}
+			};
 			li.dataset.couchdbPath = p;
 		}
 	}

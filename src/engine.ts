@@ -178,8 +178,8 @@ export class SyncEngine {
 	private hiddenTimer: number | null = null;
 	/** timer that returns the status to "in sync" after replication activity settles */
 	private settleTimer: number | null = null;
-	/** paths currently being uploaded/downloaded (for the "working on this" UI) */
-	private activePaths = new Set<string>();
+	/** per-file transfer progress: path -> {done, total} chunks (for live UI) */
+	private activeProgress = new Map<string, { done: number; total: number }>();
 	/** active one-shot replication, cancelled on abort to avoid "database is closed" */
 	private oneShot: { cancel: () => void } | null = null;
 
@@ -333,9 +333,9 @@ export class SyncEngine {
 		return this.eventRefs;
 	}
 
-	/** Paths currently being transferred (so the UI can highlight them live). */
-	getActivePaths(): string[] {
-		return [...this.activePaths];
+	/** Files currently being transferred, with chunk progress (for the live UI). */
+	getActiveTransfers(): { path: string; done: number; total: number }[] {
+		return [...this.activeProgress].map(([path, p]) => ({ path, ...p }));
 	}
 
 	// --- live replication --------------------------------------------------
@@ -601,15 +601,23 @@ export class SyncEngine {
 			this.setStatus(SYNC_STATE.ERROR, "Encryption is on but no passphrase is set.");
 			return;
 		}
-		this.activePaths.add(path); // UI: mark as "working on it"
+		// estimate the chunk count up front so the UI can show a percentage immediately
+		const total = Math.max(1, Math.ceil(size / CHUNK_SIZE));
+		this.activeProgress.set(path, { done: 0, total });
 		try {
-			await this.pushPathInner(path, mtime, ctime, size);
+			await this.pushPathInner(path, mtime, ctime, size, total);
 		} finally {
-			this.activePaths.delete(path);
+			this.activeProgress.delete(path);
 		}
 	}
 
-	private async pushPathInner(path: string, mtime: number, ctime: number, size: number): Promise<void> {
+	private async pushPathInner(
+		path: string,
+		mtime: number,
+		ctime: number,
+		size: number,
+		total: number
+	): Promise<void> {
 		const enc = this.settings.e2eeEnabled;
 		const pass = this.settings.passphrase;
 
@@ -634,6 +642,7 @@ export class SyncEngine {
 				enc,
 				data: enc ? await encryptString(b64, pass) : b64,
 			});
+			this.activeProgress.set(path, { done: children.length, total: Math.max(total, children.length) });
 			// for very large files, yield periodically so the UI/replication keep moving
 			if (children.length % 16 === 0) await this.yieldToUi();
 		}
@@ -731,7 +740,7 @@ export class SyncEngine {
 		}
 
 		const desktopFs = Platform.isDesktop && adapter instanceof FileSystemAdapter;
-		this.activePaths.add(path); // UI: mark as "working on it"
+		this.activeProgress.set(path, { done: 0, total: children.length }); // UI: working on it
 		try {
 			if (doc.binary && desktopFs) {
 				// Stream chunks straight to disk: never hold the whole file in memory.
@@ -741,14 +750,46 @@ export class SyncEngine {
 			}
 		} catch (e) {
 			if (this.aborted) return; // teardown — ignore
-			// chunks not here yet -> wait for them to replicate, then retry
+			// A chunk is missing (e.g. a half-finished earlier upload). If we have the
+			// file locally, HEAL by re-uploading it — this regenerates the missing
+			// chunks — instead of waiting forever for a chunk that may never arrive.
+			const haveLocal = hidden
+				? await adapter.exists(path)
+				: this.app.vault.getAbstractFileByPath(path) instanceof TFile;
+			if (haveLocal) {
+				console.warn(`[couchdb-sync] healing ${path} by re-uploading (was: ${(e as Error).message})`);
+				this.activeProgress.delete(path);
+				this.pending.delete(doc._id);
+				this.lastHash.delete(path);
+				await this.forceSync(path).catch((e2) => this.fail(`healing ${path}`, e2));
+				return;
+			}
+			// no local copy -> wait for the chunk to replicate, then retry
 			this.pending.set(doc._id, doc);
 			console.warn(`[couchdb-sync] deferring ${path}: ${(e as Error).message}`);
 			return;
 		} finally {
-			this.activePaths.delete(path);
+			this.activeProgress.delete(path);
 		}
 		this.pending.delete(doc._id);
+	}
+
+	/** Force (re)sync of a single path: re-upload if local exists, else re-download. */
+	async forceSync(path: string): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const hidden = isHidden(path);
+		this.lastHash.delete(path);
+		const local = hidden ? null : this.app.vault.getAbstractFileByPath(path);
+		if (hidden && (await adapter.exists(path))) {
+			const st = await adapter.stat(path);
+			if (st) await this.pushPath(path, st.mtime, st.ctime, st.size);
+		} else if (local instanceof TFile) {
+			await this.pushPath(path, local.stat.mtime, local.stat.ctime, local.stat.size);
+		} else {
+			const doc = await this.db.get(FILE_PREFIX + path);
+			if (doc) await this.applyRemoteChange(doc);
+		}
+		await this.resolveConflicts();
 	}
 
 	/** Read one chunk's decrypted bytes (local, falling back to remote). */
@@ -781,8 +822,10 @@ export class SyncEngine {
 		const tmp = full + TMP_SUFFIX;
 		const fd = await fs.promises.open(tmp, "w");
 		try {
+			let done = 0;
 			for (const id of children) {
 				await fd.write(await this.readChunkBytes(id));
+				this.activeProgress.set(path, { done: ++done, total: children.length });
 			}
 		} catch (e) {
 			await fd.close();
@@ -809,7 +852,11 @@ export class SyncEngine {
 		hash: string
 	): Promise<void> {
 		const parts: Uint8Array[] = [];
-		for (const id of children) parts.push(await this.readChunkBytes(id));
+		let done = 0;
+		for (const id of children) {
+			parts.push(await this.readChunkBytes(id));
+			this.activeProgress.set(path, { done: ++done, total: children.length });
+		}
 		const bytes = concatBytes(parts);
 
 		this.suppress.add(path);

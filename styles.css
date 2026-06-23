@@ -144,3 +144,28 @@
 	from { background-position: 200% 0; }
 	to { background-position: -200% 0; }
 }
+
+.couchdb-sync-prog {
+	color: var(--interactive-accent);
+	font-variant-numeric: tabular-nums;
+	font-size: var(--font-ui-smaller);
+}
+
+.couchdb-sync-drift-item {
+	display: flex;
+	align-items: center;
+	gap: 0.4em;
+}
+
+.couchdb-sync-drift-name {
+	flex: 1;
+	overflow-wrap: anywhere;
+}
+
+.couchdb-sync-rowbtn {
+	flex: none;
+	padding: 0 0.6em;
+	height: 1.6em;
+	font-size: var(--font-ui-smaller);
+	cursor: pointer;
+}
