@@ -10,8 +10,14 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	plugin: CouchDBSyncPlugin;
 	private statusUnsub?: () => void;
 	private autoRefresh?: number;
-	private indexBox?: HTMLElement;
 	private liveStatusEl?: HTMLElement;
+	// persistent index-status elements (updated in place to avoid flicker)
+	private summaryEl?: HTMLElement;
+	private countsEl?: HTMLElement;
+	private driftEl?: HTMLElement;
+	private treeEl?: HTMLElement;
+	private driftSig = "";
+	private treeSig = "";
 
 	constructor(app: App, plugin: CouchDBSyncPlugin) {
 		super(app, plugin);
@@ -259,7 +265,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			.setHeading()
 			.setName("Index status")
 			.addButton((b) =>
-				b.setButtonText("Refresh").onClick(() => this.loadIndex(box))
+				b.setButtonText("Refresh").onClick(() => this.loadIndex(true))
 			);
 
 		// live status line (updates instantly from the engine)
@@ -267,16 +273,21 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		this.statusUnsub?.();
 		this.statusUnsub = this.plugin.onStatusChange((st) => this.renderLiveStatus(st));
 
+		// build the index box ONCE; later refreshes update these in place (no flicker)
 		const box = root.createDiv({ cls: "couchdb-sync-index" });
-		this.indexBox = box;
-		box.createEl("p", { text: "Loading…", cls: "setting-item-description" });
-		void this.loadIndex(box);
+		this.summaryEl = box.createDiv();
+		this.countsEl = box.createEl("p", { cls: "setting-item-description" });
+		this.driftEl = box.createDiv();
+		this.treeEl = box.createDiv();
+		this.driftSig = "";
+		this.treeSig = "";
+		this.summaryEl.setText("Loading…");
 
-		// auto-refresh the index report periodically so the counts/tree stay current
+		void this.loadIndex(true);
+
+		// auto-refresh: updates counts/summary in place, rebuilds lists/tree only on change
 		if (this.autoRefresh !== undefined) window.clearInterval(this.autoRefresh);
-		this.autoRefresh = window.setInterval(() => {
-			if (this.indexBox) void this.loadIndex(this.indexBox);
-		}, AUTO_REFRESH_MS);
+		this.autoRefresh = window.setInterval(() => void this.loadIndex(false), AUTO_REFRESH_MS);
 	}
 
 	private renderLiveStatus(st: SyncStatus): void {
@@ -313,51 +324,67 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		}
 	}
 
-	private async loadIndex(box: HTMLElement): Promise<void> {
-		box.empty();
+	/**
+	 * Update the index status. Summary + counts are updated in place every time
+	 * (cheap, no flicker). The drift lists and the file tree are only rebuilt when
+	 * their contents actually change (or when force=true via the Refresh button),
+	 * so the page doesn't flicker and an expanded tree stays expanded.
+	 */
+	private async loadIndex(force: boolean): Promise<void> {
+		const summary = this.summaryEl;
+		const counts = this.countsEl;
+		const driftBox = this.driftEl;
+		const treeBox = this.treeEl;
+		if (!summary || !counts || !driftBox || !treeBox) return;
+
 		let report;
 		try {
 			report = await this.plugin.getIndexReport();
 		} catch (e) {
-			box.createEl("p", {
-				text: `Could not read index: ${e instanceof Error ? e.message : String(e)}`,
-				cls: "couchdb-sync-warn",
-			});
+			summary.className = "couchdb-sync-warn";
+			summary.setText(`Could not read index: ${e instanceof Error ? e.message : String(e)}`);
 			return;
 		}
 		if (!report) {
-			box.createEl("p", {
-				text: "Sync is not running. Configure the connection (and passphrase) and restart sync.",
-				cls: "setting-item-description",
-			});
+			summary.className = "";
+			summary.setText("Sync is not running. Configure the connection (and passphrase) and restart sync.");
+			counts.setText("");
+			driftBox.empty();
+			treeBox.empty();
+			this.driftSig = this.treeSig = "";
 			return;
 		}
 
 		const drifted = report.localOnly.length + report.dbOnly.length + report.drift.length;
-		const summary = box.createDiv({
-			cls: drifted === 0 ? "couchdb-sync-ok" : "couchdb-sync-warn",
-		});
-		summary.createSpan({
-			text:
-				drifted === 0
-					? `✓ In sync — ${report.inSync.length} files`
-					: `⚠ Drift — ${drifted} file(s) differ`,
-			cls: "couchdb-sync-summary",
-		});
-		box.createEl("p", {
-			text: `This device: ${report.vaultCount} files · Database: ${report.dbCount} files`,
-			cls: "setting-item-description",
-		});
+		const total = report.inSync.length + drifted;
+		const pct = total === 0 ? 100 : Math.round((report.inSync.length / total) * 100);
+		summary.className = drifted === 0 ? "couchdb-sync-ok" : "couchdb-sync-warn";
+		summary.setText(
+			drifted === 0
+				? `✓ In sync — ${report.inSync.length} / ${total} files (100%)`
+				: `⚠ Syncing — ${report.inSync.length} / ${total} files (${pct}%) · ${drifted} pending`
+		);
+		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
 
-		if (drifted > 0) {
-			this.renderDriftList(box, "Only on this device (not yet uploaded)", report.localOnly);
-			this.renderDriftList(box, "Only in database (not yet downloaded here)", report.dbOnly);
-			this.renderDriftList(box, "Content differs (will be resolved by your conflict strategy)", report.drift);
+		// drift lists — rebuild only when the set changed
+		const driftSig = JSON.stringify([report.localOnly, report.dbOnly, report.drift]);
+		if (force || driftSig !== this.driftSig) {
+			this.driftSig = driftSig;
+			driftBox.empty();
+			this.renderDriftList(driftBox, "Only on this device (not yet uploaded)", report.localOnly);
+			this.renderDriftList(driftBox, "Only in database (not yet downloaded here)", report.dbOnly);
+			this.renderDriftList(driftBox, "Content differs (will be resolved by your conflict strategy)", report.drift);
 		}
 
-		const tree = box.createEl("details", { cls: "couchdb-sync-tree-root" });
-		tree.createEl("summary", { text: `📂 File tree — ${report.allDbPaths.length} indexed files` });
-		this.renderTree(tree.createDiv({ cls: "couchdb-sync-tree" }), report.allDbPaths);
+		// file tree — rebuild only when the indexed set changed (keeps it expanded otherwise)
+		const treeSig = JSON.stringify(report.allDbPaths);
+		if (force || treeSig !== this.treeSig) {
+			this.treeSig = treeSig;
+			treeBox.empty();
+			const tree = treeBox.createEl("details", { cls: "couchdb-sync-tree-root" });
+			tree.createEl("summary", { text: `📂 File tree — ${report.allDbPaths.length} indexed files` });
+			this.renderTree(tree.createDiv({ cls: "couchdb-sync-tree" }), report.allDbPaths);
+		}
 	}
 
 	private renderDriftList(box: HTMLElement, title: string, paths: string[]): void {

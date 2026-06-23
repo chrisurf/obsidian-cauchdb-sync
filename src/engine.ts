@@ -78,6 +78,8 @@ export class SyncEngine {
 	private aborted = false;
 	/** interval id for hidden-file polling (hidden files have no vault events) */
 	private hiddenTimer: number | null = null;
+	/** timer that returns the status to "in sync" after replication activity settles */
+	private settleTimer: number | null = null;
 
 	private resolveSoon = debounce(() => void this.resolveConflicts(), 800, false);
 	private saveStateSoon = debounce(() => void this.persistSyncState(), 1500, false);
@@ -130,7 +132,12 @@ export class SyncEngine {
 			if (this.settings.syncHidden) await this.scanHidden();
 			await this.retryPending();
 			await this.resolveConflicts();
-			if (!this.aborted) this.onReady(); // reached a safe steady state -> clear crash guard
+			if (!this.aborted) {
+				this.onReady(); // reached a safe steady state -> clear crash guard
+				// the indexing pass left the status on "Syncing…"; settle it now so the
+				// spinner stops once the initial work is done (live events take over after).
+				this.setStatus(SYNC_STATE.SYNCED);
+			}
 		} catch (e) {
 			if (!this.aborted) this.fail("initial index", e);
 		}
@@ -201,14 +208,22 @@ export class SyncEngine {
 	 */
 	private async cleanupTempDocs(): Promise<void> {
 		try {
+			// 1) remove stray temp docs from the database (tombstone replicates the cleanup)
 			const junk = (await this.db.getAll()).filter(
 				(d) => d.path.endsWith(TMP_SUFFIX) && !d.deleted
 			);
 			for (const doc of junk) {
-				if (doc._rev) await this.db.removeRev(doc._id, doc._rev); // tombstone, replicates
+				if (doc._rev) await this.db.removeRev(doc._id, doc._rev);
+			}
+			// 2) delete leftover temp files on disk (from interrupted downloads)
+			const adapter = this.app.vault.adapter;
+			for (const f of this.app.vault.getFiles()) {
+				if (f.path.endsWith(TMP_SUFFIX)) {
+					await adapter.remove(f.path).catch(() => undefined);
+				}
 			}
 			if (junk.length) {
-				console.warn(`[couchdb-sync] removed ${junk.length} stray temp doc(s) from the database`);
+				console.warn(`[couchdb-sync] cleaned up ${junk.length} stray temp doc(s)`);
 			}
 		} catch {
 			/* best-effort */
@@ -221,6 +236,10 @@ export class SyncEngine {
 		if (this.hiddenTimer !== null) {
 			window.clearInterval(this.hiddenTimer);
 			this.hiddenTimer = null;
+		}
+		if (this.settleTimer !== null) {
+			window.clearTimeout(this.settleTimer);
+			this.settleTimer = null;
 		}
 		if (this.syncHandler) {
 			this.syncHandler.cancel();
@@ -244,7 +263,6 @@ export class SyncEngine {
 
 	private startLiveSync(): void {
 		if (!this.db.remote) return;
-		this.setStatus(SYNC_STATE.SYNCING);
 		this.syncHandler = this.db.local
 			// keep in-flight memory bounded: chunk docs can be ~1.4 MB each, so a large
 			// default batch would buffer hundreds of MB and trip the OOM guard.
@@ -253,17 +271,44 @@ export class SyncEngine {
 				if (info.direction === "pull") {
 					void this.applyPulledDocs(info.change.docs as FileDoc[]);
 				}
+				this.markActivity(); // real data moved -> show spinner, then settle
 			})
-			.on("paused", (err) => {
-				this.setStatus(err ? SYNC_STATE.OFFLINE : SYNC_STATE.SYNCED);
-			})
-			.on("active", () => this.setStatus(SYNC_STATE.SYNCING))
+			// 'paused' = caught up / idle (or offline). This is the resting state, so the
+			// spinner stops here. We deliberately ignore 'active' (it fires constantly on
+			// the live longpoll cycle and would keep the spinner turning forever).
+			.on("paused", (err) => this.settle(err ? SYNC_STATE.OFFLINE : SYNC_STATE.SYNCED))
 			.on("denied", (err) => this.fail("replication denied", err))
 			.on("error", (err) => this.fail("replication error", err));
 	}
 
+	/** Show the spinner for real replication activity, then auto-settle to "in sync". */
+	private markActivity(): void {
+		if (this.aborted) return;
+		this.setStatus(SYNC_STATE.SYNCING);
+		if (this.settleTimer !== null) window.clearTimeout(this.settleTimer);
+		this.settleTimer = window.setTimeout(() => {
+			this.settleTimer = null;
+			if (!this.aborted) this.setStatus(SYNC_STATE.SYNCED);
+		}, 2500);
+	}
+
+	/** Immediately move to a resting state and cancel any pending settle. */
+	private settle(state: SyncState): void {
+		if (this.settleTimer !== null) {
+			window.clearTimeout(this.settleTimer);
+			this.settleTimer = null;
+		}
+		if (!this.aborted) this.setStatus(state);
+	}
+
 	/** Log the real error (with stack) and surface a short message to the UI. */
 	private fail(context: string, e: unknown): void {
+		// During teardown (reset/restart) the DB is closing — those errors are expected
+		// noise, not real failures, so keep them quiet.
+		if (this.aborted) {
+			console.debug(`[couchdb-sync] (aborted) ${context}:`, e);
+			return;
+		}
 		console.error(`[couchdb-sync] ${context}:`, e);
 		const msg = e instanceof Error ? e.message : String(e);
 		this.setStatus(SYNC_STATE.ERROR, `${context}: ${msg}`);
@@ -561,6 +606,7 @@ export class SyncEngine {
 				await this.writeAssembled(path, children, doc.binary, hidden, existing, doc.hash);
 			}
 		} catch (e) {
+			if (this.aborted) return; // teardown — ignore
 			// chunks not here yet -> wait for them to replicate, then retry
 			this.pending.set(doc._id, doc);
 			console.warn(`[couchdb-sync] deferring ${path}: ${(e as Error).message}`);
@@ -762,12 +808,13 @@ export class SyncEngine {
 	}
 
 	private async persistSyncState(): Promise<void> {
+		if (this.aborted) return; // DB may be closing/destroyed during teardown
 		try {
 			await this.db.putLocalDoc(SYNC_STATE_DOC, {
 				records: Object.fromEntries(this.syncState),
 			});
 		} catch (e) {
-			console.warn("[couchdb-sync] could not persist sync state", e);
+			if (!this.aborted) console.warn("[couchdb-sync] could not persist sync state", e);
 		}
 	}
 
