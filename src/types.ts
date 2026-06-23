@@ -63,11 +63,13 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	syncHidden: false,
 	// when hidden sync is ON, keep these volatile/risky hidden paths out
 	hiddenExclude: [
-		"node_modules/",
+		".obsidian/",
 		".git/",
-		".claude/",
 		".trash/",
 		".DS_Store",
+		"node_modules/",
+		".claude/",
+		"tmp/",
 		".obsidian/workspace.json",
 		".obsidian/workspace-mobile.json",
 		".obsidian/cache",
