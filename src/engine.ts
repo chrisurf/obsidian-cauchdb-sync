@@ -87,14 +87,26 @@ export class SyncEngine {
 		await this.loadSyncState();
 		if (this.aborted) return;
 		await this.publishMasterInfoIfNeeded();
-		await this.reconcile();
-		if (this.aborted) return;
 		this.attachVaultEvents();
 
 		if (this.settings.liveSync) {
+			// Start transfer immediately so already-indexed docs (and remote changes)
+			// flow right away, then index local files in the background, small first.
 			this.startLiveSync();
+			void this.runInitialIndex();
 		} else {
+			await this.runInitialIndex();
 			await this.replicateOnce();
+		}
+	}
+
+	private async runInitialIndex(): Promise<void> {
+		try {
+			await this.indexLocalFiles();
+			await this.retryPending();
+			await this.resolveConflicts();
+		} catch (e) {
+			if (!this.aborted) this.fail("initial index", e);
 		}
 	}
 
@@ -186,41 +198,44 @@ export class SyncEngine {
 		}
 	}
 
-	// --- initial reconcile -------------------------------------------------
+	// --- initial indexing (local -> local DB) ------------------------------
 
-	private async reconcile(): Promise<void> {
-		const localFiles = this.app.vault
+	/**
+	 * Index local files into the database, SMALL FILES FIRST. This runs in the
+	 * background while replication ships already-indexed docs in parallel, so the
+	 * bulk of the vault syncs fast and huge media files trickle in last. It yields
+	 * to the UI between files (mobile stays responsive) and is fully resumable:
+	 * finished files are skipped via the sync record, and a half-uploaded big file
+	 * only re-writes its missing chunks on the next run.
+	 *
+	 * Files only present in the database (not on this device) are NOT handled here —
+	 * the pull side of replication delivers and applies those.
+	 */
+	private async indexLocalFiles(): Promise<void> {
+		const todo = this.app.vault
 			.getFiles()
-			.filter((f) => !matchesIgnore(f.path, this.settings.ignorePatterns));
-		const localByPath = new Map(localFiles.map((f) => [f.path, f] as const));
+			.filter((f) => !matchesIgnore(f.path, this.settings.ignorePatterns))
+			.filter((f) => !this.isUnchanged(f))
+			.sort((a, b) => a.stat.size - b.stat.size); // fewest chunks first
 
-		const docs = await this.db.getAll();
-		const docByPath = new Map(docs.map((d) => [d._id, d] as const));
-
-		// 1) files present locally -> ensure they are in the DB
-		for (const file of localFiles) {
+		if (todo.length === 0) return;
+		let done = 0;
+		for (const file of todo) {
 			if (this.aborted) return;
 			try {
-				if (this.isUnchanged(file)) continue; // matches our last-synced record
-				await this.pushFile(file); // pushFile adopts identical content without re-uploading
+				await this.pushFile(file); // adopts identical content without re-uploading
 			} catch (e) {
-				this.fail(`indexing ${file.path}`, e); // one bad file must not abort startup
+				this.fail(`indexing ${file.path}`, e); // one bad file must not abort the rest
 			}
+			done++;
+			this.setStatus(SYNC_STATE.SYNCING, `Indexing ${done}/${todo.length}…`);
+			await this.yieldToUi(); // keep the app responsive; let replication interleave
 		}
+	}
 
-		// 2) docs present in DB but missing locally -> create or honor tombstone
-		for (const doc of docs) {
-			if (this.aborted) return;
-			if (localByPath.has(doc._id)) continue;
-			try {
-				await this.applyRemoteChange(doc);
-			} catch (e) {
-				this.fail(`applying ${doc._id}`, e);
-			}
-		}
-
-		await this.retryPending();
-		await this.resolveConflicts();
+	/** Hand control back to the event loop so the UI/replication can make progress. */
+	private yieldToUi(): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, 0));
 	}
 
 	/** Cheap "did this file change since we last synced it here?" check. */
@@ -312,6 +327,8 @@ export class SyncEngine {
 				enc,
 				data: enc ? await encryptString(b64, pass) : b64,
 			});
+			// for very large files, yield periodically so the UI/replication keep moving
+			if (children.length % 16 === 0) await this.yieldToUi();
 		}
 		const hash = cyrb53(children.join("|"));
 
