@@ -1,1 +1,56 @@
-/* CouchDB Sync — minimal styles. The status indicator lives in the status bar. */
+/* CouchDB Sync — settings UI styles. The runtime status indicator lives in the status bar. */
+
+.couchdb-sync-index {
+	margin-bottom: 1em;
+}
+
+.couchdb-sync-summary {
+	font-weight: 600;
+}
+
+.couchdb-sync-ok .couchdb-sync-summary {
+	color: var(--color-green);
+}
+
+.couchdb-sync-warn,
+.couchdb-sync-warn .couchdb-sync-summary {
+	color: var(--color-orange);
+}
+
+.couchdb-sync-drift summary {
+	cursor: pointer;
+	color: var(--color-orange);
+}
+
+.couchdb-sync-drift ul {
+	margin: 0.25em 0 0.5em 1em;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.couchdb-sync-tree-root > summary {
+	cursor: pointer;
+	margin-top: 0.5em;
+	font-weight: 600;
+}
+
+.couchdb-sync-tree {
+	font-size: var(--font-ui-smaller);
+	font-family: var(--font-monospace);
+	margin-top: 0.5em;
+}
+
+.couchdb-sync-tree details > summary {
+	cursor: pointer;
+}
+
+.couchdb-sync-tree-children {
+	padding-left: 1.1em;
+	border-left: 1px solid var(--background-modifier-border);
+	margin-left: 0.35em;
+}
+
+.couchdb-sync-tree-file {
+	padding-left: 0.2em;
+	color: var(--text-muted);
+}

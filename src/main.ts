@@ -1,7 +1,7 @@
 import { Notice, Plugin } from "obsidian";
 import { CouchDBSyncSettings, DEFAULT_SETTINGS, SYNC_STATE, SyncState } from "./types";
 import { SyncDatabase } from "./database";
-import { SyncEngine } from "./engine";
+import { SyncEngine, IndexReport } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
 import { generateDeviceId } from "./util";
 
@@ -90,6 +90,17 @@ export default class CouchDBSyncPlugin extends Plugin {
 			this.setStatus(SYNC_STATE.ERROR, String(e));
 			new Notice(`CouchDB Sync failed to start: ${e}`);
 		}
+	}
+
+	/** Whether a sync session is currently active. */
+	isRunning(): boolean {
+		return this.engine !== null;
+	}
+
+	/** Index/drift report for the settings view, or null if sync isn't running. */
+	async getIndexReport(): Promise<IndexReport | null> {
+		if (!this.engine) return null;
+		return this.engine.getIndexReport();
 	}
 
 	async loadSettings(): Promise<void> {

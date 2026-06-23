@@ -16,6 +16,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		containerEl.empty();
 		const s = this.plugin.settings;
 
+		this.renderIndexStatus(containerEl);
+
 		containerEl.createEl("h2", { text: "CouchDB connection" });
 
 		new Setting(containerEl)
@@ -169,5 +171,107 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			text: `Device ID: ${s.deviceId || "(not yet assigned)"}`,
 			cls: "setting-item-description",
 		});
+	}
+
+	// --- index status view -------------------------------------------------
+
+	private renderIndexStatus(root: HTMLElement): void {
+		new Setting(root)
+			.setHeading()
+			.setName("Index status")
+			.addButton((b) =>
+				b.setButtonText("Refresh").onClick(() => this.loadIndex(box))
+			);
+		const box = root.createDiv({ cls: "couchdb-sync-index" });
+		box.createEl("p", { text: "Loading…", cls: "setting-item-description" });
+		void this.loadIndex(box);
+	}
+
+	private async loadIndex(box: HTMLElement): Promise<void> {
+		box.empty();
+		let report;
+		try {
+			report = await this.plugin.getIndexReport();
+		} catch (e) {
+			box.createEl("p", {
+				text: `Could not read index: ${e instanceof Error ? e.message : String(e)}`,
+				cls: "couchdb-sync-warn",
+			});
+			return;
+		}
+		if (!report) {
+			box.createEl("p", {
+				text: "Sync is not running. Configure the connection (and passphrase) and restart sync.",
+				cls: "setting-item-description",
+			});
+			return;
+		}
+
+		const drifted = report.localOnly.length + report.dbOnly.length + report.drift.length;
+		const summary = box.createDiv({
+			cls: drifted === 0 ? "couchdb-sync-ok" : "couchdb-sync-warn",
+		});
+		summary.createSpan({
+			text:
+				drifted === 0
+					? `✓ In sync — ${report.inSync.length} files`
+					: `⚠ Drift — ${drifted} file(s) differ`,
+			cls: "couchdb-sync-summary",
+		});
+		box.createEl("p", {
+			text: `This device: ${report.vaultCount} files · Database: ${report.dbCount} files`,
+			cls: "setting-item-description",
+		});
+
+		if (drifted > 0) {
+			this.renderDriftList(box, "Only on this device (not yet uploaded)", report.localOnly);
+			this.renderDriftList(box, "Only in database (not yet downloaded here)", report.dbOnly);
+			this.renderDriftList(box, "Content differs (will be resolved by your conflict strategy)", report.drift);
+		}
+
+		const tree = box.createEl("details", { cls: "couchdb-sync-tree-root" });
+		tree.createEl("summary", { text: `📂 File tree — ${report.allDbPaths.length} indexed files` });
+		this.renderTree(tree.createDiv({ cls: "couchdb-sync-tree" }), report.allDbPaths);
+	}
+
+	private renderDriftList(box: HTMLElement, title: string, paths: string[]): void {
+		if (paths.length === 0) return;
+		const det = box.createEl("details", { cls: "couchdb-sync-drift" });
+		det.createEl("summary", { text: `${title} (${paths.length})` });
+		const ul = det.createEl("ul");
+		for (const p of paths) ul.createEl("li", { text: p });
+	}
+
+	private renderTree(container: HTMLElement, paths: string[]): void {
+		interface Node {
+			folders: Map<string, Node>;
+			files: string[];
+		}
+		const make = (): Node => ({ folders: new Map(), files: [] });
+		const rootNode = make();
+		for (const path of paths) {
+			const parts = path.split("/");
+			let node = rootNode;
+			for (let i = 0; i < parts.length - 1; i++) {
+				const name = parts[i];
+				if (!node.folders.has(name)) node.folders.set(name, make());
+				node = node.folders.get(name)!;
+			}
+			node.files.push(parts[parts.length - 1]);
+		}
+
+		const render = (node: Node, el: HTMLElement) => {
+			const folderNames = [...node.folders.keys()].sort((a, b) => a.localeCompare(b));
+			for (const name of folderNames) {
+				const child = node.folders.get(name)!;
+				const det = el.createEl("details");
+				det.createEl("summary", { text: `📁 ${name}` });
+				render(child, det.createDiv({ cls: "couchdb-sync-tree-children" }));
+			}
+			for (const file of node.files.sort((a, b) => a.localeCompare(b))) {
+				el.createDiv({ cls: "couchdb-sync-tree-file", text: `📄 ${file}` });
+			}
+		};
+		render(rootNode, container);
 	}
 }

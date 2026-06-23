@@ -12,7 +12,26 @@ import {
 
 const MASTER_INFO_ID = "couchdb-sync:masterinfo";
 
+/**
+ * Until content chunking lands (Phase 4), file content is stored inline in one
+ * document. Very large files would (a) blow past CouchDB's document-size limit and
+ * (b) build a base64 string big enough to throw `RangeError: Invalid string length`.
+ * We therefore skip files above this size for now, loudly but without crashing.
+ */
+const MAX_INLINE_BYTES = 30 * 1024 * 1024; // 30 MB
+
 type StatusFn = (state: SyncState, detail?: string) => void;
+
+/** Snapshot comparing this device's files against the synced database. */
+export interface IndexReport {
+	vaultCount: number;
+	dbCount: number;
+	inSync: string[];
+	localOnly: string[]; // on this device, not yet in the database
+	dbOnly: string[]; // in the database, not on this device
+	drift: string[]; // present on both but content differs
+	allDbPaths: string[]; // every indexed path (for the tree view)
+}
 
 export class SyncEngine {
 	private app: App;
@@ -83,8 +102,15 @@ export class SyncEngine {
 				this.setStatus(err ? SYNC_STATE.OFFLINE : SYNC_STATE.SYNCED);
 			})
 			.on("active", () => this.setStatus(SYNC_STATE.SYNCING))
-			.on("denied", (err) => this.setStatus(SYNC_STATE.ERROR, String(err)))
-			.on("error", (err) => this.setStatus(SYNC_STATE.ERROR, String(err)));
+			.on("denied", (err) => this.fail("replication denied", err))
+			.on("error", (err) => this.fail("replication error", err));
+	}
+
+	/** Log the real error (with stack) and surface a short message to the UI. */
+	private fail(context: string, e: unknown): void {
+		console.error(`[couchdb-sync] ${context}:`, e);
+		const msg = e instanceof Error ? e.message : String(e);
+		this.setStatus(SYNC_STATE.ERROR, `${context}: ${msg}`);
 	}
 
 	async replicateOnce(): Promise<void> {
@@ -97,7 +123,7 @@ export class SyncEngine {
 			await this.resolveConflicts();
 			this.setStatus(SYNC_STATE.SYNCED);
 		} catch (e) {
-			this.setStatus(SYNC_STATE.ERROR, String(e));
+			this.fail("replicate", e);
 		}
 	}
 
@@ -122,23 +148,31 @@ export class SyncEngine {
 
 		// 1) files present locally -> ensure they are in the DB
 		for (const file of localFiles) {
-			const doc = docByPath.get(file.path);
-			if (!doc) {
-				await this.pushFile(file);
-			} else if (!doc.deleted) {
-				const raw = await this.readLocal(file);
-				if (cyrb53(raw) !== (await this.docContentHash(doc))) {
-					await this.pushFile(file); // local differs; conflict pass will settle ties
-				} else {
-					this.lastHash.set(file.path, cyrb53(raw));
+			try {
+				const doc = docByPath.get(file.path);
+				if (!doc) {
+					await this.pushFile(file);
+				} else if (!doc.deleted) {
+					const raw = await this.readLocal(file);
+					if (cyrb53(raw) !== (await this.docContentHash(doc))) {
+						await this.pushFile(file); // local differs; conflict pass will settle ties
+					} else {
+						this.lastHash.set(file.path, cyrb53(raw));
+					}
 				}
+			} catch (e) {
+				this.fail(`indexing ${file.path}`, e); // one bad file must not abort startup
 			}
 		}
 
 		// 2) docs present in DB but missing locally -> create or honor tombstone
 		for (const doc of docs) {
 			if (localByPath.has(doc._id)) continue;
-			await this.applyRemoteChange(doc);
+			try {
+				await this.applyRemoteChange(doc);
+			} catch (e) {
+				this.fail(`applying ${doc._id}`, e);
+			}
 		}
 
 		await this.resolveConflicts();
@@ -191,6 +225,11 @@ export class SyncEngine {
 	}
 
 	private async pushFile(file: TFile): Promise<void> {
+		if (file.stat.size > MAX_INLINE_BYTES) {
+			console.warn(`[couchdb-sync] skipping large file (chunking not yet implemented): ${file.path} (${file.stat.size} bytes)`);
+			this.setStatus(SYNC_STATE.SYNCED, `Skipped large file: ${file.path}`);
+			return;
+		}
 		const raw = await this.readLocal(file);
 		const hash = cyrb53(raw);
 		if (this.lastHash.get(file.path) === hash) return; // unchanged / our own echo
@@ -360,6 +399,60 @@ export class SyncEngine {
 		}
 	}
 
+	// --- index status (for the settings view) ------------------------------
+
+	/**
+	 * Compare this device's files against the synced database. Cheap fields first
+	 * (counts, set membership); content hashing only for files present on both
+	 * sides and small enough to compare quickly.
+	 */
+	async getIndexReport(): Promise<IndexReport> {
+		const vaultFiles = this.app.vault
+			.getFiles()
+			.filter((f) => !matchesIgnore(f.path, this.settings.ignorePatterns));
+		const vaultByPath = new Map(vaultFiles.map((f) => [f.path, f] as const));
+
+		const docs = (await this.db.getAll()).filter((d) => !d.deleted);
+		const docByPath = new Map(docs.map((d) => [d._id, d] as const));
+
+		const inSync: string[] = [];
+		const localOnly: string[] = [];
+		const dbOnly: string[] = [];
+		const drift: string[] = [];
+
+		for (const f of vaultFiles) {
+			const doc = docByPath.get(f.path);
+			if (!doc) {
+				localOnly.push(f.path);
+				continue;
+			}
+			let same = true;
+			if (f.stat.size <= MAX_INLINE_BYTES) {
+				try {
+					same = cyrb53(await this.readLocal(f)) === (await this.docContentHash(doc));
+				} catch {
+					same = false;
+				}
+			}
+			(same ? inSync : drift).push(f.path);
+		}
+
+		for (const d of docs) {
+			if (!vaultByPath.has(d._id)) dbOnly.push(d._id);
+		}
+
+		const sort = (a: string[]) => a.sort((x, y) => x.localeCompare(y));
+		return {
+			vaultCount: vaultFiles.length,
+			dbCount: docs.length,
+			inSync: sort(inSync),
+			localOnly: sort(localOnly),
+			dbOnly: sort(dbOnly),
+			drift: sort(drift),
+			allDbPaths: sort(docs.map((d) => d._id)),
+		};
+	}
+
 	private async docContentHash(doc: FileDoc): Promise<string> {
 		try {
 			const raw = doc.enc
@@ -367,7 +460,7 @@ export class SyncEngine {
 				: doc.data;
 			return cyrb53(raw);
 		} catch {
-			return " decrypt-error";
+			return "\u0000decrypt-error";
 		}
 	}
 }
