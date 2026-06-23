@@ -237,11 +237,12 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Stop sync")
-			.setDesc("Stop syncing and go idle. Nothing is uploaded or downloaded until you press Sync now again.")
+			.setDesc("Stop syncing and go idle. Also turns off Live sync and auto-start so nothing resumes on its own.")
 			.addButton((b) =>
 				b.setButtonText("Stop").onClick(async () => {
 					await this.plugin.stopSync();
-					new Notice("Sync stopped.");
+					new Notice("Sync stopped. Live sync and auto-start turned off.");
+					this.display(); // reflect the toggles being switched off
 				})
 			);
 

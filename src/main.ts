@@ -225,7 +225,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 		return this.restartLock;
 	}
 
-	/** Stop syncing and go idle (used when Live sync is turned off). */
+	/**
+	 * Stop syncing and go idle. Also turns OFF live sync and auto-start so the state
+	 * is consistent — otherwise the toggles would fight this and sync could resume.
+	 */
 	stopSync(): Promise<void> {
 		this.engine?.abort();
 		this.restartLock = this.restartLock
@@ -235,6 +238,9 @@ export default class CouchDBSyncPlugin extends Plugin {
 				await this.db?.close().catch(() => undefined);
 				this.engine = null;
 				this.db = null;
+				this.settings.liveSync = false;
+				this.settings.autoStart = false;
+				await this.saveSettings();
 				this.setStatus(SYNC_STATE.IDLE, "stopped");
 			});
 		return this.restartLock;
