@@ -21,9 +21,6 @@ export interface CouchDBSyncSettings {
 	/** stable per-install id (auto-generated) */
 	deviceId: string;
 
-	/** glob-ish path prefixes to never sync */
-	ignorePatterns: string[];
-
 	/** whether live (continuous) sync is enabled */
 	liveSync: boolean;
 
@@ -31,11 +28,16 @@ export interface CouchDBSyncSettings {
 	autoStart: boolean;
 
 	/**
-	 * Also sync hidden files (dotfiles and dot-folders like .obsidian, .git).
-	 * These have no vault events, so they are scanned by polling. Our own plugin's
-	 * data.json is always excluded; everything else is controlled by ignorePatterns.
+	 * Sync hidden files (dotfiles and dot-folders like .obsidian, .git). Normal files
+	 * are always synced. Our own plugin's data.json is always excluded.
 	 */
 	syncHidden: boolean;
+
+	/** when syncHidden is ON: hidden paths to NOT sync (blacklist) */
+	hiddenExclude: string[];
+
+	/** when syncHidden is OFF: hidden paths to sync anyway (whitelist) */
+	hiddenInclude: string[];
 
 	/**
 	 * Crash guard. Set to true while a sync session is starting/running and cleared
@@ -56,24 +58,22 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	conflictStrategy: "newest",
 	isMaster: false,
 	deviceId: "",
-	// one exclusion list for everything. Defaults exclude volatile/risky paths; when
-	// hidden-file sync is on these keep .git and Obsidian's workspace/cache out.
-	ignorePatterns: [
-		".trash/",
+	liveSync: true,
+	autoStart: true,
+	syncHidden: false,
+	// when hidden sync is ON, keep these volatile/risky hidden paths out
+	hiddenExclude: [
 		".git/",
+		".trash/",
 		".DS_Store",
 		".obsidian/workspace.json",
 		".obsidian/workspace-mobile.json",
 		".obsidian/cache",
 	],
-	liveSync: true,
-	autoStart: true,
-	syncHidden: false,
+	// when hidden sync is OFF, sync nothing hidden by default
+	hiddenInclude: [],
 	unsafeShutdown: false,
 };
-
-/** The previous default ignore list; migrated to the new unified default on load. */
-export const LEGACY_IGNORE_DEFAULT = [".obsidian/", ".trash/", ".git/"];
 
 /**
  * One CouchDB document per vault file. The content itself lives in separate,

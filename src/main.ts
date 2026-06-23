@@ -2,7 +2,6 @@ import { Notice, Plugin, setIcon } from "obsidian";
 import {
 	CouchDBSyncSettings,
 	DEFAULT_SETTINGS,
-	LEGACY_IGNORE_DEFAULT,
 	SYNC_STATE,
 	SyncState,
 	SyncStatus,
@@ -263,22 +262,27 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		const saved = (await this.loadData()) as Partial<CouchDBSyncSettings> & {
-			hiddenExcludePatterns?: string[];
-		};
+		const saved = (await this.loadData()) as
+			| (Partial<CouchDBSyncSettings> & {
+					ignorePatterns?: string[];
+					hiddenExcludePatterns?: string[];
+			  })
+			| null;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
 
-		// Migrate the old two-list model to the single unified exclusion list.
-		const isLegacyDefault =
-			JSON.stringify(this.settings.ignorePatterns) === JSON.stringify(LEGACY_IGNORE_DEFAULT);
-		if (isLegacyDefault) {
-			this.settings.ignorePatterns = [...DEFAULT_SETTINGS.ignorePatterns];
-		} else if (saved?.hiddenExcludePatterns?.length) {
-			// fold any previously-set hidden exclusions into the unified list
-			const merged = new Set([...this.settings.ignorePatterns, ...saved.hiddenExcludePatterns]);
-			this.settings.ignorePatterns = [...merged];
+		// Migrate older exclusion fields (ignorePatterns / hiddenExcludePatterns) into
+		// the new hidden-exclude list. Only fold in entries that are actually hidden.
+		if (!saved?.hiddenExclude && (saved?.ignorePatterns || saved?.hiddenExcludePatterns)) {
+			const legacy = [...(saved.ignorePatterns ?? []), ...(saved.hiddenExcludePatterns ?? [])];
+			const merged = new Set([
+				...DEFAULT_SETTINGS.hiddenExclude,
+				...legacy.filter((p) => p.startsWith(".")),
+			]);
+			this.settings.hiddenExclude = [...merged];
 		}
-		delete (this.settings as { hiddenExcludePatterns?: string[] }).hiddenExcludePatterns;
+		const stale = this.settings as { ignorePatterns?: unknown; hiddenExcludePatterns?: unknown };
+		delete stale.ignorePatterns;
+		delete stale.hiddenExcludePatterns;
 
 		if (!this.settings.deviceId) this.settings.deviceId = generateDeviceId();
 		await this.saveSettings();

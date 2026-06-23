@@ -457,14 +457,18 @@ export class SyncEngine {
 		return !!rec && rec.mtime === file.stat.mtime && rec.size === file.stat.size;
 	}
 
-	/** Paths we never sync. One exclusion list governs both normal and hidden files. */
+	/** Paths we never sync. Normal files are always synced; hidden files depend on the toggle. */
 	private skip(path: string): boolean {
 		if (path.endsWith(TMP_SUFFIX)) return true;
 		// never sync our own plugin config (deviceId/passphrase/flags are per-device)
 		if (path === `${this.app.vault.configDir}/plugins/couchdb-sync/data.json`) return true;
-		// hidden files only when the user enabled it
-		if (isHidden(path) && !this.settings.syncHidden) return true;
-		return matchesIgnore(path, this.settings.ignorePatterns);
+
+		if (isHidden(path)) {
+			return this.settings.syncHidden
+				? matchesIgnore(path, this.settings.hiddenExclude) // ON: skip blacklisted
+				: !matchesIgnore(path, this.settings.hiddenInclude); // OFF: skip unless whitelisted
+		}
+		return false; // normal files are always synced
 	}
 
 	// --- local -> db -------------------------------------------------------

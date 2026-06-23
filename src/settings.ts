@@ -183,32 +183,42 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Sync hidden files")
 			.setDesc(
-				"Also sync hidden files like .obsidian (settings, plugins) and .git. " +
-					"Off by default. Our own plugin's data.json is always excluded."
+				"Hidden files are things like .obsidian (your settings & plugins) and .git. " +
+					"Normal notes & attachments are always synced. (Our own plugin's data.json is never synced.)"
 			)
 			.addToggle((t) =>
 				t.setValue(s.syncHidden).onChange(async (v) => {
 					s.syncHidden = v;
 					await this.plugin.saveSettings();
+					this.display(); // swap between the exclude / include field
 				})
 			);
 
-		new Setting(containerEl)
-			.setName("Exclude patterns")
-			.setDesc(
-				"One per line. Paths that are NEVER synced — applies to normal files and, " +
-					"when “Sync hidden files” is on, to hidden files too (e.g. .git/, .obsidian/cache)."
-			)
-			.addTextArea((t) => {
-				t.setValue(s.ignorePatterns.join("\n")).onChange(async (v) => {
-					s.ignorePatterns = v
-						.split("\n")
-						.map((x) => x.trim())
-						.filter((x) => x.length > 0);
-					await this.plugin.saveSettings();
+		if (s.syncHidden) {
+			// ON: blacklist — everything hidden syncs except these
+			new Setting(containerEl)
+				.setName("…except these")
+				.setDesc("One path per line. These hidden files/folders are NOT synced. Everything else hidden is.")
+				.addTextArea((t) => {
+					t.setValue(s.hiddenExclude.join("\n")).onChange(async (v) => {
+						s.hiddenExclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
+						await this.plugin.saveSettings();
+					});
+					t.inputEl.rows = 6;
 				});
-				t.inputEl.rows = 6;
-			});
+		} else {
+			// OFF: whitelist — nothing hidden syncs except these
+			new Setting(containerEl)
+				.setName("…but still sync these")
+				.setDesc("One path per line. Hidden files are skipped — list any you DO want synced (e.g. .obsidian/snippets/). Leave empty to skip all hidden files.")
+				.addTextArea((t) => {
+					t.setValue(s.hiddenInclude.join("\n")).onChange(async (v) => {
+						s.hiddenInclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
+						await this.plugin.saveSettings();
+					});
+					t.inputEl.rows = 4;
+				});
+		}
 
 		containerEl.createEl("h2", { text: "Actions" });
 
