@@ -174,6 +174,33 @@ export class SyncDatabase {
 		await this.local.destroy();
 	}
 
+	/**
+	 * DELETE the remote database on the server, then recreate it empty. Destructive:
+	 * this removes all synced data on the server (other devices will re-upload theirs
+	 * on their next sync). Used by the "Wipe server database" action.
+	 */
+	async wipeRemote(): Promise<void> {
+		const cfg = {
+			auth: { username: this.settings.username, password: this.settings.password },
+			fetch: obsidianFetch(),
+		} as PouchDB.Configuration.RemoteDatabaseConfiguration;
+
+		const doomed = new PouchDB<FileDoc>(this.remoteUrl(), {
+			...cfg,
+			skip_setup: true,
+		} as PouchDB.Configuration.RemoteDatabaseConfiguration);
+		try {
+			await doomed.destroy(); // DELETE /db
+		} catch (e) {
+			if ((e as { status?: number }).status !== 404) throw e; // already gone is fine
+		}
+
+		// recreate an empty database so future replication works (skip_setup omitted)
+		const fresh = new PouchDB<FileDoc>(this.remoteUrl(), cfg);
+		await fresh.info(); // forces creation (PUT /db)
+		this.remote = null;
+	}
+
 	// --- per-device local state (not replicated) ---------------------------
 
 	async getLocalDoc<T>(id: string): Promise<T | null> {

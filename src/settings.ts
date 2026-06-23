@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import { App, Modal, PluginSettingTab, Setting, Notice } from "obsidian";
 import type CouchDBSyncPlugin from "./main";
 import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
@@ -185,6 +185,34 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl)
+			.setName("Wipe server database")
+			.setDesc(
+				"DELETE the entire database on the server, then re-upload this device's vault " +
+					"from scratch. Destructive — other devices' data on the server is removed " +
+					"(they will re-upload on their next sync). Use this to start completely fresh."
+			)
+			.addButton((b) =>
+				b
+					.setWarning()
+					.setButtonText("Wipe server & re-upload")
+					.onClick(() => {
+						new ConfirmModal(
+							this.app,
+							"Wipe server database?",
+							`This permanently deletes ALL data in the server database "${s.dbName}" ` +
+								`and re-uploads this device's vault. This cannot be undone. Continue?`,
+							"Wipe & re-upload",
+							async () => {
+								new Notice("Wiping server database…");
+								await this.plugin.wipeRemoteAndReset();
+								new Notice("Server wiped; re-uploading from this device.");
+								this.display();
+							}
+						).open();
+					})
+			);
+
 		containerEl.createEl("p", {
 			text: `Device ID: ${s.deviceId || "(not yet assigned)"}`,
 			cls: "setting-item-description",
@@ -291,5 +319,48 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			}
 		};
 		render(rootNode, container);
+	}
+}
+
+/** Minimal confirmation dialog for destructive actions. */
+class ConfirmModal extends Modal {
+	private title: string;
+	private body: string;
+	private confirmLabel: string;
+	private onConfirm: () => void | Promise<void>;
+
+	constructor(
+		app: App,
+		title: string,
+		body: string,
+		confirmLabel: string,
+		onConfirm: () => void | Promise<void>
+	) {
+		super(app);
+		this.title = title;
+		this.body = body;
+		this.confirmLabel = confirmLabel;
+		this.onConfirm = onConfirm;
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		contentEl.createEl("h3", { text: this.title });
+		contentEl.createEl("p", { text: this.body });
+		new Setting(contentEl)
+			.addButton((b) => b.setButtonText("Cancel").onClick(() => this.close()))
+			.addButton((b) =>
+				b
+					.setWarning()
+					.setButtonText(this.confirmLabel)
+					.onClick(async () => {
+						this.close();
+						await this.onConfirm();
+					})
+			);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
 	}
 }

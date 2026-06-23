@@ -57,6 +57,16 @@ export default class CouchDBSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "couchdb-sync-wipe-remote",
+			name: "Wipe server database and re-upload (destructive)",
+			callback: async () => {
+				new Notice("CouchDB Sync: wiping server database…");
+				await this.wipeRemoteAndReset();
+				new Notice("CouchDB Sync: server wiped; re-uploading from this device.");
+			},
+		});
+
 		// Start after the layout is ready so the initial scan sees a settled vault.
 		this.app.workspace.onLayoutReady(() => void this.restartSync());
 	}
@@ -136,6 +146,27 @@ export default class CouchDBSyncPlugin extends Plugin {
 				this.engine = null;
 				this.db = null;
 				await this.doRestart();
+			});
+		return this.restartLock;
+	}
+
+	/**
+	 * DESTRUCTIVE: delete the entire database on the server, recreate it empty, wipe
+	 * the local cache, and re-upload this device's vault from scratch. Serialized
+	 * through the same lock as restartSync.
+	 */
+	wipeRemoteAndReset(): Promise<void> {
+		this.engine?.abort();
+		this.restartLock = this.restartLock
+			.catch(() => undefined)
+			.then(async () => {
+				this.engine?.stop();
+				const db = this.db ?? new SyncDatabase(this.settings, LOCAL_DB_NAME);
+				await db.wipeRemote(); // delete + recreate the server database
+				await db.destroyLocal().catch(() => undefined); // clear local cache
+				this.engine = null;
+				this.db = null;
+				await this.doRestart(); // fresh: re-index the vault into the clean server
 			});
 		return this.restartLock;
 	}
