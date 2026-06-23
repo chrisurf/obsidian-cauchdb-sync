@@ -35,6 +35,8 @@ import {
 
 const MASTER_INFO_ID = "couchdb-sync:masterinfo";
 const SYNC_STATE_DOC = "_local/couchdb-sync-state";
+/** Suffix of the temp file used while streaming a download to disk. Never synced. */
+const TMP_SUFFIX = ".cdbsync-tmp";
 
 type StatusFn = (
 	state: SyncState,
@@ -115,12 +117,33 @@ export class SyncEngine {
 
 	private async runInitialIndex(): Promise<void> {
 		try {
+			await this.cleanupTempDocs();
 			await this.indexLocalFiles();
 			await this.retryPending();
 			await this.resolveConflicts();
 			if (!this.aborted) this.onReady(); // reached a safe steady state -> clear crash guard
 		} catch (e) {
 			if (!this.aborted) this.fail("initial index", e);
+		}
+	}
+
+	/**
+	 * Remove stray streaming temp files ("*.cdbsync-tmp") that an earlier build
+	 * accidentally indexed into the database. They never belong in the DB.
+	 */
+	private async cleanupTempDocs(): Promise<void> {
+		try {
+			const junk = (await this.db.getAll()).filter(
+				(d) => d.path.endsWith(TMP_SUFFIX) && !d.deleted
+			);
+			for (const doc of junk) {
+				if (doc._rev) await this.db.removeRev(doc._id, doc._rev); // tombstone, replicates
+			}
+			if (junk.length) {
+				console.warn(`[couchdb-sync] removed ${junk.length} stray temp doc(s) from the database`);
+			}
+		} catch {
+			/* best-effort */
 		}
 	}
 
@@ -228,7 +251,7 @@ export class SyncEngine {
 	private async indexLocalFiles(): Promise<void> {
 		const todo = this.app.vault
 			.getFiles()
-			.filter((f) => !matchesIgnore(f.path, this.settings.ignorePatterns))
+			.filter((f) => !this.skip(f.path))
 			.filter((f) => !this.isUnchanged(f))
 			.sort((a, b) => a.stat.size - b.stat.size); // fewest chunks first
 
@@ -261,6 +284,11 @@ export class SyncEngine {
 		return !!rec && rec.mtime === file.stat.mtime && rec.size === file.stat.size;
 	}
 
+	/** Paths we never sync: ignore patterns, and our own streaming temp files. */
+	private skip(path: string): boolean {
+		return path.endsWith(TMP_SUFFIX) || matchesIgnore(path, this.settings.ignorePatterns);
+	}
+
 	// --- local -> db -------------------------------------------------------
 
 	private attachVaultEvents(): void {
@@ -281,7 +309,7 @@ export class SyncEngine {
 	}
 
 	private async handleLocalUpsert(file: TFile): Promise<void> {
-		if (matchesIgnore(file.path, this.settings.ignorePatterns)) return;
+		if (this.skip(file.path)) return;
 		if (this.suppress.has(file.path)) {
 			this.suppress.delete(file.path);
 			return;
@@ -295,7 +323,7 @@ export class SyncEngine {
 	}
 
 	private async handleLocalDelete(path: string): Promise<void> {
-		if (matchesIgnore(path, this.settings.ignorePatterns)) return;
+		if (this.skip(path)) return;
 		if (this.suppress.has(path)) {
 			this.suppress.delete(path);
 			return;
@@ -414,7 +442,7 @@ export class SyncEngine {
 
 	private async applyRemoteChange(doc: FileDoc): Promise<void> {
 		const path = doc.path || doc._id;
-		if (matchesIgnore(path, this.settings.ignorePatterns)) return;
+		if (this.skip(path)) return;
 
 		const existing = this.app.vault.getAbstractFileByPath(path);
 
@@ -483,7 +511,7 @@ export class SyncEngine {
 		const nodePath = require("path") as typeof import("path");
 		const full = adapter.getFullPath(path);
 		await fs.promises.mkdir(nodePath.dirname(full), { recursive: true });
-		const tmp = full + ".cdbsync-tmp";
+		const tmp = full + TMP_SUFFIX;
 		const fd = await fs.promises.open(tmp, "w");
 		try {
 			for (const id of children) {
@@ -641,7 +669,7 @@ export class SyncEngine {
 	async getIndexReport(): Promise<IndexReport> {
 		const vaultFiles = this.app.vault
 			.getFiles()
-			.filter((f) => !matchesIgnore(f.path, this.settings.ignorePatterns));
+			.filter((f) => !this.skip(f.path));
 		const vaultByPath = new Map(vaultFiles.map((f) => [f.path, f] as const));
 
 		const docs = (await this.db.getAll()).filter((d) => !d.deleted);
