@@ -36,7 +36,11 @@ import {
 const MASTER_INFO_ID = "couchdb-sync:masterinfo";
 const SYNC_STATE_DOC = "_local/couchdb-sync-state";
 
-type StatusFn = (state: SyncState, detail?: string) => void;
+type StatusFn = (
+	state: SyncState,
+	detail?: string,
+	progress?: { done: number; total: number }
+) => void;
 
 /** Snapshot comparing this device's files against the synced database. */
 export interface IndexReport {
@@ -238,7 +242,10 @@ export class SyncEngine {
 				this.fail(`indexing ${file.path}`, e); // one bad file must not abort the rest
 			}
 			done++;
-			this.setStatus(SYNC_STATE.SYNCING, `Indexing ${done}/${todo.length}…`);
+			this.setStatus(SYNC_STATE.SYNCING, `Indexing ${done}/${todo.length}…`, {
+				done,
+				total: todo.length,
+			});
 			await this.yieldToUi(); // keep the app responsive; let replication interleave
 		}
 	}

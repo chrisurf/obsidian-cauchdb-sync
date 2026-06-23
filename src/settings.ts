@@ -1,14 +1,30 @@
-import { App, PluginSettingTab, Setting, Notice } from "obsidian";
+import { App, PluginSettingTab, Setting, Notice, setIcon } from "obsidian";
 import type CouchDBSyncPlugin from "./main";
 import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
+import { SYNC_STATE, SyncStatus } from "./types";
+
+const AUTO_REFRESH_MS = 10_000;
 
 export class CouchDBSyncSettingTab extends PluginSettingTab {
 	plugin: CouchDBSyncPlugin;
+	private statusUnsub?: () => void;
+	private autoRefresh?: number;
+	private indexBox?: HTMLElement;
+	private liveStatusEl?: HTMLElement;
 
 	constructor(app: App, plugin: CouchDBSyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
+
+	hide(): void {
+		this.statusUnsub?.();
+		this.statusUnsub = undefined;
+		if (this.autoRefresh !== undefined) {
+			window.clearInterval(this.autoRefresh);
+			this.autoRefresh = undefined;
+		}
 	}
 
 	display(): void {
@@ -215,9 +231,56 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			.addButton((b) =>
 				b.setButtonText("Refresh").onClick(() => this.loadIndex(box))
 			);
+
+		// live status line (updates instantly from the engine)
+		this.liveStatusEl = root.createDiv({ cls: "couchdb-sync-livestatus" });
+		this.statusUnsub?.();
+		this.statusUnsub = this.plugin.onStatusChange((st) => this.renderLiveStatus(st));
+
 		const box = root.createDiv({ cls: "couchdb-sync-index" });
+		this.indexBox = box;
 		box.createEl("p", { text: "Loading…", cls: "setting-item-description" });
 		void this.loadIndex(box);
+
+		// auto-refresh the index report periodically so the counts/tree stay current
+		if (this.autoRefresh !== undefined) window.clearInterval(this.autoRefresh);
+		this.autoRefresh = window.setInterval(() => {
+			if (this.indexBox) void this.loadIndex(this.indexBox);
+		}, AUTO_REFRESH_MS);
+	}
+
+	private renderLiveStatus(st: SyncStatus): void {
+		const el = this.liveStatusEl;
+		if (!el) return;
+		el.empty();
+
+		const syncing = st.state === SYNC_STATE.SYNCING;
+		const row = el.createDiv({ cls: "couchdb-sync-livestatus-row" });
+		const icon = row.createSpan({ cls: "couchdb-sync-status-icon" });
+		setIcon(icon, syncing ? "refresh-cw" : st.state === SYNC_STATE.ERROR ? "alert-triangle" : "check");
+		icon.toggleClass("couchdb-sync-spin", syncing);
+
+		const labelMap: Record<string, string> = {
+			[SYNC_STATE.IDLE]: "Idle",
+			[SYNC_STATE.CONNECTING]: "Connecting…",
+			[SYNC_STATE.SYNCING]: "Syncing…",
+			[SYNC_STATE.SYNCED]: "In sync",
+			[SYNC_STATE.OFFLINE]: "Offline",
+			[SYNC_STATE.PAUSED]: "Paused",
+			[SYNC_STATE.ERROR]: "Error",
+		};
+		row.createSpan({ text: labelMap[st.state] ?? st.state, cls: "couchdb-sync-livestatus-label" });
+
+		if (syncing && st.total && st.total > 0) {
+			const pct = Math.round((st.done! / st.total) * 100);
+			row.createSpan({ text: ` ${pct}% (${st.done}/${st.total})`, cls: "setting-item-description" });
+			const bar = el.createEl("progress");
+			bar.max = st.total;
+			bar.value = st.done ?? 0;
+			bar.addClass("couchdb-sync-progress");
+		} else if (st.detail && st.state === SYNC_STATE.ERROR) {
+			el.createEl("p", { text: st.detail, cls: "couchdb-sync-warn" });
+		}
 	}
 
 	private async loadIndex(box: HTMLElement): Promise<void> {

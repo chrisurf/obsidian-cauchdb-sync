@@ -1,5 +1,5 @@
-import { Notice, Plugin } from "obsidian";
-import { CouchDBSyncSettings, DEFAULT_SETTINGS, SYNC_STATE, SyncState } from "./types";
+import { Notice, Plugin, setIcon } from "obsidian";
+import { CouchDBSyncSettings, DEFAULT_SETTINGS, SYNC_STATE, SyncState, SyncStatus } from "./types";
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
@@ -8,14 +8,15 @@ import { generateDeviceId } from "./util";
 // bumped to v2: file docs are now keyed "f:" + path; start from a clean local store
 const LOCAL_DB_NAME = "couchdb-sync-local-v2";
 
+// Lucide icon name per state for the status bar.
 const STATUS_ICON: Record<SyncState, string> = {
-	[SYNC_STATE.IDLE]: "⏸",
-	[SYNC_STATE.CONNECTING]: "🔌",
-	[SYNC_STATE.SYNCING]: "🔄",
-	[SYNC_STATE.SYNCED]: "✅",
-	[SYNC_STATE.OFFLINE]: "📴",
-	[SYNC_STATE.PAUSED]: "⏸",
-	[SYNC_STATE.ERROR]: "⚠️",
+	[SYNC_STATE.IDLE]: "pause",
+	[SYNC_STATE.CONNECTING]: "plug",
+	[SYNC_STATE.SYNCING]: "refresh-cw",
+	[SYNC_STATE.SYNCED]: "check",
+	[SYNC_STATE.OFFLINE]: "cloud-off",
+	[SYNC_STATE.PAUSED]: "pause",
+	[SYNC_STATE.ERROR]: "alert-triangle",
 };
 
 export default class CouchDBSyncPlugin extends Plugin {
@@ -23,13 +24,22 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private db: SyncDatabase | null = null;
 	private engine: SyncEngine | null = null;
 	private statusEl!: HTMLElement;
+	private statusIconEl!: HTMLElement;
+	private statusTextEl!: HTMLElement;
 	private restartLock: Promise<void> = Promise.resolve();
+
+	/** Latest status, shared with the settings view via listeners. */
+	status: SyncStatus = { state: SYNC_STATE.IDLE };
+	private statusListeners = new Set<(s: SyncStatus) => void>();
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
 		this.statusEl = this.addStatusBarItem();
-		this.statusEl.setText("CouchDB: idle");
+		this.statusEl.addClass("couchdb-sync-status");
+		this.statusIconEl = this.statusEl.createSpan({ cls: "couchdb-sync-status-icon" });
+		this.statusTextEl = this.statusEl.createSpan({ cls: "couchdb-sync-status-text" });
+		this.setStatus(SYNC_STATE.IDLE);
 
 		this.addSettingTab(new CouchDBSyncSettingTab(this.app, this));
 
@@ -93,12 +103,33 @@ export default class CouchDBSyncPlugin extends Plugin {
 		await this.saveSettings().catch(() => undefined);
 	}
 
-	private setStatus(state: SyncState, detail?: string): void {
-		this.statusEl.setText(`CouchDB ${STATUS_ICON[state]}`);
-		this.statusEl.setAttr("aria-label", detail ? `${state}: ${detail}` : `CouchDB sync: ${state}`);
-		if (state === SYNC_STATE.ERROR && detail) {
-			console.error("[couchdb-sync]", detail);
+	private setStatus(
+		state: SyncState,
+		detail?: string,
+		progress?: { done: number; total: number }
+	): void {
+		this.status = { state, detail, done: progress?.done, total: progress?.total };
+
+		// status bar: spinning icon while syncing, with a percentage when known
+		setIcon(this.statusIconEl, STATUS_ICON[state]);
+		this.statusIconEl.toggleClass("couchdb-sync-spin", state === SYNC_STATE.SYNCING);
+		let label = "CouchDB";
+		if (state === SYNC_STATE.SYNCING && progress && progress.total > 0) {
+			label = `CouchDB ${Math.round((progress.done / progress.total) * 100)}%`;
 		}
+		this.statusTextEl.setText(label);
+		this.statusEl.setAttr("aria-label", detail ? `${state}: ${detail}` : `CouchDB sync: ${state}`);
+
+		if (state === SYNC_STATE.ERROR && detail) console.error("[couchdb-sync]", detail);
+
+		for (const cb of this.statusListeners) cb(this.status);
+	}
+
+	/** Subscribe to status updates (used by the settings view). Returns an unsubscribe. */
+	onStatusChange(cb: (s: SyncStatus) => void): () => void {
+		this.statusListeners.add(cb);
+		cb(this.status);
+		return () => this.statusListeners.delete(cb);
 	}
 
 	/**

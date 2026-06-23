@@ -126,6 +126,15 @@ export const SYNC_STATE = {
 
 export type SyncState = (typeof SYNC_STATE)[keyof typeof SYNC_STATE];
 
+/** Current sync status, shared with the status bar and the settings view. */
+export interface SyncStatus {
+	state: SyncState;
+	detail?: string;
+	/** progress of the current indexing pass, when applicable */
+	done?: number;
+	total?: number;
+}
+
 /** Raw chunk size in bytes before base64/encryption. Keeps documents well-sized. */
 export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
 

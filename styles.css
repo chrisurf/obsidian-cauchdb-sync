@@ -54,3 +54,51 @@
 	padding-left: 0.2em;
 	color: var(--text-muted);
 }
+
+/* --- status indicator + progress --- */
+
+.couchdb-sync-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35em;
+}
+
+.couchdb-sync-status-icon {
+	display: inline-flex;
+	align-items: center;
+}
+
+.couchdb-sync-status-icon svg {
+	width: 0.9em;
+	height: 0.9em;
+}
+
+@keyframes couchdb-sync-rot {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}
+
+.couchdb-sync-spin svg {
+	animation: couchdb-sync-rot 1s linear infinite;
+}
+
+.couchdb-sync-livestatus {
+	margin: 0.25em 0 0.75em;
+}
+
+.couchdb-sync-livestatus-row {
+	display: flex;
+	align-items: center;
+	gap: 0.4em;
+	font-weight: 600;
+}
+
+.couchdb-sync-livestatus-label {
+	color: var(--text-normal);
+}
+
+.couchdb-sync-progress {
+	width: 100%;
+	margin-top: 0.4em;
+	height: 0.6em;
+}
