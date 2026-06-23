@@ -109,21 +109,24 @@ export class SyncEngine {
 		await this.loadSyncState();
 		if (this.aborted) return;
 		await this.publishMasterInfoIfNeeded();
-		this.attachVaultEvents();
 
-		// hidden files have no vault events -> poll for changes periodically
-		if (this.settings.syncHidden) {
-			this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
-		}
-
+		// The heavy initial work always runs in the BACKGROUND so start() returns
+		// immediately (otherwise the Reset/Restart button would appear to hang until
+		// the whole vault is re-indexed and uploaded).
 		if (this.settings.liveSync) {
-			// Start transfer immediately so already-indexed docs (and remote changes)
-			// flow right away, then index local files in the background, small first.
+			// continuous mode: watch the vault, poll hidden files, replicate live
+			this.attachVaultEvents();
+			if (this.settings.syncHidden) {
+				this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
+			}
 			this.startLiveSync();
 			void this.runInitialIndex();
 		} else {
-			await this.runInitialIndex();
-			await this.replicateOnce();
+			// "sync on command" mode: one-shot pass, then go idle. No watching/polling.
+			void (async () => {
+				await this.runInitialIndex();
+				if (!this.aborted) await this.replicateOnce();
+			})();
 		}
 	}
 
@@ -341,6 +344,43 @@ export class SyncEngine {
 			this.settle(SYNC_STATE.SYNCED);
 		} catch (e) {
 			this.fail("replicate", e);
+		}
+	}
+
+	/** Connect and pull the server state once, without uploading. For followers. */
+	async startDownloadOnly(): Promise<void> {
+		this.setStatus(SYNC_STATE.CONNECTING);
+		this.db.connectRemote();
+		await this.loadSyncState();
+		if (this.aborted) return;
+		// background, then idle: pure download — no vault events, no upload, no live
+		void (async () => {
+			await this.cleanupTempDocs();
+			await this.downloadOnce();
+			if (!this.aborted) {
+				this.onReady();
+				this.settle(SYNC_STATE.SYNCED);
+			}
+		})();
+	}
+
+	private async downloadOnce(): Promise<void> {
+		if (!this.db.remote) this.db.connectRemote();
+		this.markActivity();
+		const opts = { batch_size: 25, batches_limit: 2 };
+		try {
+			await new Promise<void>((resolve, reject) => {
+				const rep = this.db.local.replicate.from(this.db.remote!, opts);
+				rep.on("change", (info) => {
+					void this.applyPulledDocs((info.docs ?? []) as FileDoc[]);
+				});
+				rep.on("complete", () => resolve());
+				rep.on("error", (e) => reject(e));
+			});
+			await this.retryPending();
+			await this.resolveConflicts();
+		} catch (e) {
+			this.fail("download", e);
 		}
 	}
 

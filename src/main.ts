@@ -46,25 +46,21 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.addCommand({
 			id: "couchdb-sync-now",
 			name: "Sync now",
-			callback: async () => {
-				if (!this.engine) await this.restartSync();
-				else await this.engine.replicateOnce();
-			},
-		});
-
-		this.addCommand({
-			id: "couchdb-sync-restart",
-			name: "Restart sync",
 			callback: () => this.restartSync(),
 		});
 
 		this.addCommand({
-			id: "couchdb-sync-reset-local",
-			name: "Reset local database (re-download from server)",
+			id: "couchdb-sync-stop",
+			name: "Stop sync",
+			callback: () => this.stopSync(),
+		});
+
+		this.addCommand({
+			id: "couchdb-sync-wipe-local",
+			name: "Wipe local cache (does not download)",
 			callback: async () => {
-				new Notice("CouchDB Sync: resetting local database…");
-				await this.resetLocalDatabase();
-				new Notice("CouchDB Sync: local database reset; re-downloading.");
+				await this.wipeLocalOnly();
+				new Notice("CouchDB Sync: local cache wiped. Use 'Sync now' to re-download.");
 			},
 		});
 
@@ -141,11 +137,20 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.engine?.abort();
 		this.restartLock = this.restartLock
 			.catch(() => undefined)
-			.then(() => this.doRestart());
+			.then(() => this.doRestart("sync"));
 		return this.restartLock;
 	}
 
-	private async doRestart(): Promise<void> {
+	/** Pull the server's state into this device without uploading (follower mode). */
+	downloadFromServer(): Promise<void> {
+		this.engine?.abort();
+		this.restartLock = this.restartLock
+			.catch(() => undefined)
+			.then(() => this.doRestart("download"));
+		return this.restartLock;
+	}
+
+	private async doRestart(mode: "sync" | "download" = "sync"): Promise<void> {
 		this.engine?.stop();
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
@@ -179,7 +184,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.db = db;
 		this.engine = engine;
 		try {
-			await engine.start();
+			if (mode === "download") await engine.startDownloadOnly();
+			else await engine.start();
 		} catch (e) {
 			this.setStatus(SYNC_STATE.ERROR, String(e));
 			new Notice(`CouchDB Sync failed to start: ${e}`);
@@ -194,11 +200,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	/**
-	 * Wipe the LOCAL replica and re-download everything from the server. This only
-	 * affects this device's cache (the remote data is untouched), so it is a safe
-	 * recovery action. Serialized through the same lock as restartSync.
+	 * Wipe the LOCAL replica only (fast). Does NOT download — the user starts that
+	 * separately with "Sync now". The server data is untouched.
 	 */
-	resetLocalDatabase(): Promise<void> {
+	wipeLocalOnly(): Promise<void> {
 		this.engine?.abort();
 		this.restartLock = this.restartLock
 			.catch(() => undefined)
@@ -208,7 +213,22 @@ export default class CouchDBSyncPlugin extends Plugin {
 				await db.destroyLocal().catch(() => undefined);
 				this.engine = null;
 				this.db = null;
-				await this.doRestart();
+				this.setStatus(SYNC_STATE.IDLE, "local cache wiped — press Sync now to re-download");
+			});
+		return this.restartLock;
+	}
+
+	/** Stop syncing and go idle (used when Live sync is turned off). */
+	stopSync(): Promise<void> {
+		this.engine?.abort();
+		this.restartLock = this.restartLock
+			.catch(() => undefined)
+			.then(async () => {
+				this.engine?.stop();
+				await this.db?.close().catch(() => undefined);
+				this.engine = null;
+				this.db = null;
+				this.setStatus(SYNC_STATE.IDLE, "stopped");
 			});
 		return this.restartLock;
 	}

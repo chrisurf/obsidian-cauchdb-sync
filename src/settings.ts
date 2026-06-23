@@ -159,12 +159,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		containerEl.createEl("h2", { text: "Sync" });
 
 		new Setting(containerEl)
-			.setName("Start sync automatically")
-			.setDesc(
-				"Start synchronizing when Obsidian launches. Turn off if you want to control " +
-					"when sync runs (e.g. to safely wipe/reset first). Note: after a sync that " +
-					"did not finish cleanly, the plugin starts in safe mode and does not auto-start."
-			)
+			.setName("Start automatically on launch")
+			.setDesc("When Obsidian opens, begin syncing on its own. Off = stay idle until you press “Sync now”.")
 			.addToggle((t) =>
 				t.setValue(s.autoStart).onChange(async (v) => {
 					s.autoStart = v;
@@ -173,12 +169,14 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Live sync")
-			.setDesc("Continuously sync in real time. Turn off to sync only on command.")
+			.setName("Live sync (real-time)")
+			.setDesc("Keep changes flowing continuously in both directions. Off = sync only when you press “Sync now”. Takes effect immediately.")
 			.addToggle((t) =>
 				t.setValue(s.liveSync).onChange(async (v) => {
 					s.liveSync = v;
 					await this.plugin.saveSettings();
+					if (v) await this.plugin.restartSync(); // start live now
+					else await this.plugin.stopSync(); // stop continuous sync now
 				})
 			);
 
@@ -225,37 +223,54 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				})
 			);
 
+		containerEl.createEl("h2", { text: "Actions" });
+
 		new Setting(containerEl)
-			.setName("Apply & restart sync")
-			.setDesc("Restart synchronization with the current settings.")
+			.setName("Sync now")
+			.setDesc("Connect and synchronize both ways — upload your changes AND download others'. With Live sync on, this also (re)starts continuous sync.")
 			.addButton((b) =>
 				b
 					.setCta()
-					.setButtonText("Restart sync")
+					.setButtonText("Sync now")
 					.onClick(async () => {
+						new Notice("Syncing…");
 						await this.plugin.restartSync();
-						new Notice("Sync restarted.");
 					})
 			);
 
 		new Setting(containerEl)
-			.setName("Reset local database")
-			.setDesc(
-				"Wipe this device's local cache and re-download everything from the server. " +
-					"Safe: the server data is not touched. Use this if the local index is inconsistent."
-			)
+			.setName("Download from server")
+			.setDesc("Pull the server's state to this device WITHOUT uploading local changes. Useful on a follower device, or to force the master's state.")
+			.addButton((b) =>
+				b.setButtonText("Download only").onClick(async () => {
+					new Notice("Downloading from server…");
+					await this.plugin.downloadFromServer();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Stop sync")
+			.setDesc("Stop syncing and go idle. Nothing is uploaded or downloaded until you press Sync now again.")
+			.addButton((b) =>
+				b.setButtonText("Stop").onClick(async () => {
+					await this.plugin.stopSync();
+					new Notice("Sync stopped.");
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Wipe local cache")
+			.setDesc("Delete this device's local copy only — fast, and the server is NOT touched. Afterwards press “Sync now” or “Download only” to rebuild it.")
 			.addButton((b) =>
 				b
 					.setWarning()
-					.setButtonText("Reset & re-download")
+					.setButtonText("Wipe local cache")
 					.onClick(async () => {
-						new Notice("Resetting local database…");
-						await this.plugin.resetLocalDatabase();
-						new Notice("Local database reset; re-downloading from server.");
+						await this.plugin.wipeLocalOnly();
+						new Notice("Local cache wiped. Press “Sync now” or “Download only” to rebuild.");
 						this.display();
 					})
 			);
-
 
 		containerEl.createEl("p", {
 			text: `Device ID: ${s.deviceId || "(not yet assigned)"}`,
