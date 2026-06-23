@@ -2,7 +2,7 @@ import { App, PluginSettingTab, Setting, Notice, setIcon } from "obsidian";
 import type CouchDBSyncPlugin from "./main";
 import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
-import { SYNC_STATE, SyncStatus } from "./types";
+import { DEFAULT_SETTINGS, SYNC_STATE, SyncStatus } from "./types";
 
 const AUTO_REFRESH_MS = 3_000;
 
@@ -199,18 +199,38 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			new Setting(containerEl)
 				.setName("…except these")
 				.setDesc("One path per line. These hidden files/folders are NOT synced. Everything else hidden is.")
+				.addExtraButton((b) =>
+					b
+						.setIcon("rotate-ccw")
+						.setTooltip("Reset to defaults")
+						.onClick(async () => {
+							s.hiddenExclude = [...DEFAULT_SETTINGS.hiddenExclude];
+							await this.plugin.saveSettings();
+							this.display();
+						})
+				)
 				.addTextArea((t) => {
 					t.setValue(s.hiddenExclude.join("\n")).onChange(async (v) => {
 						s.hiddenExclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
 						await this.plugin.saveSettings();
 					});
-					t.inputEl.rows = 7;
+					t.inputEl.rows = 8;
 				});
 		} else {
 			// OFF: whitelist — nothing hidden syncs except these
 			new Setting(containerEl)
 				.setName("…but still sync these")
 				.setDesc("One path per line. Hidden files are skipped — list any you DO want synced (e.g. .obsidian/snippets/). Leave empty to skip all hidden files.")
+				.addExtraButton((b) =>
+					b
+						.setIcon("rotate-ccw")
+						.setTooltip("Reset to defaults")
+						.onClick(async () => {
+							s.hiddenInclude = [...DEFAULT_SETTINGS.hiddenInclude];
+							await this.plugin.saveSettings();
+							this.display();
+						})
+				)
 				.addTextArea((t) => {
 					t.setValue(s.hiddenInclude.join("\n")).onChange(async (v) => {
 						s.hiddenInclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
