@@ -56,6 +56,47 @@ export function generateDeviceId(): string {
 	return Array.from(rnd, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+export function textToBytes(s: string): Uint8Array {
+	return textEncoder.encode(s);
+}
+
+export function bytesToText(b: Uint8Array): string {
+	return textDecoder.decode(b);
+}
+
+/** SHA-256 of the given bytes as a lowercase hex string. */
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
+	const arr = new Uint8Array(digest);
+	let hex = "";
+	for (let i = 0; i < arr.length; i++) hex += arr[i].toString(16).padStart(2, "0");
+	return hex;
+}
+
+/** Split a byte array into fixed-size pieces. An empty input yields no pieces. */
+export function splitBytes(bytes: Uint8Array, size: number): Uint8Array[] {
+	const out: Uint8Array[] = [];
+	for (let i = 0; i < bytes.length; i += size) {
+		out.push(bytes.subarray(i, i + size));
+	}
+	return out;
+}
+
+export function concatBytes(parts: Uint8Array[]): Uint8Array {
+	let len = 0;
+	for (const p of parts) len += p.length;
+	const out = new Uint8Array(len);
+	let offset = 0;
+	for (const p of parts) {
+		out.set(p, offset);
+		offset += p.length;
+	}
+	return out;
+}
+
 /** Treat these extensions as binary. Everything else is read as UTF-8 text. */
 const BINARY_EXTENSIONS = new Set([
 	"png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "ico",

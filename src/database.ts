@@ -1,6 +1,6 @@
 import { requestUrl, RequestUrlParam } from "obsidian";
 import PouchDB from "pouchdb-browser";
-import { CouchDBSyncSettings, FileDoc } from "./types";
+import { ChunkDoc, CouchDBSyncSettings, FileDoc } from "./types";
 
 /**
  * A fetch() implementation backed by Obsidian's requestUrl(). This bypasses the
@@ -109,13 +109,15 @@ export class SyncDatabase {
 		await this.local.put(doc);
 	}
 
-	/** Documents that currently have unresolved conflict revisions. */
+	/** File documents that currently have unresolved conflict revisions. */
 	async getConflicted(): Promise<FileDoc[]> {
 		const res = await this.local.allDocs({ include_docs: true, conflicts: true });
 		const out: FileDoc[] = [];
 		for (const row of res.rows) {
 			const d = row.doc as FileDoc | undefined;
-			if (d && Array.isArray(d._conflicts) && d._conflicts.length > 0) out.push(d);
+			if (d && d.type === "file" && Array.isArray(d._conflicts) && d._conflicts.length > 0) {
+				out.push(d);
+			}
 		}
 		return out;
 	}
@@ -126,6 +128,69 @@ export class SyncDatabase {
 
 	async removeRev(id: string, rev: string): Promise<void> {
 		await this.local.remove(id, rev);
+	}
+
+	// --- chunk storage -----------------------------------------------------
+
+	/** Store a chunk only if it does not already exist (chunks are immutable). */
+	async putChunkIfAbsent(doc: ChunkDoc): Promise<void> {
+		const db = this.local as unknown as PouchDB.Database<ChunkDoc>;
+		try {
+			await db.get(doc._id);
+			return; // already present
+		} catch (e) {
+			if ((e as { status?: number }).status !== 404) throw e;
+		}
+		try {
+			await db.put(doc);
+		} catch (e) {
+			if ((e as { status?: number }).status !== 409) throw e; // created concurrently
+		}
+	}
+
+	/** Fetch chunks by id from the local DB; returns a map of those found. */
+	async getChunksLocal(ids: string[]): Promise<Map<string, ChunkDoc>> {
+		return this.getChunksFrom(this.local as unknown as PouchDB.Database<ChunkDoc>, ids);
+	}
+
+	/** Fetch chunks by id directly from the remote DB (ordering safety net). */
+	async getChunksRemote(ids: string[]): Promise<Map<string, ChunkDoc>> {
+		if (!this.remote) return new Map();
+		return this.getChunksFrom(this.remote as unknown as PouchDB.Database<ChunkDoc>, ids);
+	}
+
+	private async getChunksFrom(
+		db: PouchDB.Database<ChunkDoc>,
+		ids: string[]
+	): Promise<Map<string, ChunkDoc>> {
+		const out = new Map<string, ChunkDoc>();
+		if (ids.length === 0) return out;
+		const res = await db.allDocs({ keys: ids, include_docs: true });
+		for (const row of res.rows) {
+			const doc = (row as { doc?: ChunkDoc }).doc;
+			if (doc && doc.type === "chunk") out.set(doc._id, doc);
+		}
+		return out;
+	}
+
+	// --- per-device local state (not replicated) ---------------------------
+
+	async getLocalDoc<T>(id: string): Promise<T | null> {
+		try {
+			return (await this.local.get(id)) as unknown as T;
+		} catch (e) {
+			if ((e as { status?: number }).status === 404) return null;
+			throw e;
+		}
+	}
+
+	async putLocalDoc(id: string, value: Record<string, unknown>): Promise<void> {
+		const existing = (await this.getLocalDoc<{ _rev?: string }>(id)) ?? {};
+		await (this.local as unknown as PouchDB.Database).put({
+			...value,
+			_id: id,
+			_rev: existing._rev,
+		});
 	}
 
 	async close(): Promise<void> {

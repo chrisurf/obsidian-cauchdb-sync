@@ -1,24 +1,30 @@
 import { App, EventRef, TFile, TFolder, normalizePath, debounce } from "obsidian";
 import { SyncDatabase } from "./database";
 import { decryptString, encryptString } from "./crypto";
-import { CouchDBSyncSettings, FileDoc, SYNC_STATE, SyncState } from "./types";
 import {
-	arrayBufferToBase64,
-	base64ToArrayBuffer,
+	ChunkDoc,
+	CHUNK_SIZE,
+	CouchDBSyncSettings,
+	FileDoc,
+	SYNC_STATE,
+	SyncRecord,
+	SyncState,
+} from "./types";
+import {
+	base64ToUint8,
+	bytesToText,
+	concatBytes,
 	cyrb53,
 	isBinaryPath,
 	matchesIgnore,
+	sha256Hex,
+	splitBytes,
+	textToBytes,
+	uint8ToBase64,
 } from "./util";
 
 const MASTER_INFO_ID = "couchdb-sync:masterinfo";
-
-/**
- * Until content chunking lands (Phase 4), file content is stored inline in one
- * document. Very large files would (a) blow past CouchDB's document-size limit and
- * (b) build a base64 string big enough to throw `RangeError: Invalid string length`.
- * We therefore skip files above this size for now, loudly but without crashing.
- */
-const MAX_INLINE_BYTES = 30 * 1024 * 1024; // 30 MB
+const SYNC_STATE_DOC = "_local/couchdb-sync-state";
 
 type StatusFn = (state: SyncState, detail?: string) => void;
 
@@ -42,12 +48,17 @@ export class SyncEngine {
 	private syncHandler: PouchDB.Replication.Sync<FileDoc> | null = null;
 	private eventRefs: EventRef[] = [];
 
-	/** path -> hash of last content we read-from or wrote-to the vault (echo guard) */
+	/** path -> content fingerprint of the last value we synced (echo guard) */
 	private lastHash = new Map<string, string>();
 	/** paths we are about to write ourselves; their next vault event is ignored */
 	private suppress = new Set<string>();
+	/** per-device record of each file's last-synced mtime/size/hash */
+	private syncState = new Map<string, SyncRecord>();
+	/** file docs we could not apply yet because some chunks were missing */
+	private pending = new Map<string, FileDoc>();
 
 	private resolveSoon = debounce(() => void this.resolveConflicts(), 800, false);
+	private saveStateSoon = debounce(() => void this.persistSyncState(), 1500, false);
 
 	constructor(app: App, db: SyncDatabase, settings: CouchDBSyncSettings, setStatus: StatusFn) {
 		this.app = app;
@@ -62,6 +73,7 @@ export class SyncEngine {
 		this.setStatus(SYNC_STATE.CONNECTING);
 		this.db.connectRemote();
 
+		await this.loadSyncState();
 		await this.publishMasterInfoIfNeeded();
 		await this.reconcile();
 		this.attachVaultEvents();
@@ -132,7 +144,22 @@ export class SyncEngine {
 			if (!doc || doc.type !== "file") continue;
 			await this.applyRemoteChange(doc);
 		}
+		await this.retryPending();
 		this.resolveSoon();
+	}
+
+	/** Re-attempt file docs that were waiting for chunks to arrive. */
+	private async retryPending(): Promise<void> {
+		if (this.pending.size === 0) return;
+		const todo = [...this.pending.values()];
+		this.pending.clear();
+		for (const doc of todo) {
+			try {
+				await this.applyRemoteChange(doc);
+			} catch (e) {
+				this.fail(`applying ${doc._id}`, e);
+			}
+		}
 	}
 
 	// --- initial reconcile -------------------------------------------------
@@ -149,16 +176,14 @@ export class SyncEngine {
 		// 1) files present locally -> ensure they are in the DB
 		for (const file of localFiles) {
 			try {
+				if (this.isUnchanged(file)) continue; // matches our last-synced record
 				const doc = docByPath.get(file.path);
-				if (!doc) {
+				if (doc && !doc.deleted && (await this.hashLocal(file)) === doc.hash) {
+					// identical content already in the DB — just adopt it, no upload/conflict
+					this.recordSynced(file.path, file.stat.mtime, file.stat.size, doc.hash);
+					this.lastHash.set(file.path, doc.hash);
+				} else {
 					await this.pushFile(file);
-				} else if (!doc.deleted) {
-					const raw = await this.readLocal(file);
-					if (cyrb53(raw) !== (await this.docContentHash(doc))) {
-						await this.pushFile(file); // local differs; conflict pass will settle ties
-					} else {
-						this.lastHash.set(file.path, cyrb53(raw));
-					}
 				}
 			} catch (e) {
 				this.fail(`indexing ${file.path}`, e); // one bad file must not abort startup
@@ -175,7 +200,14 @@ export class SyncEngine {
 			}
 		}
 
+		await this.retryPending();
 		await this.resolveConflicts();
+	}
+
+	/** Cheap "did this file change since we last synced it here?" check. */
+	private isUnchanged(file: TFile): boolean {
+		const rec = this.syncState.get(file.path);
+		return !!rec && rec.mtime === file.stat.mtime && rec.size === file.stat.size;
 	}
 
 	// --- local -> db -------------------------------------------------------
@@ -203,7 +235,12 @@ export class SyncEngine {
 			this.suppress.delete(file.path);
 			return;
 		}
-		await this.pushFile(file);
+		if (this.isUnchanged(file)) return;
+		try {
+			await this.pushFile(file);
+		} catch (e) {
+			this.fail(`pushing ${file.path}`, e);
+		}
 	}
 
 	private async handleLocalDelete(path: string): Promise<void> {
@@ -216,36 +253,33 @@ export class SyncEngine {
 		if (!doc || doc.deleted) return;
 		doc.deleted = true;
 		doc._deleted = false; // keep a tombstone document (logical delete)
-		doc.data = "";
+		doc.children = [];
+		doc.hash = "";
 		doc.size = 0;
 		doc.mtime = Date.now();
 		doc.deviceId = this.settings.deviceId;
 		await this.db.put(doc);
 		this.lastHash.delete(path);
+		this.syncState.delete(path);
+		this.saveStateSoon();
 	}
 
 	private async pushFile(file: TFile): Promise<void> {
-		if (file.stat.size > MAX_INLINE_BYTES) {
-			console.warn(`[couchdb-sync] skipping large file (chunking not yet implemented): ${file.path} (${file.stat.size} bytes)`);
-			this.setStatus(SYNC_STATE.SYNCED, `Skipped large file: ${file.path}`);
+		if (this.settings.e2eeEnabled && !this.settings.passphrase) {
+			this.setStatus(SYNC_STATE.ERROR, "Encryption is on but no passphrase is set.");
 			return;
 		}
-		const raw = await this.readLocal(file);
-		const hash = cyrb53(raw);
-		if (this.lastHash.get(file.path) === hash) return; // unchanged / our own echo
-		this.lastHash.set(file.path, hash);
 
-		const binary = isBinaryPath(file.path);
-		let data = raw;
-		let enc = false;
-		if (this.settings.e2eeEnabled) {
-			if (!this.settings.passphrase) {
-				this.setStatus(SYNC_STATE.ERROR, "Encryption is on but no passphrase is set.");
-				return;
-			}
-			data = await encryptString(raw, this.settings.passphrase);
-			enc = true;
+		const bytes = await this.readBytes(file);
+		const { children, chunks } = await this.buildChunks(bytes);
+		const hash = cyrb53(children.join("|"));
+		if (this.lastHash.get(file.path) === hash) {
+			this.recordSynced(file.path, file.stat.mtime, file.stat.size, hash);
+			return; // content unchanged / our own echo
 		}
+
+		// store any not-yet-existing chunks first, so the file doc never dangles
+		for (const chunk of chunks) await this.db.putChunkIfAbsent(chunk);
 
 		const existing = await this.db.get(file.path);
 		const doc: FileDoc = {
@@ -258,18 +292,55 @@ export class SyncEngine {
 			size: file.stat.size,
 			deleted: false,
 			deviceId: this.settings.deviceId,
-			binary,
-			enc,
-			data,
+			binary: isBinaryPath(file.path),
+			enc: this.settings.e2eeEnabled,
+			children,
+			hash,
 		};
 		await this.db.put(doc);
+		this.lastHash.set(file.path, hash);
+		this.recordSynced(file.path, file.stat.mtime, file.stat.size, hash);
 	}
 
-	private async readLocal(file: TFile): Promise<string> {
+	private async readBytes(file: TFile): Promise<Uint8Array> {
 		if (isBinaryPath(file.path)) {
-			return arrayBufferToBase64(await this.app.vault.readBinary(file));
+			return new Uint8Array(await this.app.vault.readBinary(file));
 		}
-		return this.app.vault.read(file);
+		return textToBytes(await this.app.vault.read(file));
+	}
+
+	/** Split bytes into content-addressed, optionally encrypted chunk documents. */
+	private async buildChunks(
+		bytes: Uint8Array
+	): Promise<{ children: string[]; chunks: ChunkDoc[] }> {
+		const enc = this.settings.e2eeEnabled;
+		const pass = this.settings.passphrase;
+		const children: string[] = [];
+		const chunks: ChunkDoc[] = [];
+		for (const piece of splitBytes(bytes, CHUNK_SIZE)) {
+			const b64 = uint8ToBase64(piece);
+			const id = "h:" + (await sha256Hex(textToBytes((enc ? pass : "") + ":" + b64)));
+			children.push(id);
+			chunks.push({
+				_id: id,
+				type: "chunk",
+				enc,
+				data: enc ? await encryptString(b64, pass) : b64,
+			});
+		}
+		return { children, chunks };
+	}
+
+	/** Content fingerprint of a local file (chunk ids only, no encryption work). */
+	private async hashLocal(file: TFile): Promise<string> {
+		const enc = this.settings.e2eeEnabled;
+		const pass = this.settings.passphrase;
+		const ids: string[] = [];
+		for (const piece of splitBytes(await this.readBytes(file), CHUNK_SIZE)) {
+			const b64 = uint8ToBase64(piece);
+			ids.push("h:" + (await sha256Hex(textToBytes((enc ? pass : "") + ":" + b64))));
+		}
+		return cyrb53(ids.join("|"));
 	}
 
 	// --- db -> local -------------------------------------------------------
@@ -283,42 +354,71 @@ export class SyncEngine {
 		if (doc.deleted) {
 			if (existing instanceof TFile) {
 				this.suppress.add(path);
-				this.lastHash.delete(path);
 				await this.app.fileManager.trashFile(existing);
 			}
+			this.lastHash.delete(path);
+			this.syncState.delete(path);
+			this.saveStateSoon();
 			return;
 		}
 
-		let raw: string;
+		// nothing to do if we already hold this exact version
+		if (this.lastHash.get(path) === doc.hash) return;
+
+		let bytes: Uint8Array;
 		try {
-			raw = doc.enc ? await decryptString(doc.data, this.settings.passphrase) : doc.data;
+			bytes = await this.reassemble(doc);
 		} catch (e) {
-			this.setStatus(SYNC_STATE.ERROR, (e as Error).message);
+			// chunks not here yet -> wait for them to replicate, then retry
+			this.pending.set(doc._id, doc);
+			console.warn(`[couchdb-sync] deferring ${path}: ${(e as Error).message}`);
 			return;
 		}
-		const hash = cyrb53(raw);
 
-		// skip if local already has identical content
-		if (existing instanceof TFile) {
-			const current = await this.readLocal(existing);
-			if (cyrb53(current) === hash) {
-				this.lastHash.set(path, hash);
-				return;
-			}
-		}
-
-		this.lastHash.set(path, hash);
+		this.lastHash.set(path, doc.hash);
 		this.suppress.add(path);
 		await this.ensureFolder(path);
 
 		if (doc.binary) {
-			const buf = base64ToArrayBuffer(raw);
+			const buf = new ArrayBuffer(bytes.byteLength);
+			new Uint8Array(buf).set(bytes);
 			if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, buf);
 			else await this.app.vault.createBinary(path, buf);
 		} else {
-			if (existing instanceof TFile) await this.app.vault.modify(existing, raw);
-			else await this.app.vault.create(path, raw);
+			const text = bytesToText(bytes);
+			if (existing instanceof TFile) await this.app.vault.modify(existing, text);
+			else await this.app.vault.create(path, text);
 		}
+
+		const written = this.app.vault.getAbstractFileByPath(path);
+		if (written instanceof TFile) {
+			this.recordSynced(path, written.stat.mtime, written.stat.size, doc.hash);
+		}
+		this.pending.delete(doc._id);
+	}
+
+	/** Rebuild file bytes from chunk docs; pulls missing chunks from remote. */
+	private async reassemble(doc: FileDoc): Promise<Uint8Array> {
+		if (doc.children.length === 0) return new Uint8Array(0);
+
+		let map = await this.db.getChunksLocal(doc.children);
+		const missing = doc.children.filter((id) => !map.has(id));
+		if (missing.length > 0) {
+			const remote = await this.db.getChunksRemote(missing);
+			for (const [id, chunk] of remote) {
+				await this.db.putChunkIfAbsent(chunk); // cache locally
+				map.set(id, chunk);
+			}
+		}
+
+		const parts: Uint8Array[] = [];
+		for (const id of doc.children) {
+			const chunk = map.get(id);
+			if (!chunk) throw new Error(`missing chunk ${id}`);
+			const b64 = chunk.enc ? await decryptString(chunk.data, this.settings.passphrase) : chunk.data;
+			parts.push(base64ToUint8(b64));
+		}
+		return concatBytes(parts);
 	}
 
 	private async ensureFolder(filePath: string): Promise<void> {
@@ -363,6 +463,7 @@ export class SyncEngine {
 			for (const r of revs) {
 				if (r !== doc._rev) await this.db.removeRev(doc._id, r);
 			}
+			this.lastHash.delete(doc._id);
 			await this.applyRemoteChange({ ...winner, _rev: undefined });
 		}
 		this.setStatus(SYNC_STATE.SYNCED, `Resolved ${conflicted.length} conflict(s).`);
@@ -373,13 +474,7 @@ export class SyncEngine {
 	private async publishMasterInfoIfNeeded(): Promise<void> {
 		if (!this.settings.isMaster) return;
 		try {
-			const existing = (await this.db.local
-				.get(MASTER_INFO_ID)
-				.catch(() => null)) as { _rev?: string } | null;
-			// control document (not a FileDoc) — written via the untyped handle
-			await (this.db.local as unknown as PouchDB.Database).put({
-				_id: MASTER_INFO_ID,
-				_rev: existing?._rev,
+			await this.db.putLocalDoc(MASTER_INFO_ID, {
 				type: "masterinfo",
 				masterId: this.settings.deviceId,
 			});
@@ -399,12 +494,35 @@ export class SyncEngine {
 		}
 	}
 
+	// --- per-device sync state --------------------------------------------
+
+	private recordSynced(path: string, mtime: number, size: number, hash: string): void {
+		this.syncState.set(path, { mtime, size, hash });
+		this.saveStateSoon();
+	}
+
+	private async loadSyncState(): Promise<void> {
+		const doc = await this.db
+			.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_DOC)
+			.catch(() => null);
+		this.syncState = new Map(Object.entries(doc?.records ?? {}));
+	}
+
+	private async persistSyncState(): Promise<void> {
+		try {
+			await this.db.putLocalDoc(SYNC_STATE_DOC, {
+				records: Object.fromEntries(this.syncState),
+			});
+		} catch (e) {
+			console.warn("[couchdb-sync] could not persist sync state", e);
+		}
+	}
+
 	// --- index status (for the settings view) ------------------------------
 
 	/**
-	 * Compare this device's files against the synced database. Cheap fields first
-	 * (counts, set membership); content hashing only for files present on both
-	 * sides and small enough to compare quickly.
+	 * Compare this device's files against the synced database using the cheap
+	 * per-device sync record (no re-hashing of large files needed).
 	 */
 	async getIndexReport(): Promise<IndexReport> {
 		const vaultFiles = this.app.vault
@@ -426,15 +544,10 @@ export class SyncEngine {
 				localOnly.push(f.path);
 				continue;
 			}
-			let same = true;
-			if (f.stat.size <= MAX_INLINE_BYTES) {
-				try {
-					same = cyrb53(await this.readLocal(f)) === (await this.docContentHash(doc));
-				} catch {
-					same = false;
-				}
-			}
-			(same ? inSync : drift).push(f.path);
+			const rec = this.syncState.get(f.path);
+			const changedLocally = !rec || rec.mtime !== f.stat.mtime || rec.size !== f.stat.size;
+			const dbDiffers = !rec || rec.hash !== doc.hash;
+			(changedLocally || dbDiffers ? drift : inSync).push(f.path);
 		}
 
 		for (const d of docs) {
@@ -451,16 +564,5 @@ export class SyncEngine {
 			drift: sort(drift),
 			allDbPaths: sort(docs.map((d) => d._id)),
 		};
-	}
-
-	private async docContentHash(doc: FileDoc): Promise<string> {
-		try {
-			const raw = doc.enc
-				? await decryptString(doc.data, this.settings.passphrase)
-				: doc.data;
-			return cyrb53(raw);
-		} catch {
-			return "\u0000decrypt-error";
-		}
 	}
 }

@@ -19,9 +19,13 @@ This plugin does **one** thing well: live note sync over **one** CouchDB.
 ## Features (MVP)
 
 - 🔄 **Live two-way sync** via PouchDB ↔ CouchDB continuous replication.
+- 🧩 **Chunked storage** — files of any size (images, PDFs, audio, video) are split into 1 MiB
+  content-addressed chunks, so large files sync reliably and unchanged chunks are reused.
 - 🔐 **End-to-end encryption on by default** — AES-256-GCM (at rest), TLS (in transit). Only the
   passphrase must match across devices; it never touches the server.
 - ⚖️ **No-prompt conflict resolution**: *newest version wins* or *master device wins*.
+- 📊 **Index status view** — see at a glance whether this device and the database match (green),
+  inspect drift, and browse the indexed file tree.
 - 🧭 **~5 settings**, sensible defaults, no per-device tuning.
 - 📵 **CORS-free** networking via Obsidian's `requestUrl` (works on mobile).
 

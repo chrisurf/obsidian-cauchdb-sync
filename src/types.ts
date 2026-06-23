@@ -43,8 +43,10 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 };
 
 /**
- * One CouchDB document per vault file. For the MVP the content is stored
- * inline (chunking comes in a later phase). `_id` is the vault-relative path.
+ * One CouchDB document per vault file. The content itself lives in separate,
+ * content-addressed chunk documents; this doc only holds metadata and the ordered
+ * list of chunk ids. That keeps every document small (no matter how big the file)
+ * and lets unchanged chunks be reused. `_id` is the vault-relative path.
  */
 export interface FileDoc {
 	_id: string;
@@ -64,14 +66,39 @@ export interface FileDoc {
 	/** originating device — used by the "master wins" strategy */
 	deviceId: string;
 
-	/** true when `data` is base64-encoded binary content */
+	/** true when the file is binary (chunks are base64 of raw bytes) */
 	binary: boolean;
 
-	/** true when `data` is encrypted (see crypto.ts payload format) */
+	/** true when chunk payloads are encrypted */
 	enc: boolean;
 
-	/** file content: utf-8 text or base64 (binary), encrypted when enc=true */
+	/** ordered list of chunk document ids; empty for an empty file */
+	children: string[];
+
+	/** cheap fingerprint of the content (hash of the ordered children) */
+	hash: string;
+}
+
+/**
+ * A content-addressed chunk. `_id` is "h:" + a hash of the chunk, so identical
+ * content always maps to the same document and is stored once. Chunks are
+ * immutable (never updated), which means they never produce sync conflicts.
+ */
+export interface ChunkDoc {
+	_id: string;
+	_rev?: string;
+	type: "chunk";
+	/** true when `data` is encrypted */
+	enc: boolean;
+	/** base64 of the raw chunk bytes, encrypted when enc=true */
 	data: string;
+}
+
+/** Per-device record of the last successfully synced state of a file (not replicated). */
+export interface SyncRecord {
+	mtime: number;
+	size: number;
+	hash: string;
 }
 
 export const SYNC_STATE = {
@@ -85,3 +112,6 @@ export const SYNC_STATE = {
 } as const;
 
 export type SyncState = (typeof SYNC_STATE)[keyof typeof SYNC_STATE];
+
+/** Raw chunk size in bytes before base64/encryption. Keeps documents well-sized. */
+export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
