@@ -54,9 +54,12 @@ export interface IndexReport {
 function isSkipped(path: string, app: App, settings: CouchDBSyncSettings): boolean {
 	if (path.endsWith(TMP_SUFFIX)) return true;
 	if (path === `${app.vault.configDir}/plugins/couchdb-sync/data.json`) return true;
-	if (matchesIgnore(path, settings.excludePatterns)) return true; // applies to all files
-	if (isHidden(path) && !settings.syncHidden) return true; // hidden only when enabled
-	return false;
+	if (isHidden(path)) {
+		return settings.syncHidden
+			? matchesIgnore(path, settings.hiddenExclude) // ON: skip blacklisted
+			: !matchesIgnore(path, settings.hiddenInclude); // OFF: skip unless whitelisted
+	}
+	return false; // normal files are always synced
 }
 
 /** Recursively list hidden files (dotfiles and files under dot-folders). */

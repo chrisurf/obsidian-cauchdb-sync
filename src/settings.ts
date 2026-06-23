@@ -190,22 +190,35 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				t.setValue(s.syncHidden).onChange(async (v) => {
 					s.syncHidden = v;
 					await this.plugin.saveSettings();
+					this.display(); // swap between the exclude / include field
 				})
 			);
 
-		new Setting(containerEl)
-			.setName("Exclude patterns")
-			.setDesc(
-				"One path per line. Never synced — applies to normal AND hidden files " +
-					"(e.g. node_modules/, .git/, .claude/)."
-			)
-			.addTextArea((t) => {
-				t.setValue(s.excludePatterns.join("\n")).onChange(async (v) => {
-					s.excludePatterns = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
-					await this.plugin.saveSettings();
+		if (s.syncHidden) {
+			// ON: blacklist — everything hidden syncs except these
+			new Setting(containerEl)
+				.setName("…except these")
+				.setDesc("One path per line. These hidden files/folders are NOT synced. Everything else hidden is.")
+				.addTextArea((t) => {
+					t.setValue(s.hiddenExclude.join("\n")).onChange(async (v) => {
+						s.hiddenExclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
+						await this.plugin.saveSettings();
+					});
+					t.inputEl.rows = 7;
 				});
-				t.inputEl.rows = 7;
-			});
+		} else {
+			// OFF: whitelist — nothing hidden syncs except these
+			new Setting(containerEl)
+				.setName("…but still sync these")
+				.setDesc("One path per line. Hidden files are skipped — list any you DO want synced (e.g. .obsidian/snippets/). Leave empty to skip all hidden files.")
+				.addTextArea((t) => {
+					t.setValue(s.hiddenInclude.join("\n")).onChange(async (v) => {
+						s.hiddenInclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
+						await this.plugin.saveSettings();
+					});
+					t.inputEl.rows = 4;
+				});
+		}
 
 		containerEl.createEl("h2", { text: "Actions" });
 
