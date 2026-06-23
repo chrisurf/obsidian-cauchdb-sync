@@ -167,6 +167,24 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl)
+			.setName("Reset local database")
+			.setDesc(
+				"Wipe this device's local cache and re-download everything from the server. " +
+					"Safe: the server data is not touched. Use this if the local index is inconsistent."
+			)
+			.addButton((b) =>
+				b
+					.setWarning()
+					.setButtonText("Reset & re-download")
+					.onClick(async () => {
+						new Notice("Resetting local database…");
+						await this.plugin.resetLocalDatabase();
+						new Notice("Local database reset; re-downloading from server.");
+						this.display();
+					})
+			);
+
 		containerEl.createEl("p", {
 			text: `Device ID: ${s.deviceId || "(not yet assigned)"}`,
 			cls: "setting-item-description",

@@ -148,29 +148,30 @@ export class SyncDatabase {
 		}
 	}
 
-	/** Fetch chunks by id from the local DB; returns a map of those found. */
-	async getChunksLocal(ids: string[]): Promise<Map<string, ChunkDoc>> {
-		return this.getChunksFrom(this.local as unknown as PouchDB.Database<ChunkDoc>, ids);
-	}
-
-	/** Fetch chunks by id directly from the remote DB (ordering safety net). */
-	async getChunksRemote(ids: string[]): Promise<Map<string, ChunkDoc>> {
-		if (!this.remote) return new Map();
-		return this.getChunksFrom(this.remote as unknown as PouchDB.Database<ChunkDoc>, ids);
-	}
-
-	private async getChunksFrom(
-		db: PouchDB.Database<ChunkDoc>,
-		ids: string[]
-	): Promise<Map<string, ChunkDoc>> {
-		const out = new Map<string, ChunkDoc>();
-		if (ids.length === 0) return out;
-		const res = await db.allDocs({ keys: ids, include_docs: true });
-		for (const row of res.rows) {
-			const doc = (row as { doc?: ChunkDoc }).doc;
-			if (doc && doc.type === "chunk") out.set(doc._id, doc);
+	/** Fetch a single chunk from the local DB (or null). Keeps memory bounded. */
+	async getChunkLocal(id: string): Promise<ChunkDoc | null> {
+		try {
+			return (await this.local.get(id)) as unknown as ChunkDoc;
+		} catch (e) {
+			if ((e as { status?: number }).status === 404) return null;
+			throw e;
 		}
-		return out;
+	}
+
+	/** Fetch a single chunk directly from the remote DB (or null). */
+	async getChunkRemote(id: string): Promise<ChunkDoc | null> {
+		if (!this.remote) return null;
+		try {
+			return (await this.remote.get(id)) as unknown as ChunkDoc;
+		} catch (e) {
+			if ((e as { status?: number }).status === 404) return null;
+			throw e;
+		}
+	}
+
+	/** Permanently delete the local replica (used by "Reset local database"). */
+	async destroyLocal(): Promise<void> {
+		await this.local.destroy();
 	}
 
 	// --- per-device local state (not replicated) ---------------------------

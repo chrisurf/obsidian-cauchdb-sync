@@ -125,7 +125,9 @@ export class SyncEngine {
 		if (!this.db.remote) return;
 		this.setStatus(SYNC_STATE.SYNCING);
 		this.syncHandler = this.db.local
-			.sync(this.db.remote, { live: true, retry: true })
+			// keep in-flight memory bounded: chunk docs can be ~1.4 MB each, so a large
+			// default batch would buffer hundreds of MB and trip the OOM guard.
+			.sync(this.db.remote, { live: true, retry: true, batch_size: 25, batches_limit: 2 })
 			.on("change", (info) => {
 				if (info.direction === "pull") {
 					void this.applyPulledDocs(info.change.docs as FileDoc[]);
@@ -149,9 +151,10 @@ export class SyncEngine {
 	async replicateOnce(): Promise<void> {
 		if (!this.db.remote) this.db.connectRemote();
 		this.setStatus(SYNC_STATE.SYNCING);
+		const opts = { batch_size: 25, batches_limit: 2 };
 		try {
-			await this.db.local.replicate.to(this.db.remote!);
-			const pull = await this.db.local.replicate.from(this.db.remote!);
+			await this.db.local.replicate.to(this.db.remote!, opts);
+			const pull = await this.db.local.replicate.from(this.db.remote!, opts);
 			await this.applyPulledDocs(pull.docs as FileDoc[]);
 			await this.resolveConflicts();
 			this.setStatus(SYNC_STATE.SYNCED);
@@ -395,21 +398,93 @@ export class SyncEngine {
 		// nothing to do if we already hold this exact version
 		if (this.lastHash.get(path) === doc.hash) return;
 
-		let bytes: Uint8Array;
+		const children = Array.isArray(doc.children) ? doc.children : null;
+		if (!children) {
+			console.warn(`[couchdb-sync] skipping ${path}: no chunk list (legacy/incompatible doc)`);
+			return;
+		}
+
+		const adapter = this.app.vault.adapter;
+		const desktopFs = Platform.isDesktop && adapter instanceof FileSystemAdapter;
 		try {
-			bytes = await this.reassemble(doc);
+			if (doc.binary && desktopFs) {
+				// Stream chunks straight to disk: never hold the whole file in memory.
+				await this.writeBinaryStreaming(path, children, adapter as FileSystemAdapter, doc.hash);
+			} else {
+				await this.writeAssembled(path, children, doc.binary, existing, doc.hash);
+			}
 		} catch (e) {
 			// chunks not here yet -> wait for them to replicate, then retry
 			this.pending.set(doc._id, doc);
 			console.warn(`[couchdb-sync] deferring ${path}: ${(e as Error).message}`);
 			return;
 		}
+		this.pending.delete(doc._id);
+	}
 
-		this.lastHash.set(path, doc.hash);
+	/** Read one chunk's decrypted bytes (local, falling back to remote). */
+	private async readChunkBytes(id: string): Promise<Uint8Array> {
+		let chunk = await this.db.getChunkLocal(id);
+		if (!chunk) {
+			chunk = await this.db.getChunkRemote(id);
+			if (chunk) await this.db.putChunkIfAbsent(chunk); // cache locally
+		}
+		if (!chunk) throw new Error(`missing chunk ${id}`);
+		const b64 = chunk.enc
+			? await decryptString(chunk.data, this.settings.passphrase)
+			: chunk.data;
+		return base64ToUint8(b64);
+	}
+
+	/** Desktop: write a binary file chunk-by-chunk to a temp file, then rename in. */
+	private async writeBinaryStreaming(
+		path: string,
+		children: string[],
+		adapter: FileSystemAdapter,
+		hash: string
+	): Promise<void> {
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const fs = require("fs") as typeof import("fs");
+		// eslint-disable-next-line @typescript-eslint/no-var-requires
+		const nodePath = require("path") as typeof import("path");
+		const full = adapter.getFullPath(path);
+		await fs.promises.mkdir(nodePath.dirname(full), { recursive: true });
+		const tmp = full + ".cdbsync-tmp";
+		const fd = await fs.promises.open(tmp, "w");
+		try {
+			for (const id of children) {
+				await fd.write(await this.readChunkBytes(id));
+			}
+		} catch (e) {
+			await fd.close();
+			await fs.promises.unlink(tmp).catch(() => undefined);
+			throw e; // partial temp file removed; nothing corrupted
+		}
+		await fd.close();
 		this.suppress.add(path);
+		this.lastHash.set(path, hash);
+		await fs.promises.rename(tmp, full); // atomic swap into place
+		const st = await fs.promises.stat(full);
+		this.recordSynced(path, st.mtimeMs, st.size, hash);
+	}
+
+	/** In-memory assembly for text files (small) and the mobile fallback. */
+	private async writeAssembled(
+		path: string,
+		children: string[],
+		binary: boolean,
+		existing: ReturnType<App["vault"]["getAbstractFileByPath"]>,
+		hash: string
+	): Promise<void> {
+		const parts: Uint8Array[] = [];
+		for (const id of children) parts.push(await this.readChunkBytes(id));
+		const bytes = concatBytes(parts);
+
+		this.suppress.add(path);
+		this.lastHash.set(path, hash);
 		await this.ensureFolder(path);
 
-		if (doc.binary) {
+		if (binary) {
 			const buf = new ArrayBuffer(bytes.byteLength);
 			new Uint8Array(buf).set(bytes);
 			if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, buf);
@@ -422,33 +497,8 @@ export class SyncEngine {
 
 		const written = this.app.vault.getAbstractFileByPath(path);
 		if (written instanceof TFile) {
-			this.recordSynced(path, written.stat.mtime, written.stat.size, doc.hash);
+			this.recordSynced(path, written.stat.mtime, written.stat.size, hash);
 		}
-		this.pending.delete(doc._id);
-	}
-
-	/** Rebuild file bytes from chunk docs; pulls missing chunks from remote. */
-	private async reassemble(doc: FileDoc): Promise<Uint8Array> {
-		if (doc.children.length === 0) return new Uint8Array(0);
-
-		let map = await this.db.getChunksLocal(doc.children);
-		const missing = doc.children.filter((id) => !map.has(id));
-		if (missing.length > 0) {
-			const remote = await this.db.getChunksRemote(missing);
-			for (const [id, chunk] of remote) {
-				await this.db.putChunkIfAbsent(chunk); // cache locally
-				map.set(id, chunk);
-			}
-		}
-
-		const parts: Uint8Array[] = [];
-		for (const id of doc.children) {
-			const chunk = map.get(id);
-			if (!chunk) throw new Error(`missing chunk ${id}`);
-			const b64 = chunk.enc ? await decryptString(chunk.data, this.settings.passphrase) : chunk.data;
-			parts.push(base64ToUint8(b64));
-		}
-		return concatBytes(parts);
 	}
 
 	private async ensureFolder(filePath: string): Promise<void> {

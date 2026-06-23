@@ -47,6 +47,16 @@ export default class CouchDBSyncPlugin extends Plugin {
 			callback: () => this.restartSync(),
 		});
 
+		this.addCommand({
+			id: "couchdb-sync-reset-local",
+			name: "Reset local database (re-download from server)",
+			callback: async () => {
+				new Notice("CouchDB Sync: resetting local database…");
+				await this.resetLocalDatabase();
+				new Notice("CouchDB Sync: local database reset; re-downloading.");
+			},
+		});
+
 		// Start after the layout is ready so the initial scan sees a settled vault.
 		this.app.workspace.onLayoutReady(() => void this.restartSync());
 	}
@@ -108,6 +118,26 @@ export default class CouchDBSyncPlugin extends Plugin {
 			this.setStatus(SYNC_STATE.ERROR, String(e));
 			new Notice(`CouchDB Sync failed to start: ${e}`);
 		}
+	}
+
+	/**
+	 * Wipe the LOCAL replica and re-download everything from the server. This only
+	 * affects this device's cache (the remote data is untouched), so it is a safe
+	 * recovery action. Serialized through the same lock as restartSync.
+	 */
+	resetLocalDatabase(): Promise<void> {
+		this.engine?.abort();
+		this.restartLock = this.restartLock
+			.catch(() => undefined)
+			.then(async () => {
+				this.engine?.stop();
+				const db = this.db ?? new SyncDatabase(this.settings, LOCAL_DB_NAME);
+				await db.destroyLocal().catch(() => undefined);
+				this.engine = null;
+				this.db = null;
+				await this.doRestart();
+			});
+		return this.restartLock;
 	}
 
 	/** Whether a sync session is currently active. */
