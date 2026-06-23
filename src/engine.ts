@@ -39,12 +39,6 @@ const SYNC_STATE_DOC = "_local/couchdb-sync-state";
 /** Suffix of the temp file used while streaming a download to disk. Never synced. */
 const TMP_SUFFIX = ".cdbsync-tmp";
 
-type StatusFn = (
-	state: SyncState,
-	detail?: string,
-	progress?: { done: number; total: number }
-) => void;
-
 /** Snapshot comparing this device's files against the synced database. */
 export interface IndexReport {
 	vaultCount: number;
@@ -55,6 +49,110 @@ export interface IndexReport {
 	drift: string[]; // present on both but content differs
 	allDbPaths: string[]; // every indexed path (for the tree view)
 }
+
+/** True for paths we never sync. Shared by the engine and the index report. */
+function isSkipped(path: string, app: App, settings: CouchDBSyncSettings): boolean {
+	if (path.endsWith(TMP_SUFFIX)) return true;
+	if (path === `${app.vault.configDir}/plugins/couchdb-sync/data.json`) return true;
+	if (isHidden(path)) {
+		return settings.syncHidden
+			? matchesIgnore(path, settings.hiddenExclude) // ON: skip blacklisted
+			: !matchesIgnore(path, settings.hiddenInclude); // OFF: skip unless whitelisted
+	}
+	return false; // normal files are always synced
+}
+
+/** Recursively list hidden files (dotfiles and files under dot-folders). */
+async function listHidden(app: App, isAborted: () => boolean = () => false): Promise<string[]> {
+	const adapter = app.vault.adapter;
+	const out: string[] = [];
+	const walk = async (dir: string, insideHidden: boolean): Promise<void> => {
+		if (isAborted()) return;
+		let listing: { files: string[]; folders: string[] };
+		try {
+			listing = await adapter.list(dir);
+		} catch {
+			return;
+		}
+		for (const f of listing.files) {
+			const base = f.split("/").pop() ?? "";
+			if (insideHidden || base.startsWith(".")) out.push(f);
+		}
+		for (const sub of listing.folders) {
+			const base = sub.split("/").pop() ?? "";
+			if (insideHidden || base.startsWith(".")) await walk(sub, true);
+		}
+	};
+	await walk("/", false);
+	return out;
+}
+
+/**
+ * Build the index/drift report. Works WITHOUT a running session (reads the local
+ * DB and the persisted sync record directly), and includes hidden files so the
+ * settings view shows full transparency in every state.
+ */
+export async function buildIndexReport(
+	app: App,
+	settings: CouchDBSyncSettings,
+	db: SyncDatabase,
+	syncState?: Map<string, SyncRecord>
+): Promise<IndexReport> {
+	const records =
+		syncState ??
+		new Map(
+			Object.entries(
+				(
+					await db
+						.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_DOC)
+						.catch(() => null)
+				)?.records ?? {}
+			)
+		);
+
+	const normal = app.vault.getFiles().map((f) => f.path);
+	const hidden = settings.syncHidden ? await listHidden(app) : [];
+	const vaultPaths = [...normal, ...hidden].filter((p) => !isSkipped(p, app, settings));
+	const vaultSet = new Set(vaultPaths);
+
+	const docs = (await db.getAll()).filter((d) => !d.deleted);
+	const docByPath = new Map(docs.map((d) => [d.path, d] as const));
+
+	const inSync: string[] = [];
+	const localOnly: string[] = [];
+	const dbOnly: string[] = [];
+	const drift: string[] = [];
+
+	for (const path of vaultPaths) {
+		const doc = docByPath.get(path);
+		if (!doc) {
+			localOnly.push(path);
+			continue;
+		}
+		const rec = records.get(path);
+		(rec && rec.hash === doc.hash ? inSync : drift).push(path);
+	}
+	for (const d of docs) {
+		if (!vaultSet.has(d.path)) dbOnly.push(d.path);
+	}
+
+	const sort = (a: string[]) => a.sort((x, y) => x.localeCompare(y));
+	return {
+		vaultCount: vaultPaths.length,
+		dbCount: docs.length,
+		inSync: sort(inSync),
+		localOnly: sort(localOnly),
+		dbOnly: sort(dbOnly),
+		drift: sort(drift),
+		allDbPaths: sort(docs.map((d) => d.path)),
+	};
+}
+
+type StatusFn = (
+	state: SyncState,
+	detail?: string,
+	progress?: { done: number; total: number }
+) => void;
 
 export class SyncEngine {
 	private app: App;
@@ -82,6 +180,8 @@ export class SyncEngine {
 	private settleTimer: number | null = null;
 	/** paths currently being uploaded/downloaded (for the "working on this" UI) */
 	private activePaths = new Set<string>();
+	/** active one-shot replication, cancelled on abort to avoid "database is closed" */
+	private oneShot: { cancel: () => void } | null = null;
 
 	private resolveSoon = debounce(() => void this.resolveConflicts(), 800, false);
 	private saveStateSoon = debounce(() => void this.persistSyncState(), 1500, false);
@@ -150,36 +250,11 @@ export class SyncEngine {
 
 	// --- hidden files (no vault events -> scanned by polling) ---------------
 
-	/** Recursively list hidden files (dotfiles and files under dot-folders). */
-	private async listHiddenFiles(): Promise<string[]> {
-		const adapter = this.app.vault.adapter;
-		const out: string[] = [];
-		const walk = async (dir: string, insideHidden: boolean): Promise<void> => {
-			if (this.aborted) return;
-			let listing: { files: string[]; folders: string[] };
-			try {
-				listing = await adapter.list(dir);
-			} catch {
-				return;
-			}
-			for (const f of listing.files) {
-				const base = f.split("/").pop() ?? "";
-				if (insideHidden || base.startsWith(".")) out.push(f);
-			}
-			for (const sub of listing.folders) {
-				const base = sub.split("/").pop() ?? "";
-				if (insideHidden || base.startsWith(".")) await walk(sub, true);
-			}
-		};
-		await walk("/", false);
-		return out;
-	}
-
 	/** Index changed hidden files and propagate hidden deletions. Cheap stat checks. */
 	private async scanHidden(): Promise<void> {
 		if (!this.settings.syncHidden || this.aborted) return;
 		const adapter = this.app.vault.adapter;
-		const paths = (await this.listHiddenFiles()).filter((p) => !this.skip(p));
+		const paths = (await listHidden(this.app, () => this.aborted)).filter((p) => !this.skip(p));
 		const present = new Set(paths);
 
 		for (const path of paths) {
@@ -231,6 +306,14 @@ export class SyncEngine {
 		if (this.settleTimer !== null) {
 			window.clearTimeout(this.settleTimer);
 			this.settleTimer = null;
+		}
+		if (this.oneShot) {
+			try {
+				this.oneShot.cancel();
+			} catch {
+				/* ignore */
+			}
+			this.oneShot = null;
 		}
 		if (this.syncHandler) {
 			this.syncHandler.cancel();
@@ -315,16 +398,20 @@ export class SyncEngine {
 		this.markActivity();
 		const opts = { batch_size: 25, batches_limit: 2 };
 		try {
-			await this.db.local.replicate.to(this.db.remote!, opts);
+			const repTo = this.db.local.replicate.to(this.db.remote!, opts);
+			this.oneShot = repTo;
+			await repTo;
 			// event-based pull: the resolved result has no `.docs`; the change events do.
 			await new Promise<void>((resolve, reject) => {
 				const rep = this.db.local.replicate.from(this.db.remote!, opts);
+				this.oneShot = rep;
 				rep.on("change", (info) => {
 					void this.applyPulledDocs((info.docs ?? []) as FileDoc[]);
 				});
 				rep.on("complete", () => resolve());
 				rep.on("error", (e) => reject(e));
 			});
+			this.oneShot = null;
 			await this.retryPending();
 			await this.resolveConflicts();
 			this.settle(SYNC_STATE.SYNCED);
@@ -357,12 +444,14 @@ export class SyncEngine {
 		try {
 			await new Promise<void>((resolve, reject) => {
 				const rep = this.db.local.replicate.from(this.db.remote!, opts);
+				this.oneShot = rep;
 				rep.on("change", (info) => {
 					void this.applyPulledDocs((info.docs ?? []) as FileDoc[]);
 				});
 				rep.on("complete", () => resolve());
 				rep.on("error", (e) => reject(e));
 			});
+			this.oneShot = null;
 			await this.retryPending();
 			await this.resolveConflicts();
 		} catch (e) {
@@ -445,16 +534,7 @@ export class SyncEngine {
 
 	/** Paths we never sync. Normal files are always synced; hidden files depend on the toggle. */
 	private skip(path: string): boolean {
-		if (path.endsWith(TMP_SUFFIX)) return true;
-		// never sync our own plugin config (deviceId/passphrase/flags are per-device)
-		if (path === `${this.app.vault.configDir}/plugins/couchdb-sync/data.json`) return true;
-
-		if (isHidden(path)) {
-			return this.settings.syncHidden
-				? matchesIgnore(path, this.settings.hiddenExclude) // ON: skip blacklisted
-				: !matchesIgnore(path, this.settings.hiddenInclude); // OFF: skip unless whitelisted
-		}
-		return false; // normal files are always synced
+		return isSkipped(path, this.app, this.settings);
 	}
 
 	// --- local -> db -------------------------------------------------------
@@ -876,54 +956,8 @@ export class SyncEngine {
 		}
 	}
 
-	// --- index status (for the settings view) ------------------------------
-
-	/**
-	 * Compare this device's files against the synced database using the cheap
-	 * per-device sync record (no re-hashing of large files needed).
-	 */
-	async getIndexReport(): Promise<IndexReport> {
-		const vaultFiles = this.app.vault
-			.getFiles()
-			.filter((f) => !this.skip(f.path));
-		const vaultByPath = new Map(vaultFiles.map((f) => [f.path, f] as const));
-
-		const docs = (await this.db.getAll()).filter((d) => !d.deleted);
-		const docByPath = new Map(docs.map((d) => [d.path, d] as const));
-
-		const inSync: string[] = [];
-		const localOnly: string[] = [];
-		const dbOnly: string[] = [];
-		const drift: string[] = [];
-
-		for (const f of vaultFiles) {
-			const doc = docByPath.get(f.path);
-			if (!doc) {
-				localOnly.push(f.path);
-				continue;
-			}
-			// In sync when the content we last synced here matches the DB doc. Use the
-			// content hash (not mtime, which can differ between fs and Obsidian and would
-			// cause spurious "content differs"). Genuine local edits get pushed via vault
-			// events / polling, which updates the record, so this stays accurate.
-			const rec = this.syncState.get(f.path);
-			const synced = !!rec && rec.hash === doc.hash;
-			(synced ? inSync : drift).push(f.path);
-		}
-
-		for (const d of docs) {
-			if (!vaultByPath.has(d.path)) dbOnly.push(d.path);
-		}
-
-		const sort = (a: string[]) => a.sort((x, y) => x.localeCompare(y));
-		return {
-			vaultCount: vaultFiles.length,
-			dbCount: docs.length,
-			inSync: sort(inSync),
-			localOnly: sort(localOnly),
-			dbOnly: sort(dbOnly),
-			drift: sort(drift),
-			allDbPaths: sort(docs.map((d) => d.path)),
-		};
+	/** Index/drift report for the running session (includes hidden files). */
+	getIndexReport(): Promise<IndexReport> {
+		return buildIndexReport(this.app, this.settings, this.db, this.syncState);
 	}
 }

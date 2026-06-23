@@ -7,7 +7,7 @@ import {
 	SyncStatus,
 } from "./types";
 import { SyncDatabase } from "./database";
-import { SyncEngine, IndexReport } from "./engine";
+import { SyncEngine, IndexReport, buildIndexReport } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
 import { generateDeviceId } from "./util";
 
@@ -249,10 +249,20 @@ export default class CouchDBSyncPlugin extends Plugin {
 		return this.engine !== null;
 	}
 
-	/** Index/drift report for the settings view, or null if sync isn't running. */
+	/**
+	 * Index/drift report for the settings view. Works even when sync is idle: if no
+	 * session is running, it reads the local DB directly so the user always sees the
+	 * full picture (counts, percentage, file tree — including hidden files).
+	 */
 	async getIndexReport(): Promise<IndexReport | null> {
-		if (!this.engine) return null;
-		return this.engine.getIndexReport();
+		if (this.engine) return this.engine.getIndexReport();
+		if (!this.settings.serverUrl) return null; // not configured yet
+		const db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
+		try {
+			return await buildIndexReport(this.app, this.settings, db);
+		} finally {
+			await db.close().catch(() => undefined);
+		}
 	}
 
 	/** Paths currently being transferred (for live "working on it" highlighting). */
