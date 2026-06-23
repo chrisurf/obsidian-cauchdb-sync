@@ -57,16 +57,6 @@ export default class CouchDBSyncPlugin extends Plugin {
 			},
 		});
 
-		this.addCommand({
-			id: "couchdb-sync-wipe-remote",
-			name: "Wipe server database and re-upload (destructive)",
-			callback: async () => {
-				new Notice("CouchDB Sync: wiping server database…");
-				await this.wipeRemoteAndReset();
-				new Notice("CouchDB Sync: server wiped; re-uploading from this device.");
-			},
-		});
-
 		// Crash guard: if the previous session never reached a safe state, it left
 		// unsafeShutdown=true. In that case do NOT auto-start (so the recovery buttons
 		// stay reachable). Clear the flag now so a manual Restart/Wipe can run.
@@ -189,27 +179,6 @@ export default class CouchDBSyncPlugin extends Plugin {
 				this.engine = null;
 				this.db = null;
 				await this.doRestart();
-			});
-		return this.restartLock;
-	}
-
-	/**
-	 * DESTRUCTIVE: delete the entire database on the server, recreate it empty, wipe
-	 * the local cache, and re-upload this device's vault from scratch. Serialized
-	 * through the same lock as restartSync.
-	 */
-	wipeRemoteAndReset(): Promise<void> {
-		this.engine?.abort();
-		this.restartLock = this.restartLock
-			.catch(() => undefined)
-			.then(async () => {
-				this.engine?.stop();
-				const db = this.db ?? new SyncDatabase(this.settings, LOCAL_DB_NAME);
-				await db.wipeRemote(); // delete + recreate the server database
-				await db.destroyLocal().catch(() => undefined); // clear local cache
-				this.engine = null;
-				this.db = null;
-				await this.doRestart(); // fresh: re-index the vault into the clean server
 			});
 		return this.restartLock;
 	}
