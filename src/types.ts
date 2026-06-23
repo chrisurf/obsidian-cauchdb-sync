@@ -37,9 +37,6 @@ export interface CouchDBSyncSettings {
 	 */
 	syncHidden: boolean;
 
-	/** when syncHidden is on, hidden paths matching these are still excluded */
-	hiddenExcludePatterns: string[];
-
 	/**
 	 * Crash guard. Set to true while a sync session is starting/running and cleared
 	 * once it reaches a safe steady state. If it is still true at launch, the previous
@@ -59,20 +56,24 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	conflictStrategy: "newest",
 	isMaster: false,
 	deviceId: "",
-	ignorePatterns: [".obsidian/", ".trash/", ".git/"],
-	liveSync: true,
-	autoStart: true,
-	syncHidden: false,
-	hiddenExcludePatterns: [
-		".git/",
+	// one exclusion list for everything. Defaults exclude volatile/risky paths; when
+	// hidden-file sync is on these keep .git and Obsidian's workspace/cache out.
+	ignorePatterns: [
 		".trash/",
+		".git/",
 		".DS_Store",
 		".obsidian/workspace.json",
 		".obsidian/workspace-mobile.json",
 		".obsidian/cache",
 	],
+	liveSync: true,
+	autoStart: true,
+	syncHidden: false,
 	unsafeShutdown: false,
 };
+
+/** The previous default ignore list; migrated to the new unified default on load. */
+export const LEGACY_IGNORE_DEFAULT = [".obsidian/", ".trash/", ".git/"];
 
 /**
  * One CouchDB document per vault file. The content itself lives in separate,

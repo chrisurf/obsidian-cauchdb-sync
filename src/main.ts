@@ -1,5 +1,12 @@
 import { Notice, Plugin, setIcon } from "obsidian";
-import { CouchDBSyncSettings, DEFAULT_SETTINGS, SYNC_STATE, SyncState, SyncStatus } from "./types";
+import {
+	CouchDBSyncSettings,
+	DEFAULT_SETTINGS,
+	LEGACY_IGNORE_DEFAULT,
+	SYNC_STATE,
+	SyncState,
+	SyncStatus,
+} from "./types";
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
@@ -250,11 +257,25 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-		if (!this.settings.deviceId) {
-			this.settings.deviceId = generateDeviceId();
-			await this.saveSettings();
+		const saved = (await this.loadData()) as Partial<CouchDBSyncSettings> & {
+			hiddenExcludePatterns?: string[];
+		};
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+
+		// Migrate the old two-list model to the single unified exclusion list.
+		const isLegacyDefault =
+			JSON.stringify(this.settings.ignorePatterns) === JSON.stringify(LEGACY_IGNORE_DEFAULT);
+		if (isLegacyDefault) {
+			this.settings.ignorePatterns = [...DEFAULT_SETTINGS.ignorePatterns];
+		} else if (saved?.hiddenExcludePatterns?.length) {
+			// fold any previously-set hidden exclusions into the unified list
+			const merged = new Set([...this.settings.ignorePatterns, ...saved.hiddenExcludePatterns]);
+			this.settings.ignorePatterns = [...merged];
 		}
+		delete (this.settings as { hiddenExcludePatterns?: string[] }).hiddenExcludePatterns;
+
+		if (!this.settings.deviceId) this.settings.deviceId = generateDeviceId();
+		await this.saveSettings();
 	}
 
 	async saveSettings(): Promise<void> {

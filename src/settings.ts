@@ -190,38 +190,25 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				t.setValue(s.syncHidden).onChange(async (v) => {
 					s.syncHidden = v;
 					await this.plugin.saveSettings();
-					this.display(); // show/hide the exclusions field
 				})
 			);
 
-		if (s.syncHidden) {
-			new Setting(containerEl)
-				.setName("Hidden file exclusions")
-				.setDesc("One per line. Hidden paths matching these are NOT synced. Edit as you like.")
-				.addTextArea((t) => {
-					t.setValue(s.hiddenExcludePatterns.join("\n")).onChange(async (v) => {
-						s.hiddenExcludePatterns = v
-							.split("\n")
-							.map((x) => x.trim())
-							.filter((x) => x.length > 0);
-						await this.plugin.saveSettings();
-					});
-					t.inputEl.rows = 6;
-				});
-		}
-
 		new Setting(containerEl)
-			.setName("Ignore patterns")
-			.setDesc("One per line. Path prefixes that are never synced.")
-			.addTextArea((t) =>
+			.setName("Exclude patterns")
+			.setDesc(
+				"One per line. Paths that are NEVER synced — applies to normal files and, " +
+					"when “Sync hidden files” is on, to hidden files too (e.g. .git/, .obsidian/cache)."
+			)
+			.addTextArea((t) => {
 				t.setValue(s.ignorePatterns.join("\n")).onChange(async (v) => {
 					s.ignorePatterns = v
 						.split("\n")
 						.map((x) => x.trim())
 						.filter((x) => x.length > 0);
 					await this.plugin.saveSettings();
-				})
-			);
+				});
+				t.inputEl.rows = 6;
+			});
 
 		containerEl.createEl("h2", { text: "Actions" });
 
