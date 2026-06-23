@@ -132,7 +132,7 @@ export class SyncEngine {
 
 	private async runInitialIndex(): Promise<void> {
 		try {
-			await this.cleanupTempDocs();
+			await this.cleanupTempFiles();
 			await this.indexLocalFiles();
 			if (this.settings.syncHidden) await this.scanHidden();
 			await this.retryPending();
@@ -207,28 +207,14 @@ export class SyncEngine {
 		}
 	}
 
-	/**
-	 * Remove stray streaming temp files ("*.cdbsync-tmp") that an earlier build
-	 * accidentally indexed into the database. They never belong in the DB.
-	 */
-	private async cleanupTempDocs(): Promise<void> {
+	/** Delete leftover "*.cdbsync-tmp" files on disk from interrupted downloads. */
+	private async cleanupTempFiles(): Promise<void> {
 		try {
-			// 1) remove stray temp docs from the database (tombstone replicates the cleanup)
-			const junk = (await this.db.getAll()).filter(
-				(d) => d.path.endsWith(TMP_SUFFIX) && !d.deleted
-			);
-			for (const doc of junk) {
-				if (doc._rev) await this.db.removeRev(doc._id, doc._rev);
-			}
-			// 2) delete leftover temp files on disk (from interrupted downloads)
 			const adapter = this.app.vault.adapter;
 			for (const f of this.app.vault.getFiles()) {
 				if (f.path.endsWith(TMP_SUFFIX)) {
 					await adapter.remove(f.path).catch(() => undefined);
 				}
-			}
-			if (junk.length) {
-				console.warn(`[couchdb-sync] cleaned up ${junk.length} stray temp doc(s)`);
 			}
 		} catch {
 			/* best-effort */
@@ -355,7 +341,7 @@ export class SyncEngine {
 		if (this.aborted) return;
 		// background, then idle: pure download — no vault events, no upload, no live
 		void (async () => {
-			await this.cleanupTempDocs();
+			await this.cleanupTempFiles();
 			await this.downloadOnce();
 			if (!this.aborted) {
 				this.onReady();
@@ -660,7 +646,7 @@ export class SyncEngine {
 
 		const children = Array.isArray(doc.children) ? doc.children : null;
 		if (!children) {
-			console.warn(`[couchdb-sync] skipping ${path}: no chunk list (legacy/incompatible doc)`);
+			console.warn(`[couchdb-sync] skipping ${path}: malformed doc (no chunk list)`);
 			return;
 		}
 

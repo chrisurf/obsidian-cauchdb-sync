@@ -11,8 +11,7 @@ import { SyncEngine, IndexReport } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
 import { generateDeviceId } from "./util";
 
-// bumped to v2: file docs are now keyed "f:" + path; start from a clean local store
-const LOCAL_DB_NAME = "couchdb-sync-local-v2";
+const LOCAL_DB_NAME = "couchdb-sync-local";
 
 // Lucide icon name per state for the status bar.
 const STATUS_ICON: Record<SyncState, string> = {
@@ -262,30 +261,11 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		const saved = (await this.loadData()) as
-			| (Partial<CouchDBSyncSettings> & {
-					ignorePatterns?: string[];
-					hiddenExcludePatterns?: string[];
-			  })
-			| null;
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
-
-		// Migrate older exclusion fields (ignorePatterns / hiddenExcludePatterns) into
-		// the new hidden-exclude list. Only fold in entries that are actually hidden.
-		if (!saved?.hiddenExclude && (saved?.ignorePatterns || saved?.hiddenExcludePatterns)) {
-			const legacy = [...(saved.ignorePatterns ?? []), ...(saved.hiddenExcludePatterns ?? [])];
-			const merged = new Set([
-				...DEFAULT_SETTINGS.hiddenExclude,
-				...legacy.filter((p) => p.startsWith(".")),
-			]);
-			this.settings.hiddenExclude = [...merged];
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		if (!this.settings.deviceId) {
+			this.settings.deviceId = generateDeviceId();
+			await this.saveSettings();
 		}
-		const stale = this.settings as { ignorePatterns?: unknown; hiddenExcludePatterns?: unknown };
-		delete stale.ignorePatterns;
-		delete stale.hiddenExcludePatterns;
-
-		if (!this.settings.deviceId) this.settings.deviceId = generateDeviceId();
-		await this.saveSettings();
 	}
 
 	async saveSettings(): Promise<void> {
