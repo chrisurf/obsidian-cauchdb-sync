@@ -80,6 +80,8 @@ export class SyncEngine {
 	private hiddenTimer: number | null = null;
 	/** timer that returns the status to "in sync" after replication activity settles */
 	private settleTimer: number | null = null;
+	/** paths currently being uploaded/downloaded (for the "working on this" UI) */
+	private activePaths = new Set<string>();
 
 	private resolveSoon = debounce(() => void this.resolveConflicts(), 800, false);
 	private saveStateSoon = debounce(() => void this.persistSyncState(), 1500, false);
@@ -259,6 +261,11 @@ export class SyncEngine {
 		return this.eventRefs;
 	}
 
+	/** Paths currently being transferred (so the UI can highlight them live). */
+	getActivePaths(): string[] {
+		return [...this.activePaths];
+	}
+
 	// --- live replication --------------------------------------------------
 
 	private startLiveSync(): void {
@@ -316,20 +323,29 @@ export class SyncEngine {
 
 	async replicateOnce(): Promise<void> {
 		if (!this.db.remote) this.db.connectRemote();
-		this.setStatus(SYNC_STATE.SYNCING);
+		this.markActivity();
 		const opts = { batch_size: 25, batches_limit: 2 };
 		try {
 			await this.db.local.replicate.to(this.db.remote!, opts);
-			const pull = await this.db.local.replicate.from(this.db.remote!, opts);
-			await this.applyPulledDocs(pull.docs as FileDoc[]);
+			// event-based pull: the resolved result has no `.docs`; the change events do.
+			await new Promise<void>((resolve, reject) => {
+				const rep = this.db.local.replicate.from(this.db.remote!, opts);
+				rep.on("change", (info) => {
+					void this.applyPulledDocs((info.docs ?? []) as FileDoc[]);
+				});
+				rep.on("complete", () => resolve());
+				rep.on("error", (e) => reject(e));
+			});
+			await this.retryPending();
 			await this.resolveConflicts();
-			this.setStatus(SYNC_STATE.SYNCED);
+			this.settle(SYNC_STATE.SYNCED);
 		} catch (e) {
 			this.fail("replicate", e);
 		}
 	}
 
 	private async applyPulledDocs(docs: FileDoc[]): Promise<void> {
+		if (!Array.isArray(docs)) return;
 		for (const doc of docs) {
 			if (!doc || doc.type !== "file") continue;
 			await this.applyRemoteChange(doc);
@@ -477,6 +493,15 @@ export class SyncEngine {
 			this.setStatus(SYNC_STATE.ERROR, "Encryption is on but no passphrase is set.");
 			return;
 		}
+		this.activePaths.add(path); // UI: mark as "working on it"
+		try {
+			await this.pushPathInner(path, mtime, ctime, size);
+		} finally {
+			this.activePaths.delete(path);
+		}
+	}
+
+	private async pushPathInner(path: string, mtime: number, ctime: number, size: number): Promise<void> {
 		const enc = this.settings.e2eeEnabled;
 		const pass = this.settings.passphrase;
 
@@ -598,6 +623,7 @@ export class SyncEngine {
 		}
 
 		const desktopFs = Platform.isDesktop && adapter instanceof FileSystemAdapter;
+		this.activePaths.add(path); // UI: mark as "working on it"
 		try {
 			if (doc.binary && desktopFs) {
 				// Stream chunks straight to disk: never hold the whole file in memory.
@@ -611,6 +637,8 @@ export class SyncEngine {
 			this.pending.set(doc._id, doc);
 			console.warn(`[couchdb-sync] deferring ${path}: ${(e as Error).message}`);
 			return;
+		} finally {
+			this.activePaths.delete(path);
 		}
 		this.pending.delete(doc._id);
 	}
@@ -657,8 +685,10 @@ export class SyncEngine {
 		this.suppress.add(path);
 		this.lastHash.set(path, hash);
 		await fs.promises.rename(tmp, full); // atomic swap into place
-		const st = await fs.promises.stat(full);
-		this.recordSynced(path, st.mtimeMs, st.size, hash);
+		// Record mtime/size via Obsidian's adapter so it matches TFile.stat exactly;
+		// using raw fs mtime could differ slightly and cause spurious "drift".
+		const st = await adapter.stat(path);
+		if (st) this.recordSynced(path, st.mtime, st.size, hash);
 	}
 
 	/** In-memory assembly for text files (small) and the mobile fallback. */
@@ -844,10 +874,13 @@ export class SyncEngine {
 				localOnly.push(f.path);
 				continue;
 			}
+			// In sync when the content we last synced here matches the DB doc. Use the
+			// content hash (not mtime, which can differ between fs and Obsidian and would
+			// cause spurious "content differs"). Genuine local edits get pushed via vault
+			// events / polling, which updates the record, so this stays accurate.
 			const rec = this.syncState.get(f.path);
-			const changedLocally = !rec || rec.mtime !== f.stat.mtime || rec.size !== f.stat.size;
-			const dbDiffers = !rec || rec.hash !== doc.hash;
-			(changedLocally || dbDiffers ? drift : inSync).push(f.path);
+			const synced = !!rec && rec.hash === doc.hash;
+			(synced ? inSync : drift).push(f.path);
 		}
 
 		for (const d of docs) {

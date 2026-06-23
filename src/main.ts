@@ -224,6 +224,11 @@ export default class CouchDBSyncPlugin extends Plugin {
 		return this.engine.getIndexReport();
 	}
 
+	/** Paths currently being transferred (for live "working on it" highlighting). */
+	getActivePaths(): string[] {
+		return this.engine?.getActivePaths() ?? [];
+	}
+
 	async loadSettings(): Promise<void> {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 		if (!this.settings.deviceId) {

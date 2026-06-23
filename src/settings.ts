@@ -4,12 +4,13 @@ import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
 import { SYNC_STATE, SyncStatus } from "./types";
 
-const AUTO_REFRESH_MS = 10_000;
+const AUTO_REFRESH_MS = 3_000;
 
 export class CouchDBSyncSettingTab extends PluginSettingTab {
 	plugin: CouchDBSyncPlugin;
 	private statusUnsub?: () => void;
 	private autoRefresh?: number;
+	private activeTimer?: number;
 	private liveStatusEl?: HTMLElement;
 	// persistent index-status elements (updated in place to avoid flicker)
 	private summaryEl?: HTMLElement;
@@ -30,6 +31,10 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		if (this.autoRefresh !== undefined) {
 			window.clearInterval(this.autoRefresh);
 			this.autoRefresh = undefined;
+		}
+		if (this.activeTimer !== undefined) {
+			window.clearInterval(this.activeTimer);
+			this.activeTimer = undefined;
 		}
 	}
 
@@ -261,12 +266,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	// --- index status view -------------------------------------------------
 
 	private renderIndexStatus(root: HTMLElement): void {
-		new Setting(root)
-			.setHeading()
-			.setName("Index status")
-			.addButton((b) =>
-				b.setButtonText("Refresh").onClick(() => this.loadIndex(true))
-			);
+		new Setting(root).setHeading().setName("Index status");
 
 		// live status line (updates instantly from the engine)
 		this.liveStatusEl = root.createDiv({ cls: "couchdb-sync-livestatus" });
@@ -285,9 +285,24 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		void this.loadIndex(true);
 
-		// auto-refresh: updates counts/summary in place, rebuilds lists/tree only on change
+		// auto-refresh the counts/lists in place (no flicker, no full page reload)
 		if (this.autoRefresh !== undefined) window.clearInterval(this.autoRefresh);
 		this.autoRefresh = window.setInterval(() => void this.loadIndex(false), AUTO_REFRESH_MS);
+
+		// fast loop: highlight the files currently being worked on ("scanning" effect)
+		if (this.activeTimer !== undefined) window.clearInterval(this.activeTimer);
+		this.activeTimer = window.setInterval(() => this.highlightActive(), 600);
+	}
+
+	/** Toggle a "working on it" highlight on list/tree rows for the active paths. */
+	private highlightActive(): void {
+		const active = new Set(this.plugin.getActivePaths());
+		const root = this.driftEl?.parentElement;
+		if (!root) return;
+		root.querySelectorAll<HTMLElement>("[data-couchdb-path]").forEach((el) => {
+			const on = active.has(el.dataset.couchdbPath ?? "");
+			el.toggleClass("couchdb-sync-active", on);
+		});
 	}
 
 	private renderLiveStatus(st: SyncStatus): void {
@@ -392,13 +407,18 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		const det = box.createEl("details", { cls: "couchdb-sync-drift" });
 		det.createEl("summary", { text: `${title} (${paths.length})` });
 		const ul = det.createEl("ul");
-		for (const p of paths) ul.createEl("li", { text: p });
+		for (const p of paths) {
+			const li = ul.createEl("li");
+			li.createSpan({ cls: "couchdb-sync-dot" }); // pulses when active
+			li.createSpan({ text: p });
+			li.dataset.couchdbPath = p;
+		}
 	}
 
 	private renderTree(container: HTMLElement, paths: string[]): void {
 		interface Node {
 			folders: Map<string, Node>;
-			files: string[];
+			files: { name: string; path: string }[];
 		}
 		const make = (): Node => ({ folders: new Map(), files: [] });
 		const rootNode = make();
@@ -410,7 +430,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				if (!node.folders.has(name)) node.folders.set(name, make());
 				node = node.folders.get(name)!;
 			}
-			node.files.push(parts[parts.length - 1]);
+			node.files.push({ name: parts[parts.length - 1], path });
 		}
 
 		const render = (node: Node, el: HTMLElement) => {
@@ -421,8 +441,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				det.createEl("summary", { text: `📁 ${name}` });
 				render(child, det.createDiv({ cls: "couchdb-sync-tree-children" }));
 			}
-			for (const file of node.files.sort((a, b) => a.localeCompare(b))) {
-				el.createDiv({ cls: "couchdb-sync-tree-file", text: `📄 ${file}` });
+			for (const file of node.files.sort((a, b) => a.name.localeCompare(b.name))) {
+				const div = el.createDiv({ cls: "couchdb-sync-tree-file" });
+				div.createSpan({ cls: "couchdb-sync-dot" });
+				div.createSpan({ text: `📄 ${file.name}` });
+				div.dataset.couchdbPath = file.path;
 			}
 		};
 		render(rootNode, container);
