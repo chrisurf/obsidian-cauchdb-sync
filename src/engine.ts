@@ -15,6 +15,7 @@ import {
 	CHUNK_SIZE,
 	CouchDBSyncSettings,
 	FileDoc,
+	FILE_PREFIX,
 	SYNC_STATE,
 	SyncRecord,
 	SyncState,
@@ -292,7 +293,7 @@ export class SyncEngine {
 			this.suppress.delete(path);
 			return;
 		}
-		const doc = await this.db.get(path);
+		const doc = await this.db.get(FILE_PREFIX + path);
 		if (!doc || doc.deleted) return;
 		doc.deleted = true;
 		doc._deleted = false; // keep a tombstone document (logical delete)
@@ -341,7 +342,7 @@ export class SyncEngine {
 		}
 		const hash = cyrb53(children.join("|"));
 
-		const existing = await this.db.get(file.path);
+		const existing = await this.db.get(FILE_PREFIX + file.path);
 		if (existing && !existing.deleted && existing.hash === hash) {
 			// identical content already in the DB — adopt it, no upload, no conflict
 			this.lastHash.set(file.path, hash);
@@ -350,7 +351,7 @@ export class SyncEngine {
 		}
 
 		const doc: FileDoc = {
-			_id: file.path,
+			_id: FILE_PREFIX + file.path,
 			_rev: existing?._rev,
 			type: "file",
 			path: file.path,
@@ -569,7 +570,7 @@ export class SyncEngine {
 			for (const r of revs) {
 				if (r !== doc._rev) await this.db.removeRev(doc._id, r);
 			}
-			this.lastHash.delete(doc._id);
+			this.lastHash.delete(doc.path);
 			await this.applyRemoteChange({ ...winner, _rev: undefined });
 		}
 		this.setStatus(SYNC_STATE.SYNCED, `Resolved ${conflicted.length} conflict(s).`);
@@ -637,7 +638,7 @@ export class SyncEngine {
 		const vaultByPath = new Map(vaultFiles.map((f) => [f.path, f] as const));
 
 		const docs = (await this.db.getAll()).filter((d) => !d.deleted);
-		const docByPath = new Map(docs.map((d) => [d._id, d] as const));
+		const docByPath = new Map(docs.map((d) => [d.path, d] as const));
 
 		const inSync: string[] = [];
 		const localOnly: string[] = [];
@@ -657,7 +658,7 @@ export class SyncEngine {
 		}
 
 		for (const d of docs) {
-			if (!vaultByPath.has(d._id)) dbOnly.push(d._id);
+			if (!vaultByPath.has(d.path)) dbOnly.push(d.path);
 		}
 
 		const sort = (a: string[]) => a.sort((x, y) => x.localeCompare(y));
@@ -668,7 +669,7 @@ export class SyncEngine {
 			localOnly: sort(localOnly),
 			dbOnly: sort(dbOnly),
 			drift: sort(drift),
-			allDbPaths: sort(docs.map((d) => d._id)),
+			allDbPaths: sort(docs.map((d) => d.path)),
 		};
 	}
 }

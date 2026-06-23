@@ -128,3 +128,11 @@ export type SyncState = (typeof SYNC_STATE)[keyof typeof SYNC_STATE];
 
 /** Raw chunk size in bytes before base64/encryption. Keeps documents well-sized. */
 export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
+
+/**
+ * Document id prefixes. File metadata docs are keyed "f:" + path; chunks are "h:" + hash.
+ * The prefix lets us range-query ONLY the (small) file docs and never load chunk data
+ * into memory by accident — which would otherwise blow up RAM on large vaults.
+ */
+export const FILE_PREFIX = "f:";
+export const CHUNK_PREFIX = "h:";

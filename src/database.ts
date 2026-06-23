@@ -1,6 +1,6 @@
 import { requestUrl, RequestUrlParam } from "obsidian";
 import PouchDB from "pouchdb-browser";
-import { ChunkDoc, CouchDBSyncSettings, FileDoc } from "./types";
+import { ChunkDoc, CouchDBSyncSettings, FileDoc, FILE_PREFIX } from "./types";
 
 /**
  * A fetch() implementation backed by Obsidian's requestUrl(). This bypasses the
@@ -84,7 +84,13 @@ export class SyncDatabase {
 	}
 
 	async getAll(): Promise<FileDoc[]> {
-		const res = await this.local.allDocs({ include_docs: true });
+		// Range query over file docs ONLY ("f:".."f:￿") so chunk docs are never
+		// loaded into memory — that is what caused the out-of-memory crashes.
+		const res = await this.local.allDocs({
+			include_docs: true,
+			startkey: FILE_PREFIX,
+			endkey: FILE_PREFIX + "￿",
+		});
 		const out: FileDoc[] = [];
 		for (const row of res.rows) {
 			const d = row.doc as FileDoc | undefined;
@@ -111,7 +117,14 @@ export class SyncDatabase {
 
 	/** File documents that currently have unresolved conflict revisions. */
 	async getConflicted(): Promise<FileDoc[]> {
-		const res = await this.local.allDocs({ include_docs: true, conflicts: true });
+		// File docs only (chunks are immutable and never conflict); range-bounded so
+		// we never pull chunk data into memory.
+		const res = await this.local.allDocs({
+			include_docs: true,
+			conflicts: true,
+			startkey: FILE_PREFIX,
+			endkey: FILE_PREFIX + "￿",
+		});
 		const out: FileDoc[] = [];
 		for (const row of res.rows) {
 			const d = row.doc as FileDoc | undefined;

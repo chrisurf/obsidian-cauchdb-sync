@@ -5,7 +5,8 @@ import { SyncEngine, IndexReport } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
 import { generateDeviceId } from "./util";
 
-const LOCAL_DB_NAME = "couchdb-sync-local";
+// bumped to v2: file docs are now keyed "f:" + path; start from a clean local store
+const LOCAL_DB_NAME = "couchdb-sync-local-v2";
 
 const STATUS_ICON: Record<SyncState, string> = {
 	[SYNC_STATE.IDLE]: "⏸",
@@ -58,27 +59,25 @@ export default class CouchDBSyncPlugin extends Plugin {
 		});
 
 		// Crash guard: if the previous session never reached a safe state, it left
-		// unsafeShutdown=true. In that case do NOT auto-start (so the recovery buttons
-		// stay reachable). Clear the flag now so a manual Restart/Wipe can run.
-		const crashed = this.settings.unsafeShutdown;
-		if (crashed) {
+		// unsafeShutdown=true. In that case turn auto-start OFF and KEEP it off across
+		// restarts, so the plugin can never get stuck in an auto-start crash loop. The
+		// user re-enables "Start sync automatically" once the problem is fixed.
+		if (this.settings.unsafeShutdown) {
 			this.settings.unsafeShutdown = false;
+			this.settings.autoStart = false;
 			await this.saveSettings();
+			new Notice(
+				"CouchDB Sync: the previous sync did not finish cleanly, so auto-start has been " +
+					"turned OFF. Fix the issue (or Reset), then re-enable 'Start sync automatically'.",
+				12000
+			);
 		}
 
-		const shouldAutoStart = this.settings.autoStart && !crashed;
-		if (shouldAutoStart) {
+		if (this.settings.autoStart) {
 			// Start after the layout is ready so the initial scan sees a settled vault.
 			this.app.workspace.onLayoutReady(() => void this.restartSync());
 		} else {
-			this.setStatus(SYNC_STATE.IDLE, crashed ? "safe mode (previous run did not finish)" : "auto-start off");
-			if (crashed) {
-				new Notice(
-					"CouchDB Sync started in SAFE MODE: the previous sync did not finish cleanly. " +
-						"Use Restart, Reset, or Wipe in the settings.",
-					10000
-				);
-			}
+			this.setStatus(SYNC_STATE.IDLE, "auto-start off");
 		}
 	}
 
