@@ -54,12 +54,9 @@ export interface IndexReport {
 function isSkipped(path: string, app: App, settings: CouchDBSyncSettings): boolean {
 	if (path.endsWith(TMP_SUFFIX)) return true;
 	if (path === `${app.vault.configDir}/plugins/couchdb-sync/data.json`) return true;
-	if (isHidden(path)) {
-		return settings.syncHidden
-			? matchesIgnore(path, settings.hiddenExclude) // ON: skip blacklisted
-			: !matchesIgnore(path, settings.hiddenInclude); // OFF: skip unless whitelisted
-	}
-	return false; // normal files are always synced
+	if (matchesIgnore(path, settings.excludePatterns)) return true; // applies to all files
+	if (isHidden(path) && !settings.syncHidden) return true; // hidden only when enabled
+	return false;
 }
 
 /** Recursively list hidden files (dotfiles and files under dot-folders). */
@@ -146,6 +143,29 @@ export async function buildIndexReport(
 		drift: sort(drift),
 		allDbPaths: sort(docs.map((d) => d.path)),
 	};
+}
+
+/**
+ * Remove file documents from the database by exact path (file) or path prefix
+ * (folder). Tombstones replicate the removal; the local files on disk are left
+ * untouched, so anything not excluded can be re-synced from local later.
+ */
+export async function removeFromDb(
+	db: SyncDatabase,
+	target: string,
+	folder: boolean
+): Promise<number> {
+	const docs = await db.getAll();
+	const prefix = target.endsWith("/") ? target : target + "/";
+	const match = folder ? (p: string) => p === target || p.startsWith(prefix) : (p: string) => p === target;
+	let n = 0;
+	for (const d of docs) {
+		if (!d.deleted && d._rev && match(d.path)) {
+			await db.removeRev(d._id, d._rev);
+			n++;
+		}
+	}
+	return n;
 }
 
 type StatusFn = (
@@ -336,6 +356,16 @@ export class SyncEngine {
 	/** Files currently being transferred, with chunk progress (for the live UI). */
 	getActiveTransfers(): { path: string; done: number; total: number }[] {
 		return [...this.activeProgress].map(([path, p]) => ({ path, ...p }));
+	}
+
+	/** Remove a file/folder from the database index (local files are kept). */
+	async removeFromIndex(target: string, folder: boolean): Promise<number> {
+		const n = await removeFromDb(this.db, target, folder);
+		const prefix = target.endsWith("/") ? target : target + "/";
+		const hit = (p: string) => (folder ? p === target || p.startsWith(prefix) : p === target);
+		for (const p of [...this.lastHash.keys()]) if (hit(p)) this.lastHash.delete(p);
+		for (const [id, d] of [...this.pending]) if (hit(d.path)) this.pending.delete(id);
+		return n;
 	}
 
 	// --- live replication --------------------------------------------------

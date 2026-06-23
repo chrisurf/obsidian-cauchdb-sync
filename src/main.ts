@@ -7,7 +7,7 @@ import {
 	SyncStatus,
 } from "./types";
 import { SyncDatabase } from "./database";
-import { SyncEngine, IndexReport, buildIndexReport } from "./engine";
+import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
 import { generateDeviceId } from "./util";
 
@@ -277,6 +277,18 @@ export default class CouchDBSyncPlugin extends Plugin {
 			return;
 		}
 		await this.engine.forceSync(path);
+	}
+
+	/** Remove a file/folder from the DB index (works even when idle). */
+	async removeFromIndex(target: string, folder: boolean): Promise<number> {
+		if (this.engine) return this.engine.removeFromIndex(target, folder);
+		if (!this.settings.serverUrl) return 0;
+		const db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
+		try {
+			return await removeFromDb(db, target, folder);
+		} finally {
+			await db.close().catch(() => undefined);
+		}
 	}
 
 	async loadSettings(): Promise<void> {

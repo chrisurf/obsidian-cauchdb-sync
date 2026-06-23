@@ -190,35 +190,22 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				t.setValue(s.syncHidden).onChange(async (v) => {
 					s.syncHidden = v;
 					await this.plugin.saveSettings();
-					this.display(); // swap between the exclude / include field
 				})
 			);
 
-		if (s.syncHidden) {
-			// ON: blacklist — everything hidden syncs except these
-			new Setting(containerEl)
-				.setName("…except these")
-				.setDesc("One path per line. These hidden files/folders are NOT synced. Everything else hidden is.")
-				.addTextArea((t) => {
-					t.setValue(s.hiddenExclude.join("\n")).onChange(async (v) => {
-						s.hiddenExclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
-						await this.plugin.saveSettings();
-					});
-					t.inputEl.rows = 6;
+		new Setting(containerEl)
+			.setName("Exclude patterns")
+			.setDesc(
+				"One path per line. Never synced — applies to normal AND hidden files " +
+					"(e.g. node_modules/, .git/, .claude/)."
+			)
+			.addTextArea((t) => {
+				t.setValue(s.excludePatterns.join("\n")).onChange(async (v) => {
+					s.excludePatterns = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
+					await this.plugin.saveSettings();
 				});
-		} else {
-			// OFF: whitelist — nothing hidden syncs except these
-			new Setting(containerEl)
-				.setName("…but still sync these")
-				.setDesc("One path per line. Hidden files are skipped — list any you DO want synced (e.g. .obsidian/snippets/). Leave empty to skip all hidden files.")
-				.addTextArea((t) => {
-					t.setValue(s.hiddenInclude.join("\n")).onChange(async (v) => {
-						s.hiddenInclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
-						await this.plugin.saveSettings();
-					});
-					t.inputEl.rows = 4;
-				});
-		}
+				t.inputEl.rows = 7;
+			});
 
 		containerEl.createEl("h2", { text: "Actions" });
 
@@ -466,21 +453,42 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			node.files.push({ name: parts[parts.length - 1], path });
 		}
 
-		const render = (node: Node, el: HTMLElement) => {
+		// red "X": remove a file (folder=false) or whole folder (folder=true) from the
+		// DB index. No confirmation — it only touches the database; local files stay and
+		// can be re-synced. Refresh the tree afterwards.
+		const addRemove = (row: HTMLElement, target: string, folder: boolean) => {
+			const x = row.createEl("button", { text: "✕", cls: "couchdb-sync-x" });
+			x.setAttr("aria-label", `Remove ${target} from the index`);
+			x.onclick = async (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				x.disabled = true;
+				await this.plugin.removeFromIndex(target, folder);
+				this.treeSig = ""; // force tree rebuild
+				this.driftSig = "";
+				await this.loadIndex(true);
+			};
+		};
+
+		const render = (node: Node, el: HTMLElement, prefix: string) => {
 			const folderNames = [...node.folders.keys()].sort((a, b) => a.localeCompare(b));
 			for (const name of folderNames) {
 				const child = node.folders.get(name)!;
+				const folderPath = prefix ? `${prefix}/${name}` : name;
 				const det = el.createEl("details");
-				det.createEl("summary", { text: `📁 ${name}` });
-				render(child, det.createDiv({ cls: "couchdb-sync-tree-children" }));
+				const sum = det.createEl("summary", { cls: "couchdb-sync-tree-folder" });
+				sum.createSpan({ text: `📁 ${name}` });
+				addRemove(sum, folderPath, true);
+				render(child, det.createDiv({ cls: "couchdb-sync-tree-children" }), folderPath);
 			}
 			for (const file of node.files.sort((a, b) => a.name.localeCompare(b.name))) {
 				const div = el.createDiv({ cls: "couchdb-sync-tree-file" });
 				div.createSpan({ cls: "couchdb-sync-dot" });
-				div.createSpan({ text: `📄 ${file.name}` });
+				div.createSpan({ text: `📄 ${file.name}`, cls: "couchdb-sync-tree-fname" });
+				addRemove(div, file.path, false);
 				div.dataset.couchdbPath = file.path;
 			}
 		};
-		render(rootNode, container);
+		render(rootNode, container, "");
 	}
 }

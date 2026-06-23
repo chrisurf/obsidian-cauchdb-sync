@@ -28,16 +28,13 @@ export interface CouchDBSyncSettings {
 	autoStart: boolean;
 
 	/**
-	 * Sync hidden files (dotfiles and dot-folders like .obsidian, .git). Normal files
-	 * are always synced. Our own plugin's data.json is always excluded.
+	 * Sync hidden files (dotfiles and dot-folders like .obsidian, .git). When off,
+	 * hidden files are never synced. Our own plugin's data.json is always excluded.
 	 */
 	syncHidden: boolean;
 
-	/** when syncHidden is ON: hidden paths to NOT sync (blacklist) */
-	hiddenExclude: string[];
-
-	/** when syncHidden is OFF: hidden paths to sync anyway (whitelist) */
-	hiddenInclude: string[];
+	/** paths never synced — applies to normal AND hidden files (one per line) */
+	excludePatterns: string[];
 
 	/**
 	 * Crash guard. Set to true while a sync session is starting/running and cleared
@@ -61,17 +58,17 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	liveSync: true,
 	autoStart: true,
 	syncHidden: false,
-	// when hidden sync is ON, keep these volatile/risky hidden paths out
-	hiddenExclude: [
+	// never synced (normal or hidden): build artefacts, VCS, tool dirs, volatile state
+	excludePatterns: [
+		"node_modules/",
 		".git/",
+		".claude/",
 		".trash/",
 		".DS_Store",
 		".obsidian/workspace.json",
 		".obsidian/workspace-mobile.json",
 		".obsidian/cache",
 	],
-	// when hidden sync is OFF, sync nothing hidden by default
-	hiddenInclude: [],
 	unsafeShutdown: false,
 };
 
