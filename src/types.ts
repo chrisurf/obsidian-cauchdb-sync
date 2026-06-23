@@ -31,6 +31,16 @@ export interface CouchDBSyncSettings {
 	autoStart: boolean;
 
 	/**
+	 * Also sync hidden files (dotfiles and dot-folders like .obsidian, .git).
+	 * These have no vault events, so they are scanned by polling. Our own plugin's
+	 * data.json is always excluded; everything else is controlled by ignorePatterns.
+	 */
+	syncHidden: boolean;
+
+	/** when syncHidden is on, hidden paths matching these are still excluded */
+	hiddenExcludePatterns: string[];
+
+	/**
 	 * Crash guard. Set to true while a sync session is starting/running and cleared
 	 * once it reaches a safe steady state. If it is still true at launch, the previous
 	 * session did not finish cleanly (hang/crash), so we start in safe mode (no
@@ -52,6 +62,15 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	ignorePatterns: [".obsidian/", ".trash/", ".git/"],
 	liveSync: true,
 	autoStart: true,
+	syncHidden: false,
+	hiddenExcludePatterns: [
+		".git/",
+		".trash/",
+		".DS_Store",
+		".obsidian/workspace.json",
+		".obsidian/workspace-mobile.json",
+		".obsidian/cache",
+	],
 	unsafeShutdown: false,
 };
 

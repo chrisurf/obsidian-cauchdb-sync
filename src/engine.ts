@@ -25,6 +25,7 @@ import {
 	bytesToText,
 	concatBytes,
 	cyrb53,
+	isHidden,
 	looksLikeText,
 	matchesIgnore,
 	sha256Hex,
@@ -75,6 +76,8 @@ export class SyncEngine {
 	private pending = new Map<string, FileDoc>();
 	/** set when this session is being torn down; long loops bail out on it */
 	private aborted = false;
+	/** interval id for hidden-file polling (hidden files have no vault events) */
+	private hiddenTimer: number | null = null;
 
 	private resolveSoon = debounce(() => void this.resolveConflicts(), 800, false);
 	private saveStateSoon = debounce(() => void this.persistSyncState(), 1500, false);
@@ -104,6 +107,11 @@ export class SyncEngine {
 		await this.publishMasterInfoIfNeeded();
 		this.attachVaultEvents();
 
+		// hidden files have no vault events -> poll for changes periodically
+		if (this.settings.syncHidden) {
+			this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
+		}
+
 		if (this.settings.liveSync) {
 			// Start transfer immediately so already-indexed docs (and remote changes)
 			// flow right away, then index local files in the background, small first.
@@ -119,11 +127,71 @@ export class SyncEngine {
 		try {
 			await this.cleanupTempDocs();
 			await this.indexLocalFiles();
+			if (this.settings.syncHidden) await this.scanHidden();
 			await this.retryPending();
 			await this.resolveConflicts();
 			if (!this.aborted) this.onReady(); // reached a safe steady state -> clear crash guard
 		} catch (e) {
 			if (!this.aborted) this.fail("initial index", e);
+		}
+	}
+
+	// --- hidden files (no vault events -> scanned by polling) ---------------
+
+	/** Recursively list hidden files (dotfiles and files under dot-folders). */
+	private async listHiddenFiles(): Promise<string[]> {
+		const adapter = this.app.vault.adapter;
+		const out: string[] = [];
+		const walk = async (dir: string, insideHidden: boolean): Promise<void> => {
+			if (this.aborted) return;
+			let listing: { files: string[]; folders: string[] };
+			try {
+				listing = await adapter.list(dir);
+			} catch {
+				return;
+			}
+			for (const f of listing.files) {
+				const base = f.split("/").pop() ?? "";
+				if (insideHidden || base.startsWith(".")) out.push(f);
+			}
+			for (const sub of listing.folders) {
+				const base = sub.split("/").pop() ?? "";
+				if (insideHidden || base.startsWith(".")) await walk(sub, true);
+			}
+		};
+		await walk("/", false);
+		return out;
+	}
+
+	/** Index changed hidden files and propagate hidden deletions. Cheap stat checks. */
+	private async scanHidden(): Promise<void> {
+		if (!this.settings.syncHidden || this.aborted) return;
+		const adapter = this.app.vault.adapter;
+		const paths = (await this.listHiddenFiles()).filter((p) => !this.skip(p));
+		const present = new Set(paths);
+
+		for (const path of paths) {
+			if (this.aborted) return;
+			if (this.suppress.has(path)) {
+				this.suppress.delete(path);
+				continue;
+			}
+			const st = await adapter.stat(path);
+			if (!st || st.type !== "file") continue;
+			const rec = this.syncState.get(path);
+			if (rec && rec.mtime === st.mtime && rec.size === st.size) continue; // unchanged
+			try {
+				await this.pushPath(path, st.mtime, st.ctime, st.size);
+			} catch (e) {
+				this.fail(`indexing ${path}`, e);
+			}
+			await this.yieldToUi();
+		}
+
+		// hidden files we synced before but are now gone -> tombstone
+		for (const path of [...this.syncState.keys()]) {
+			if (!isHidden(path) || this.skip(path) || present.has(path)) continue;
+			if (!(await adapter.exists(path))) await this.handleLocalDelete(path);
 		}
 	}
 
@@ -150,6 +218,10 @@ export class SyncEngine {
 	/** Signal a running session (e.g. a long initial scan) to stop as soon as possible. */
 	abort(): void {
 		this.aborted = true;
+		if (this.hiddenTimer !== null) {
+			window.clearInterval(this.hiddenTimer);
+			this.hiddenTimer = null;
+		}
 		if (this.syncHandler) {
 			this.syncHandler.cancel();
 			this.syncHandler = null;
@@ -284,9 +356,16 @@ export class SyncEngine {
 		return !!rec && rec.mtime === file.stat.mtime && rec.size === file.stat.size;
 	}
 
-	/** Paths we never sync: ignore patterns, and our own streaming temp files. */
+	/** Paths we never sync. */
 	private skip(path: string): boolean {
-		return path.endsWith(TMP_SUFFIX) || matchesIgnore(path, this.settings.ignorePatterns);
+		if (path.endsWith(TMP_SUFFIX)) return true;
+		// never sync our own plugin config (deviceId/passphrase/flags are per-device)
+		if (path === `${this.app.vault.configDir}/plugins/couchdb-sync/data.json`) return true;
+		if (isHidden(path)) {
+			// hidden files only when enabled, minus the hidden exclusion list
+			return !this.settings.syncHidden || matchesIgnore(path, this.settings.hiddenExcludePatterns);
+		}
+		return matchesIgnore(path, this.settings.ignorePatterns);
 	}
 
 	// --- local -> db -------------------------------------------------------
@@ -344,6 +423,11 @@ export class SyncEngine {
 	}
 
 	private async pushFile(file: TFile): Promise<void> {
+		await this.pushPath(file.path, file.stat.mtime, file.stat.ctime, file.stat.size);
+	}
+
+	/** Index a file (normal or hidden) into the database by its vault-relative path. */
+	private async pushPath(path: string, mtime: number, ctime: number, size: number): Promise<void> {
 		if (this.settings.e2eeEnabled && !this.settings.passphrase) {
 			this.setStatus(SYNC_STATE.ERROR, "Encryption is on but no passphrase is set.");
 			return;
@@ -357,7 +441,7 @@ export class SyncEngine {
 		const children: string[] = [];
 		let binary = false;
 		let firstPiece = true;
-		for await (const piece of this.streamChunks(file)) {
+		for await (const piece of this.streamChunksPath(path)) {
 			if (this.aborted) return;
 			if (firstPiece) {
 				binary = !looksLikeText(piece);
@@ -377,22 +461,22 @@ export class SyncEngine {
 		}
 		const hash = cyrb53(children.join("|"));
 
-		const existing = await this.db.get(FILE_PREFIX + file.path);
+		const existing = await this.db.get(FILE_PREFIX + path);
 		if (existing && !existing.deleted && existing.hash === hash) {
 			// identical content already in the DB — adopt it, no upload, no conflict
-			this.lastHash.set(file.path, hash);
-			this.recordSynced(file.path, file.stat.mtime, file.stat.size, hash);
+			this.lastHash.set(path, hash);
+			this.recordSynced(path, mtime, size, hash);
 			return;
 		}
 
 		const doc: FileDoc = {
-			_id: FILE_PREFIX + file.path,
+			_id: FILE_PREFIX + path,
 			_rev: existing?._rev,
 			type: "file",
-			path: file.path,
-			mtime: file.stat.mtime,
-			ctime: file.stat.ctime,
-			size: file.stat.size,
+			path,
+			mtime,
+			ctime,
+			size,
 			deleted: false,
 			deviceId: this.settings.deviceId,
 			binary,
@@ -401,21 +485,19 @@ export class SyncEngine {
 			hash,
 		};
 		await this.db.put(doc);
-		this.lastHash.set(file.path, hash);
-		this.recordSynced(file.path, file.stat.mtime, file.stat.size, hash);
+		this.lastHash.set(path, hash);
+		this.recordSynced(path, mtime, size, hash);
 	}
 
 	/**
-	 * Yield a file's content in CHUNK_SIZE byte pieces. On desktop, binary files are
-	 * read incrementally from disk (constant memory, any size). Otherwise the file is
-	 * read whole (text files, and mobile, which has smaller files).
+	 * Yield a file's content in CHUNK_SIZE byte pieces. On desktop, content is read
+	 * incrementally from disk (constant memory, any size). Otherwise the whole file is
+	 * read via the adapter (works for hidden files too). Never decoded as a string.
 	 */
-	private async *streamChunks(file: TFile): AsyncGenerator<Uint8Array> {
+	private async *streamChunksPath(path: string): AsyncGenerator<Uint8Array> {
 		const adapter = this.app.vault.adapter;
 		if (Platform.isDesktop && adapter instanceof FileSystemAdapter) {
-			// Read raw bytes incrementally from disk: constant memory, any size,
-			// and never decoded as a string (so no "Invalid string length").
-			const fullPath = adapter.getFullPath(file.path);
+			const fullPath = adapter.getFullPath(path);
 			// eslint-disable-next-line @typescript-eslint/no-var-requires
 			const fs = require("fs") as typeof import("fs");
 			const fd = await fs.promises.open(fullPath, "r");
@@ -433,8 +515,8 @@ export class SyncEngine {
 			return;
 		}
 
-		// Mobile / non-FS adapter: read the whole file as raw bytes, then slice.
-		const bytes = new Uint8Array(await this.app.vault.readBinary(file));
+		// Mobile / non-FS adapter: read the whole file as raw bytes (works for hidden).
+		const bytes = new Uint8Array(await adapter.readBinary(path));
 		for (const piece of splitBytes(bytes, CHUNK_SIZE)) yield piece;
 	}
 
@@ -444,11 +526,15 @@ export class SyncEngine {
 		const path = doc.path || doc._id;
 		if (this.skip(path)) return;
 
-		const existing = this.app.vault.getAbstractFileByPath(path);
+		const hidden = isHidden(path);
+		const adapter = this.app.vault.adapter;
+		const existing = hidden ? null : this.app.vault.getAbstractFileByPath(path);
 
 		if (doc.deleted) {
-			if (existing instanceof TFile) {
-				this.suppress.add(path);
+			this.suppress.add(path);
+			if (hidden) {
+				if (await adapter.exists(path)) await adapter.remove(path);
+			} else if (existing instanceof TFile) {
 				await this.app.fileManager.trashFile(existing);
 			}
 			this.lastHash.delete(path);
@@ -466,14 +552,13 @@ export class SyncEngine {
 			return;
 		}
 
-		const adapter = this.app.vault.adapter;
 		const desktopFs = Platform.isDesktop && adapter instanceof FileSystemAdapter;
 		try {
 			if (doc.binary && desktopFs) {
 				// Stream chunks straight to disk: never hold the whole file in memory.
 				await this.writeBinaryStreaming(path, children, adapter as FileSystemAdapter, doc.hash);
 			} else {
-				await this.writeAssembled(path, children, doc.binary, existing, doc.hash);
+				await this.writeAssembled(path, children, doc.binary, hidden, existing, doc.hash);
 			}
 		} catch (e) {
 			// chunks not here yet -> wait for them to replicate, then retry
@@ -535,6 +620,7 @@ export class SyncEngine {
 		path: string,
 		children: string[],
 		binary: boolean,
+		hidden: boolean,
 		existing: ReturnType<App["vault"]["getAbstractFileByPath"]>,
 		hash: string
 	): Promise<void> {
@@ -544,28 +630,53 @@ export class SyncEngine {
 
 		this.suppress.add(path);
 		this.lastHash.set(path, hash);
-		await this.ensureFolder(path);
+		await this.ensureFolder(path, hidden);
+		const adapter = this.app.vault.adapter;
 
 		if (binary) {
 			const buf = new ArrayBuffer(bytes.byteLength);
 			new Uint8Array(buf).set(bytes);
-			if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, buf);
+			if (hidden) await adapter.writeBinary(path, buf);
+			else if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, buf);
 			else await this.app.vault.createBinary(path, buf);
 		} else {
 			const text = bytesToText(bytes);
-			if (existing instanceof TFile) await this.app.vault.modify(existing, text);
+			if (hidden) await adapter.write(path, text);
+			else if (existing instanceof TFile) await this.app.vault.modify(existing, text);
 			else await this.app.vault.create(path, text);
 		}
 
-		const written = this.app.vault.getAbstractFileByPath(path);
-		if (written instanceof TFile) {
-			this.recordSynced(path, written.stat.mtime, written.stat.size, hash);
+		if (hidden) {
+			const st = await adapter.stat(path);
+			if (st) this.recordSynced(path, st.mtime, st.size, hash);
+		} else {
+			const written = this.app.vault.getAbstractFileByPath(path);
+			if (written instanceof TFile) {
+				this.recordSynced(path, written.stat.mtime, written.stat.size, hash);
+			}
 		}
 	}
 
-	private async ensureFolder(filePath: string): Promise<void> {
+	private async ensureFolder(filePath: string, hidden: boolean): Promise<void> {
 		const dir = normalizePath(filePath.split("/").slice(0, -1).join("/"));
 		if (!dir || dir === "/" || dir === ".") return;
+		const adapter = this.app.vault.adapter;
+		if (hidden) {
+			// build nested dot-folders via the adapter (vault.createFolder skips dotfolders)
+			const parts = dir.split("/");
+			let cur = "";
+			for (const p of parts) {
+				cur = cur ? `${cur}/${p}` : p;
+				if (!(await adapter.exists(cur))) {
+					try {
+						await adapter.mkdir(cur);
+					} catch {
+						/* exists / race */
+					}
+				}
+			}
+			return;
+		}
 		if (this.app.vault.getAbstractFileByPath(dir) instanceof TFolder) return;
 		try {
 			await this.app.vault.createFolder(dir);

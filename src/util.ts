@@ -136,6 +136,11 @@ export function looksLikeText(sample: Uint8Array): boolean {
 	return control / len < 0.3;
 }
 
+/** A hidden path has at least one segment starting with "." (dotfile/dot-folder). */
+export function isHidden(path: string): boolean {
+	return path.split("/").some((seg) => seg.startsWith("."));
+}
+
 export function matchesIgnore(path: string, patterns: string[]): boolean {
 	return patterns.some((p) => {
 		if (!p) return false;
