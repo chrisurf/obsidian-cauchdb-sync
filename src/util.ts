@@ -97,19 +97,43 @@ export function concatBytes(parts: Uint8Array[]): Uint8Array {
 	return out;
 }
 
-/** Treat these extensions as binary. Everything else is read as UTF-8 text. */
-const BINARY_EXTENSIONS = new Set([
-	"png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "ico",
-	"pdf", "mp3", "wav", "ogg", "flac", "m4a", "mp4", "mov", "webm", "avi",
-	"zip", "gz", "7z", "rar", "tar",
-	"ttf", "otf", "woff", "woff2", "eot",
-	"xlsx", "docx", "pptx", "odt",
-	"bin", "dat",
+/**
+ * Known text extensions. Everything else is treated as binary, which is the safe
+ * default: an unknown large file (e.g. ".lpf", media, archives) must never be read
+ * as a UTF-8 string (that throws "Invalid string length" on big files).
+ */
+const TEXT_EXTENSIONS = new Set([
+	"md", "markdown", "txt", "text", "rtf", "log",
+	"json", "jsonc", "ndjson", "csv", "tsv",
+	"yaml", "yml", "toml", "ini", "cfg", "conf", "env", "properties",
+	"xml", "html", "htm", "svg", "css", "scss",
+	"js", "mjs", "cjs", "ts", "tsx", "jsx",
+	"canvas", "bib", "org", "tex", "rmd",
 ]);
 
 export function isBinaryPath(path: string): boolean {
 	const ext = path.split(".").pop()?.toLowerCase() ?? "";
-	return BINARY_EXTENSIONS.has(ext);
+	return !TEXT_EXTENSIONS.has(ext);
+}
+
+/**
+ * Content-based text/binary detection — reliable regardless of file extension.
+ * Inspects a sample of the raw bytes:
+ *  - a NUL byte means binary (this is exactly how git decides), and
+ *  - an unusually high share of other control bytes means binary too.
+ * Empty files and normal UTF-8/ASCII text return true (text).
+ */
+export function looksLikeText(sample: Uint8Array): boolean {
+	const len = Math.min(sample.length, 8000);
+	if (len === 0) return true;
+	let control = 0;
+	for (let i = 0; i < len; i++) {
+		const b = sample[i];
+		if (b === 0) return false; // NUL -> definitely binary
+		// allow tab(9), LF(10), VT(11), FF(12), CR(13); flag other C0 controls
+		if (b < 9 || (b > 13 && b < 32)) control++;
+	}
+	return control / len < 0.3;
 }
 
 export function matchesIgnore(path: string, patterns: string[]): boolean {

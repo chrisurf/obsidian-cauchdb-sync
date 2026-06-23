@@ -22,6 +22,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private db: SyncDatabase | null = null;
 	private engine: SyncEngine | null = null;
 	private statusEl!: HTMLElement;
+	private restartLock: Promise<void> = Promise.resolve();
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -51,6 +52,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	async onunload(): Promise<void> {
+		this.engine?.abort();
+		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
@@ -65,7 +68,20 @@ export default class CouchDBSyncPlugin extends Plugin {
 		}
 	}
 
-	async restartSync(): Promise<void> {
+	/**
+	 * Restart synchronization. Calls are serialized so two restarts (e.g. layout-ready
+	 * plus a settings toggle) can never run concurrently and tear down each other's
+	 * database mid-scan. A new call first aborts any running session so it stops fast.
+	 */
+	restartSync(): Promise<void> {
+		this.engine?.abort();
+		this.restartLock = this.restartLock
+			.catch(() => undefined)
+			.then(() => this.doRestart());
+		return this.restartLock;
+	}
+
+	private async doRestart(): Promise<void> {
 		this.engine?.stop();
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
@@ -82,10 +98,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 			return;
 		}
 
-		this.db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
-		this.engine = new SyncEngine(this.app, this.db, this.settings, (s, d) => this.setStatus(s, d));
+		const db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
+		const engine = new SyncEngine(this.app, db, this.settings, (s, d) => this.setStatus(s, d));
+		this.db = db;
+		this.engine = engine;
 		try {
-			await this.engine.start();
+			await engine.start();
 		} catch (e) {
 			this.setStatus(SYNC_STATE.ERROR, String(e));
 			new Notice(`CouchDB Sync failed to start: ${e}`);

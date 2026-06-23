@@ -1,4 +1,13 @@
-import { App, EventRef, TFile, TFolder, normalizePath, debounce } from "obsidian";
+import {
+	App,
+	EventRef,
+	FileSystemAdapter,
+	Platform,
+	TFile,
+	TFolder,
+	normalizePath,
+	debounce,
+} from "obsidian";
 import { SyncDatabase } from "./database";
 import { decryptString, encryptString } from "./crypto";
 import {
@@ -15,7 +24,7 @@ import {
 	bytesToText,
 	concatBytes,
 	cyrb53,
-	isBinaryPath,
+	looksLikeText,
 	matchesIgnore,
 	sha256Hex,
 	splitBytes,
@@ -56,6 +65,8 @@ export class SyncEngine {
 	private syncState = new Map<string, SyncRecord>();
 	/** file docs we could not apply yet because some chunks were missing */
 	private pending = new Map<string, FileDoc>();
+	/** set when this session is being torn down; long loops bail out on it */
+	private aborted = false;
 
 	private resolveSoon = debounce(() => void this.resolveConflicts(), 800, false);
 	private saveStateSoon = debounce(() => void this.persistSyncState(), 1500, false);
@@ -74,8 +85,10 @@ export class SyncEngine {
 		this.db.connectRemote();
 
 		await this.loadSyncState();
+		if (this.aborted) return;
 		await this.publishMasterInfoIfNeeded();
 		await this.reconcile();
+		if (this.aborted) return;
 		this.attachVaultEvents();
 
 		if (this.settings.liveSync) {
@@ -85,13 +98,21 @@ export class SyncEngine {
 		}
 	}
 
-	stop(): void {
-		for (const ref of this.eventRefs) this.app.vault.offref(ref);
-		this.eventRefs = [];
+	/** Signal a running session (e.g. a long initial scan) to stop as soon as possible. */
+	abort(): void {
+		this.aborted = true;
 		if (this.syncHandler) {
 			this.syncHandler.cancel();
 			this.syncHandler = null;
 		}
+	}
+
+	stop(): void {
+		this.abort();
+		this.resolveSoon.cancel();
+		this.saveStateSoon.cancel();
+		for (const ref of this.eventRefs) this.app.vault.offref(ref);
+		this.eventRefs = [];
 	}
 
 	getEventRefs(): EventRef[] {
@@ -175,16 +196,10 @@ export class SyncEngine {
 
 		// 1) files present locally -> ensure they are in the DB
 		for (const file of localFiles) {
+			if (this.aborted) return;
 			try {
 				if (this.isUnchanged(file)) continue; // matches our last-synced record
-				const doc = docByPath.get(file.path);
-				if (doc && !doc.deleted && (await this.hashLocal(file)) === doc.hash) {
-					// identical content already in the DB — just adopt it, no upload/conflict
-					this.recordSynced(file.path, file.stat.mtime, file.stat.size, doc.hash);
-					this.lastHash.set(file.path, doc.hash);
-				} else {
-					await this.pushFile(file);
-				}
+				await this.pushFile(file); // pushFile adopts identical content without re-uploading
 			} catch (e) {
 				this.fail(`indexing ${file.path}`, e); // one bad file must not abort startup
 			}
@@ -192,6 +207,7 @@ export class SyncEngine {
 
 		// 2) docs present in DB but missing locally -> create or honor tombstone
 		for (const doc of docs) {
+			if (this.aborted) return;
 			if (localByPath.has(doc._id)) continue;
 			try {
 				await this.applyRemoteChange(doc);
@@ -269,19 +285,41 @@ export class SyncEngine {
 			this.setStatus(SYNC_STATE.ERROR, "Encryption is on but no passphrase is set.");
 			return;
 		}
+		const enc = this.settings.e2eeEnabled;
+		const pass = this.settings.passphrase;
 
-		const bytes = await this.readBytes(file);
-		const { children, chunks } = await this.buildChunks(bytes);
-		const hash = cyrb53(children.join("|"));
-		if (this.lastHash.get(file.path) === hash) {
-			this.recordSynced(file.path, file.stat.mtime, file.stat.size, hash);
-			return; // content unchanged / our own echo
+		// Stream the file in pieces so even multi-hundred-MB files never sit in memory
+		// or get turned into one giant string. Each piece becomes one immutable chunk.
+		// The first piece also decides, by content, whether this is a text or binary file.
+		const children: string[] = [];
+		let binary = false;
+		let firstPiece = true;
+		for await (const piece of this.streamChunks(file)) {
+			if (this.aborted) return;
+			if (firstPiece) {
+				binary = !looksLikeText(piece);
+				firstPiece = false;
+			}
+			const b64 = uint8ToBase64(piece);
+			const id = "h:" + (await sha256Hex(textToBytes((enc ? pass : "") + ":" + b64)));
+			children.push(id);
+			await this.db.putChunkIfAbsent({
+				_id: id,
+				type: "chunk",
+				enc,
+				data: enc ? await encryptString(b64, pass) : b64,
+			});
 		}
-
-		// store any not-yet-existing chunks first, so the file doc never dangles
-		for (const chunk of chunks) await this.db.putChunkIfAbsent(chunk);
+		const hash = cyrb53(children.join("|"));
 
 		const existing = await this.db.get(file.path);
+		if (existing && !existing.deleted && existing.hash === hash) {
+			// identical content already in the DB — adopt it, no upload, no conflict
+			this.lastHash.set(file.path, hash);
+			this.recordSynced(file.path, file.stat.mtime, file.stat.size, hash);
+			return;
+		}
+
 		const doc: FileDoc = {
 			_id: file.path,
 			_rev: existing?._rev,
@@ -292,8 +330,8 @@ export class SyncEngine {
 			size: file.stat.size,
 			deleted: false,
 			deviceId: this.settings.deviceId,
-			binary: isBinaryPath(file.path),
-			enc: this.settings.e2eeEnabled,
+			binary,
+			enc,
 			children,
 			hash,
 		};
@@ -302,45 +340,37 @@ export class SyncEngine {
 		this.recordSynced(file.path, file.stat.mtime, file.stat.size, hash);
 	}
 
-	private async readBytes(file: TFile): Promise<Uint8Array> {
-		if (isBinaryPath(file.path)) {
-			return new Uint8Array(await this.app.vault.readBinary(file));
+	/**
+	 * Yield a file's content in CHUNK_SIZE byte pieces. On desktop, binary files are
+	 * read incrementally from disk (constant memory, any size). Otherwise the file is
+	 * read whole (text files, and mobile, which has smaller files).
+	 */
+	private async *streamChunks(file: TFile): AsyncGenerator<Uint8Array> {
+		const adapter = this.app.vault.adapter;
+		if (Platform.isDesktop && adapter instanceof FileSystemAdapter) {
+			// Read raw bytes incrementally from disk: constant memory, any size,
+			// and never decoded as a string (so no "Invalid string length").
+			const fullPath = adapter.getFullPath(file.path);
+			// eslint-disable-next-line @typescript-eslint/no-var-requires
+			const fs = require("fs") as typeof import("fs");
+			const fd = await fs.promises.open(fullPath, "r");
+			try {
+				const buf = new Uint8Array(CHUNK_SIZE);
+				for (;;) {
+					if (this.aborted) return;
+					const { bytesRead } = await fd.read(buf, 0, CHUNK_SIZE, null);
+					if (bytesRead === 0) break;
+					yield buf.slice(0, bytesRead); // copy out before the buffer is reused
+				}
+			} finally {
+				await fd.close();
+			}
+			return;
 		}
-		return textToBytes(await this.app.vault.read(file));
-	}
 
-	/** Split bytes into content-addressed, optionally encrypted chunk documents. */
-	private async buildChunks(
-		bytes: Uint8Array
-	): Promise<{ children: string[]; chunks: ChunkDoc[] }> {
-		const enc = this.settings.e2eeEnabled;
-		const pass = this.settings.passphrase;
-		const children: string[] = [];
-		const chunks: ChunkDoc[] = [];
-		for (const piece of splitBytes(bytes, CHUNK_SIZE)) {
-			const b64 = uint8ToBase64(piece);
-			const id = "h:" + (await sha256Hex(textToBytes((enc ? pass : "") + ":" + b64)));
-			children.push(id);
-			chunks.push({
-				_id: id,
-				type: "chunk",
-				enc,
-				data: enc ? await encryptString(b64, pass) : b64,
-			});
-		}
-		return { children, chunks };
-	}
-
-	/** Content fingerprint of a local file (chunk ids only, no encryption work). */
-	private async hashLocal(file: TFile): Promise<string> {
-		const enc = this.settings.e2eeEnabled;
-		const pass = this.settings.passphrase;
-		const ids: string[] = [];
-		for (const piece of splitBytes(await this.readBytes(file), CHUNK_SIZE)) {
-			const b64 = uint8ToBase64(piece);
-			ids.push("h:" + (await sha256Hex(textToBytes((enc ? pass : "") + ":" + b64))));
-		}
-		return cyrb53(ids.join("|"));
+		// Mobile / non-FS adapter: read the whole file as raw bytes, then slice.
+		const bytes = new Uint8Array(await this.app.vault.readBinary(file));
+		for (const piece of splitBytes(bytes, CHUNK_SIZE)) yield piece;
 	}
 
 	// --- db -> local -------------------------------------------------------
