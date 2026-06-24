@@ -1,0 +1,210 @@
+/* CouchDB Sync — settings UI styles. The runtime status indicator lives in the status bar. */
+
+.couchdb-sync-index {
+	margin-bottom: 1em;
+}
+
+.couchdb-sync-summary {
+	font-weight: 600;
+}
+
+.couchdb-sync-ok .couchdb-sync-summary {
+	color: var(--color-green);
+}
+
+.couchdb-sync-warn,
+.couchdb-sync-warn .couchdb-sync-summary {
+	color: var(--color-orange);
+}
+
+.couchdb-sync-drift summary {
+	cursor: pointer;
+	color: var(--color-orange);
+}
+
+.couchdb-sync-drift ul {
+	margin: 0.25em 0 0.5em 1em;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.couchdb-sync-tree-root > summary {
+	cursor: pointer;
+	margin-top: 0.5em;
+	font-weight: 600;
+}
+
+.couchdb-sync-tree {
+	font-size: var(--font-ui-smaller);
+	font-family: var(--font-monospace);
+	margin-top: 0.5em;
+}
+
+.couchdb-sync-tree details > summary {
+	cursor: pointer;
+}
+
+.couchdb-sync-tree-children {
+	padding-left: 1.1em;
+	border-left: 1px solid var(--background-modifier-border);
+	margin-left: 0.35em;
+}
+
+.couchdb-sync-tree-file {
+	display: flex;
+	align-items: center;
+	gap: 0.3em;
+	padding-left: 0.2em;
+	color: var(--text-muted);
+}
+
+.couchdb-sync-tree-fname {
+	flex: 1;
+	overflow-wrap: anywhere;
+}
+
+.couchdb-sync-tree-folder {
+	display: flex;
+	align-items: center;
+	gap: 0.3em;
+	cursor: pointer;
+}
+
+.couchdb-sync-tree-folder > span:first-child {
+	flex: 1;
+}
+
+/* red X to remove an entry from the index */
+.couchdb-sync-x {
+	flex: none;
+	width: 1.4em;
+	height: 1.4em;
+	padding: 0;
+	line-height: 1;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-on-accent);
+	background: var(--color-red);
+	border: none;
+	border-radius: 3px;
+	cursor: pointer;
+	opacity: 0.55;
+}
+
+.couchdb-sync-x:hover {
+	opacity: 1;
+}
+
+/* --- status indicator + progress --- */
+
+.couchdb-sync-status {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35em;
+}
+
+.couchdb-sync-status-icon {
+	display: inline-flex;
+	align-items: center;
+}
+
+.couchdb-sync-status-icon svg {
+	width: 0.9em;
+	height: 0.9em;
+}
+
+@keyframes couchdb-sync-rot {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(360deg); }
+}
+
+.couchdb-sync-spin svg {
+	animation: couchdb-sync-rot 1s linear infinite;
+}
+
+.couchdb-sync-livestatus {
+	margin: 0.25em 0 0.75em;
+}
+
+.couchdb-sync-livestatus-row {
+	display: flex;
+	align-items: center;
+	gap: 0.4em;
+	font-weight: 600;
+}
+
+.couchdb-sync-livestatus-label {
+	color: var(--text-normal);
+}
+
+.couchdb-sync-progress {
+	width: 100%;
+	margin-top: 0.4em;
+	height: 0.6em;
+}
+
+/* --- "currently working on this file" feedback --- */
+
+/* small leading dot before each file row; invisible until the row is active */
+.couchdb-sync-dot {
+	display: inline-block;
+	width: 0.5em;
+	height: 0.5em;
+	margin-right: 0.45em;
+	border-radius: 50%;
+	background: transparent;
+	vertical-align: middle;
+}
+
+.couchdb-sync-active .couchdb-sync-dot {
+	background: var(--interactive-accent);
+	animation: couchdb-sync-pulse 0.9s ease-in-out infinite;
+}
+
+@keyframes couchdb-sync-pulse {
+	0%, 100% { transform: scale(0.6); opacity: 0.5; }
+	50% { transform: scale(1.4); opacity: 1; }
+}
+
+/* left-to-right scan highlight across the active row */
+.couchdb-sync-active {
+	border-radius: 4px;
+	background-image: linear-gradient(
+		90deg,
+		transparent 0%,
+		var(--background-modifier-hover) 50%,
+		transparent 100%
+	);
+	background-size: 200% 100%;
+	background-repeat: no-repeat;
+	animation: couchdb-sync-scan 1.2s linear infinite;
+}
+
+@keyframes couchdb-sync-scan {
+	from { background-position: 200% 0; }
+	to { background-position: -200% 0; }
+}
+
+.couchdb-sync-prog {
+	color: var(--interactive-accent);
+	font-variant-numeric: tabular-nums;
+	font-size: var(--font-ui-smaller);
+}
+
+.couchdb-sync-drift-item {
+	display: flex;
+	align-items: center;
+	gap: 0.4em;
+}
+
+.couchdb-sync-drift-name {
+	flex: 1;
+	overflow-wrap: anywhere;
+}
+
+.couchdb-sync-rowbtn {
+	flex: none;
+	padding: 0 0.6em;
+	height: 1.6em;
+	font-size: var(--font-ui-smaller);
+	cursor: pointer;
+}
