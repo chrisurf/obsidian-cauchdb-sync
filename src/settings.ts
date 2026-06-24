@@ -19,6 +19,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	private treeEl?: HTMLElement;
 	private driftSig = "";
 	private treeSig = "";
+	private indexLoading = false; // prevent overlapping loadIndex() runs (PouchDB connection races)
 
 	constructor(app: App, plugin: CouchDBSyncPlugin) {
 		super(app, plugin);
@@ -47,6 +48,12 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h2", { text: "CouchDB connection" });
 
+		// Any change to credentials voids the "connection verified" flag — otherwise
+		// flipping the URL would not re-gate the index status view.
+		const onCredsChanged = async () => {
+			await this.plugin.invalidateConnection();
+		};
+
 		new Setting(containerEl)
 			.setName("Server URL")
 			.setDesc("Full URL incl. protocol and port. Must be https for mobile and for encryption in transit.")
@@ -57,6 +64,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					.onChange(async (v) => {
 						s.serverUrl = v.trim();
 						await this.plugin.saveSettings();
+						await onCredsChanged();
 					})
 			);
 
@@ -64,6 +72,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			t.setValue(s.dbName).onChange(async (v) => {
 				s.dbName = v.trim();
 				await this.plugin.saveSettings();
+				await onCredsChanged();
 			})
 		);
 
@@ -71,6 +80,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			t.setValue(s.username).onChange(async (v) => {
 				s.username = v.trim();
 				await this.plugin.saveSettings();
+				await onCredsChanged();
 			})
 		);
 
@@ -79,18 +89,24 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			t.setValue(s.password).onChange(async (v) => {
 				s.password = v;
 				await this.plugin.saveSettings();
+				await onCredsChanged();
 			});
 		});
 
 		new Setting(containerEl)
 			.setName("Test connection")
-			.setDesc("Check the server URL, database and credentials.")
+			.setDesc("Check the server URL, database and credentials. On success this also unlocks the Index status view (it stays hidden until you have proven the credentials).")
 			.addButton((b) =>
 				b.setButtonText("Test").onClick(async () => {
 					const db = new SyncDatabase(s, "couchdb-sync-test-probe");
 					const res = await db.testConnection();
 					new Notice(res.message, res.ok ? 4000 : 8000);
 					await db.close();
+					if (res.ok) {
+						await this.plugin.markConnectionVerified();
+						this.driftSig = ""; // force the index view to refresh
+						this.treeSig = "";
+					}
 				})
 			);
 
@@ -224,7 +240,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Sync now")
-			.setDesc("Connect and synchronize both ways — upload your changes AND download others'. With Live sync on, this also (re)starts continuous sync.")
+			.setDesc(
+				"Connect and synchronize both ways — upload local changes AND pull server changes. " +
+					"Also writes any cached-but-missing files from the local index to disk " +
+					"(heals 'Only in database' entries). With Live sync on, this also (re)starts continuous sync."
+			)
 			.addButton((b) =>
 				b
 					.setCta()
@@ -237,7 +257,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Download from server")
-			.setDesc("Pull the server's state to this device WITHOUT uploading local changes. Useful on a follower device, or to force the master's state.")
+			.setDesc(
+				"Pull the server's state to this device WITHOUT uploading local changes, then " +
+					"materialize anything that is in the local index but missing on disk. " +
+					"Useful on a follower device, after a Google Drive desync, or to force the master's state."
+			)
 			.addButton((b) =>
 				b.setButtonText("Download only").onClick(async () => {
 					new Notice("Downloading from server…");
@@ -270,8 +294,45 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl)
+			.setName("Forget local cache when plugin is disabled")
+			.setDesc(
+				"Privacy mode. When you disable or uninstall the plugin, the local PouchDB " +
+					"(containing UNENCRYPTED file paths, sizes, and hashes — even with E2EE on) " +
+					"is destroyed. Trade-off: re-enabling forces a full re-download from the server. " +
+					"Off by default."
+			)
+			.addToggle((t) =>
+				t.setValue(s.forgetCacheOnDisable).onChange(async (v) => {
+					s.forgetCacheOnDisable = v;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		// Legacy cleanup: before vault isolation, every vault on the machine shared
+		// one global PouchDB named "couchdb-sync-local". Offer to delete it so the
+		// data from old vaults stops leaking into the index status.
+		void this.plugin.legacyLocalDbDocCount().then((n) => {
+			if (n <= 0) return;
+			new Setting(containerEl)
+				.setName("Wipe legacy shared cache")
+				.setDesc(
+					`A pre-vault-isolation local cache with ${n} document(s) was found. It is shared across ALL vaults on this machine and may show files from other vaults in the index. Safe to delete — the server is not touched.`
+				)
+				.addButton((b) =>
+					b
+						.setWarning()
+						.setButtonText("Wipe legacy cache")
+						.onClick(async () => {
+							await this.plugin.wipeLegacyLocalDb();
+							new Notice("Legacy shared cache wiped.");
+							this.display();
+						})
+				);
+		});
+
 		containerEl.createEl("p", {
-			text: `Device ID: ${s.deviceId || "(not yet assigned)"}`,
+			text: `Device ID: ${s.deviceId || "(not yet assigned)"}  ·  Local DB id: ${s.localDbId || "(not yet assigned)"}`,
 			cls: "setting-item-description",
 		});
 	}
@@ -369,6 +430,20 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	 * so the page doesn't flicker and an expanded tree stays expanded.
 	 */
 	private async loadIndex(force: boolean): Promise<void> {
+		// Re-entrancy guard. The auto-refresh interval fires every AUTO_REFRESH_MS,
+		// but the previous call may still be in flight (slow IDB, big vault). Two
+		// concurrent runs would open the same PouchDB twice and the second close()
+		// can race with the first's pending IDB transactions ("connection is closing").
+		if (this.indexLoading && !force) return;
+		this.indexLoading = true;
+		try {
+			await this.loadIndexInner(force);
+		} finally {
+			this.indexLoading = false;
+		}
+	}
+
+	private async loadIndexInner(force: boolean): Promise<void> {
 		const summary = this.summaryEl;
 		const counts = this.countsEl;
 		const driftBox = this.driftEl;
@@ -385,9 +460,55 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		}
 		if (!report) {
 			summary.className = "";
-			summary.setText("Sync is not running. Configure the connection (and passphrase) and restart sync.");
+			const s = this.plugin.settings;
+			if (!s.serverUrl) {
+				summary.setText("Sync is not running. Configure the connection (and passphrase) and restart sync.");
+				driftBox.empty();
+			} else if (!s.connectionVerified) {
+				summary.setText(
+					"Index status is hidden until the server connection is verified. Press 'Test connection' above — on success the index unlocks."
+				);
+				driftBox.empty();
+			} else {
+				// Verified, but the report still came back null — most likely an origin
+				// mismatch (cache was stamped by a different remote). Tell the user and
+				// expose the two recovery actions: wipe (safe default) or re-stamp
+				// (adopt the cache for this remote, if they know it is theirs).
+				const origin = await this.plugin.getOriginState().catch(() => "unset" as const);
+				if (origin === "mismatch") {
+					summary.className = "couchdb-sync-warn";
+					summary.setText(
+						"⚠ Local cache belongs to a different remote (server URL / database / username changed since it was filled). " +
+							"Its contents are hidden to avoid showing files from the previous remote."
+					);
+					driftBox.empty();
+					const actions = driftBox.createDiv({ cls: "couchdb-sync-drift" });
+					const wipeBtn = actions.createEl("button", {
+						text: "Wipe local cache",
+						cls: "couchdb-sync-rowbtn",
+					});
+					wipeBtn.onclick = async () => {
+						await this.plugin.wipeLocalOnly();
+						new Notice("Local cache wiped. Press 'Sync now' to rebuild from the new remote.");
+						this.display();
+					};
+					const adoptBtn = actions.createEl("button", {
+						text: "Adopt cache for this remote",
+						cls: "couchdb-sync-rowbtn",
+					});
+					adoptBtn.onclick = async () => {
+						await this.plugin.stampOriginFingerprint();
+						new Notice("Cache adopted for the current remote.");
+						this.driftSig = "";
+						this.treeSig = "";
+						await this.loadIndex(true);
+					};
+				} else {
+					summary.setText("Sync is not running. Press 'Sync now' or 'Download only' to start.");
+					driftBox.empty();
+				}
+			}
 			counts.setText("");
-			driftBox.empty();
 			treeBox.empty();
 			this.driftSig = this.treeSig = "";
 			return;
