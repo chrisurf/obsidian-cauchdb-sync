@@ -115,7 +115,10 @@ export async function buildIndexReport(
 	const vaultPaths = [...normal, ...hidden].filter((p) => !isSkipped(p, app, settings));
 	const vaultSet = new Set(vaultPaths);
 
-	const docs = (await db.getAll()).filter((d) => !d.deleted);
+	// Only count/show docs we are actually allowed to sync. The database may contain
+	// hidden docs pushed by another device; with hidden sync off (or a path excluded)
+	// they must NOT appear here as "pending" or in the tree — they are never written.
+	const docs = (await db.getAll()).filter((d) => !d.deleted && !isSkipped(d.path, app, settings));
 	const docByPath = new Map(docs.map((d) => [d.path, d] as const));
 
 	const inSync: string[] = [];
