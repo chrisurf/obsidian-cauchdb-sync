@@ -74,27 +74,34 @@
 	flex: 1;
 }
 
-/* --- local-vs-remote colour coding for the Remote state tree --- */
+/* --- four-state colour coding for the Sync state tree --- */
 
-/* green: file is here on this device and in sync with the database */
+/* green: on this device and in sync with the database */
 .couchdb-sync-state-synced,
 .couchdb-sync-state-synced .couchdb-sync-tree-fname {
 	color: var(--color-green);
 }
 
-/* amber: file is here but its content differs from the database */
-.couchdb-sync-state-drift,
-.couchdb-sync-state-drift .couchdb-sync-tree-fname {
+/* amber: on this device only — not yet in the database */
+.couchdb-sync-state-local,
+.couchdb-sync-state-local .couchdb-sync-tree-fname {
 	color: var(--color-orange);
 }
 
-/* grey: file is only in the database, not on this device */
+/* grey: in the database only — not on this device */
 .couchdb-sync-state-remote,
 .couchdb-sync-state-remote .couchdb-sync-tree-fname {
 	color: var(--text-faint);
 }
 
-/* mixed folder: some descendants here, some remote-only — stay neutral */
+/* red: diverged / unresolved conflict */
+.couchdb-sync-state-conflict,
+.couchdb-sync-state-conflict .couchdb-sync-tree-fname {
+	color: var(--color-red);
+	font-weight: 600;
+}
+
+/* mixed folder: descendants in different states — stay neutral */
 .couchdb-sync-state-mixed,
 .couchdb-sync-state-mixed > span:first-child {
 	color: var(--text-normal);
@@ -133,12 +140,16 @@
 	background: var(--color-green);
 }
 
-.couchdb-sync-swatch.couchdb-sync-state-drift {
+.couchdb-sync-swatch.couchdb-sync-state-local {
 	background: var(--color-orange);
 }
 
 .couchdb-sync-swatch.couchdb-sync-state-remote {
 	background: var(--text-faint);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-conflict {
+	background: var(--color-red);
 }
 
 .couchdb-sync-legend-note {

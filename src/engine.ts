@@ -47,6 +47,7 @@ export interface IndexReport {
 	localOnly: string[]; // on this device, not yet in the database
 	dbOnly: string[]; // in the database, not on this device
 	drift: string[]; // present on both but content differs
+	conflicts: string[]; // unresolved conflict revisions in the database
 	allDbPaths: string[]; // every indexed path (for the tree view)
 }
 
@@ -139,6 +140,17 @@ export async function buildIndexReport(
 		if (!vaultSet.has(d.path)) dbOnly.push(d.path);
 	}
 
+	// Unresolved CouchDB conflict revisions (rare and usually auto-resolved, but
+	// shown in red while present). Best-effort: never let it break the report.
+	let conflicts: string[] = [];
+	try {
+		conflicts = (await db.getConflicted())
+			.map((d) => d.path)
+			.filter((p) => !isSkipped(p, app, settings));
+	} catch {
+		/* ignore — conflicts are advisory in the report */
+	}
+
 	const sort = (a: string[]) => a.sort((x, y) => x.localeCompare(y));
 	return {
 		vaultCount: vaultPaths.length,
@@ -147,6 +159,7 @@ export async function buildIndexReport(
 		localOnly: sort(localOnly),
 		dbOnly: sort(dbOnly),
 		drift: sort(drift),
+		conflicts: sort(conflicts),
 		allDbPaths: sort(docs.map((d) => d.path)),
 	};
 }

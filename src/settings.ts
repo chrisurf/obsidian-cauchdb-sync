@@ -6,8 +6,13 @@ import { SYNC_STATE, SyncStatus } from "./types";
 
 const AUTO_REFRESH_MS = 3_000;
 
-/** How a database file relates to this device (drives the tree colour coding). */
-type FileState = "synced" | "drift" | "remote";
+/** How a file relates to this device vs the database (drives the tree colours).
+ *   synced   — on this device and in sync, no conflict   (green)
+ *   local    — on this device only, not in the database  (amber)
+ *   remote   — in the database only, not on this device  (grey)
+ *   conflict — diverged: content differs / unresolved    (red)
+ */
+type FileState = "synced" | "local" | "remote" | "conflict";
 
 export class CouchDBSyncSettingTab extends PluginSettingTab {
 	plugin: CouchDBSyncPlugin;
@@ -417,46 +422,48 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			this.renderDriftList(driftBox, "Content differs (will be resolved by your conflict strategy)", report.drift);
 		}
 
-		// Per-path local-vs-remote state for the tree colour coding.
-		//   synced = in the database AND identical on this device   (green)
-		//   drift  = in the database AND on this device but differs  (amber)
-		//   remote = in the database but NOT on this device          (grey)
-		// The tree shows the REMOTE (database) state, so it covers exactly these three.
+		// Per-path state driving the tree colours. The tree shows the full picture —
+		// every file on this device AND in the database — so all four states appear.
+		// Priority: conflict (red) > local-only (amber) > remote-only (grey) > synced.
 		const stateByPath = new Map<string, FileState>();
 		for (const p of report.inSync) stateByPath.set(p, "synced");
-		for (const p of report.drift) stateByPath.set(p, "drift");
 		for (const p of report.dbOnly) stateByPath.set(p, "remote");
+		for (const p of report.localOnly) stateByPath.set(p, "local");
+		for (const p of report.drift) stateByPath.set(p, "conflict");
+		for (const p of report.conflicts) stateByPath.set(p, "conflict");
+		const conflictCount = new Set([...report.drift, ...report.conflicts]).size;
 
-		// rebuild only when the indexed set OR any path's state changed (so colours
-		// update when a file finishes downloading; keeps the tree expanded otherwise)
-		const localCount = report.inSync.length + report.drift.length;
-		const treeSig = JSON.stringify(report.allDbPaths.map((p) => [p, stateByPath.get(p)]));
+		// Union of database paths and local-only paths = the complete file set.
+		const allPaths = [...new Set([...report.allDbPaths, ...report.localOnly])].sort((a, b) =>
+			a.localeCompare(b)
+		);
+
+		// rebuild only when the set OR any path's state changed (so colours update as
+		// files download/converge; keeps the tree expanded otherwise)
+		const treeSig = JSON.stringify(allPaths.map((p) => [p, stateByPath.get(p)]));
 		if (force || treeSig !== this.treeSig) {
 			this.treeSig = treeSig;
 			treeBox.empty();
 			const tree = treeBox.createEl("details", { cls: "couchdb-sync-tree-root" });
 			tree.createEl("summary", {
-				text: `☁️ Remote state — ${report.allDbPaths.length} files in the database`,
+				text: `🗂 Sync state — ${allPaths.length} files (this device + database)`,
 			});
 			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
 			const legend = body.createDiv({ cls: "couchdb-sync-legend" });
 			legend.createEl("p", {
 				cls: "couchdb-sync-legend-intro",
-				text: "What the server holds. Colour shows whether each file is also on THIS device:",
+				text: "Every file across this device and the server. Colour shows its state:",
 			});
 			const mk = (state: FileState, label: string) => {
 				const item = legend.createSpan({ cls: "couchdb-sync-legend-item" });
 				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
 				item.createSpan({ text: label });
 			};
-			mk("synced", `here, in sync (${report.inSync.length})`);
-			mk("drift", `here, differs (${report.drift.length})`);
+			mk("synced", `in sync (${report.inSync.length})`);
+			mk("local", `local only (${report.localOnly.length})`);
 			mk("remote", `remote only (${report.dbOnly.length})`);
-			legend.createEl("p", {
-				cls: "setting-item-description couchdb-sync-legend-note",
-				text: `${localCount} of ${report.allDbPaths.length} database files are present on this device.`,
-			});
-			this.renderTree(body.createDiv(), report.allDbPaths, stateByPath);
+			mk("conflict", `conflict (${conflictCount})`);
+			this.renderTree(body.createDiv(), allPaths, stateByPath);
 		}
 	}
 
@@ -505,21 +512,17 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			node.files.push({ name: parts[parts.length - 1], path });
 		}
 
-		// A folder is "synced" only if everything under it is here, "remote" only if
-		// nothing under it is here, otherwise "mixed" (a partially-downloaded subtree).
+		// A folder takes the single state shared by all its descendants; any conflict
+		// inside bubbles up to red; anything else with >1 state shows as "mixed".
 		const folderState = (node: Node): FileState | "mixed" => {
-			let sawHere = false;
-			let sawRemote = false;
+			const states = new Set<FileState>();
 			const visit = (n: Node) => {
-				for (const f of n.files) {
-					if (stateByPath.get(f.path) === "remote") sawRemote = true;
-					else sawHere = true;
-				}
+				for (const f of n.files) states.add(stateByPath.get(f.path) ?? "remote");
 				for (const child of n.folders.values()) visit(child);
 			};
 			visit(node);
-			if (sawHere && sawRemote) return "mixed";
-			return sawRemote ? "remote" : "synced";
+			if (states.has("conflict")) return "conflict";
+			return states.size === 1 ? [...states][0] : "mixed";
 		};
 
 		// red "X": remove a file (folder=false) or whole folder (folder=true) from the
@@ -540,10 +543,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		};
 
 		const stateTitle: Record<FileState | "mixed", string> = {
-			synced: "On this device, in sync with the database",
-			drift: "On this device but the content differs (your conflict strategy decides)",
+			synced: "On this device and in sync with the database",
+			local: "On this device only — not yet uploaded to the database",
 			remote: "In the database only — not downloaded to this device",
-			mixed: "Partly on this device (some files not downloaded here)",
+			conflict: "Diverged — content differs / unresolved (your conflict strategy decides)",
+			mixed: "Mixed — files in different states inside this folder",
 		};
 
 		const render = (node: Node, el: HTMLElement, prefix: string) => {
