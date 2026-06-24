@@ -56,6 +56,16 @@ export interface CouchDBSyncSettings {
 	 * auto-start) to keep the recovery buttons reachable.
 	 */
 	unsafeShutdown: boolean;
+
+	/**
+	 * Set true once we have proven the configured server+credentials are valid
+	 * (Test connection succeeded, or a sync session reached steady state). Gates
+	 * the index status view so users cannot accidentally inspect the local cache
+	 * by typing random text into the URL field — that cache may legitimately
+	 * exist from a previous configuration, but its contents should not be shown
+	 * until the user has demonstrated control of the matching remote.
+	 */
+	connectionVerified: boolean;
 }
 
 export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
@@ -88,6 +98,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	// when hidden sync is OFF, sync nothing hidden by default
 	hiddenInclude: [],
 	unsafeShutdown: false,
+	connectionVerified: false,
 };
 
 /**

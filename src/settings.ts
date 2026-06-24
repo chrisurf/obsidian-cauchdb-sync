@@ -47,6 +47,12 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h2", { text: "CouchDB connection" });
 
+		// Any change to credentials voids the "connection verified" flag — otherwise
+		// flipping the URL would not re-gate the index status view.
+		const onCredsChanged = async () => {
+			await this.plugin.invalidateConnection();
+		};
+
 		new Setting(containerEl)
 			.setName("Server URL")
 			.setDesc("Full URL incl. protocol and port. Must be https for mobile and for encryption in transit.")
@@ -57,6 +63,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					.onChange(async (v) => {
 						s.serverUrl = v.trim();
 						await this.plugin.saveSettings();
+						await onCredsChanged();
 					})
 			);
 
@@ -64,6 +71,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			t.setValue(s.dbName).onChange(async (v) => {
 				s.dbName = v.trim();
 				await this.plugin.saveSettings();
+				await onCredsChanged();
 			})
 		);
 
@@ -71,6 +79,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			t.setValue(s.username).onChange(async (v) => {
 				s.username = v.trim();
 				await this.plugin.saveSettings();
+				await onCredsChanged();
 			})
 		);
 
@@ -79,18 +88,24 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			t.setValue(s.password).onChange(async (v) => {
 				s.password = v;
 				await this.plugin.saveSettings();
+				await onCredsChanged();
 			});
 		});
 
 		new Setting(containerEl)
 			.setName("Test connection")
-			.setDesc("Check the server URL, database and credentials.")
+			.setDesc("Check the server URL, database and credentials. On success this also unlocks the Index status view (it stays hidden until you have proven the credentials).")
 			.addButton((b) =>
 				b.setButtonText("Test").onClick(async () => {
 					const db = new SyncDatabase(s, "couchdb-sync-test-probe");
 					const res = await db.testConnection();
 					new Notice(res.message, res.ok ? 4000 : 8000);
 					await db.close();
+					if (res.ok) {
+						await this.plugin.markConnectionVerified();
+						this.driftSig = ""; // force the index view to refresh
+						this.treeSig = "";
+					}
 				})
 			);
 
@@ -415,7 +430,16 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		}
 		if (!report) {
 			summary.className = "";
-			summary.setText("Sync is not running. Configure the connection (and passphrase) and restart sync.");
+			const s = this.plugin.settings;
+			if (!s.serverUrl) {
+				summary.setText("Sync is not running. Configure the connection (and passphrase) and restart sync.");
+			} else if (!s.connectionVerified) {
+				summary.setText(
+					"Index status is hidden until the server connection is verified. Press 'Test connection' above — on success the index unlocks."
+				);
+			} else {
+				summary.setText("Sync is not running. Press 'Sync now' or 'Download only' to start.");
+			}
 			counts.setText("");
 			driftBox.empty();
 			treeBox.empty();

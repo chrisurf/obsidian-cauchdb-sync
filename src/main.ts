@@ -212,8 +212,31 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 	/** Clear the crash guard once a session has reached a safe steady state. */
 	private async markCleanState(): Promise<void> {
-		if (!this.settings.unsafeShutdown) return;
-		this.settings.unsafeShutdown = false;
+		let dirty = false;
+		if (this.settings.unsafeShutdown) {
+			this.settings.unsafeShutdown = false;
+			dirty = true;
+		}
+		// Reaching a steady-state sync proves the remote credentials work, so the
+		// index status view is now safe to show without the user re-running Test.
+		if (!this.settings.connectionVerified) {
+			this.settings.connectionVerified = true;
+			dirty = true;
+		}
+		if (dirty) await this.saveSettings();
+	}
+
+	/** Mark the configured connection as verified (called by the Test button on success). */
+	async markConnectionVerified(): Promise<void> {
+		if (this.settings.connectionVerified) return;
+		this.settings.connectionVerified = true;
+		await this.saveSettings();
+	}
+
+	/** Reset the verified flag — required whenever serverUrl/dbName/username change. */
+	async invalidateConnection(): Promise<void> {
+		if (!this.settings.connectionVerified) return;
+		this.settings.connectionVerified = false;
 		await this.saveSettings();
 	}
 
@@ -270,6 +293,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 	async getIndexReport(): Promise<IndexReport | null> {
 		if (this.engine) return this.engine.getIndexReport();
 		if (!this.settings.serverUrl) return null; // not configured yet
+		// Don't expose cached doc paths/names to the user until they have proven
+		// they own the configured remote — otherwise typing random text into the
+		// URL field is enough to inspect anything the local cache happens to hold.
+		if (!this.settings.connectionVerified) return null;
 		const db = new SyncDatabase(this.settings, localDbName(this.settings));
 		try {
 			return await buildIndexReport(this.app, this.settings, db);
