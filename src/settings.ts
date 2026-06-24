@@ -1,32 +1,39 @@
-import { App, PluginSettingTab, Setting, Notice, setIcon } from "obsidian";
+import { App, Menu, PluginSettingTab, Setting, Notice, setIcon } from "obsidian";
 import type CouchDBSyncPlugin from "./main";
 import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
+import { HistoryModal, confirm } from "./history";
 import { SYNC_STATE, SyncStatus } from "./types";
 
 const AUTO_REFRESH_MS = 3_000;
 
 /** How a file relates to this device vs the database (drives the colour coding).
+ *   excluded — filtered out by the skip rules (not synced)     (dimmed)
  *   synced   — on this device and in sync                      (green)
  *   remote   — in the database only, not on this device        (grey)
  *   local    — on this device only, not in the database        (amber)
  *   drift    — on both, content differs (auto-reconcilable)    (purple)
  *   conflict — unresolved conflict revisions in the database   (red)
  */
-type FileState = "synced" | "remote" | "local" | "drift" | "conflict";
+type FileState = "excluded" | "synced" | "remote" | "local" | "drift" | "conflict";
+
+/** Syncable states (everything except the informational "excluded"). */
+const SYNCABLE: FileState[] = ["synced", "remote", "local", "drift", "conflict"];
 
 /**
  * Single severity ordering used everywhere: it decides which state a file gets
  * when several apply, the order the lists are shown in, and the colour a folder
  * rolls up to (the most urgent state anywhere inside it). One table = one source
  * of truth, so the summary, the lists, the files and the folders never disagree.
+ * "excluded" is the lowest — a folder is only dimmed when it is entirely excluded.
  */
 const SEVERITY: Record<FileState, number> = {
-	synced: 0,
-	remote: 1,
-	local: 2,
-	drift: 3,
-	conflict: 4,
+	excluded: 0,
+	synced: 1,
+	remote: 2,
+	local: 3,
+	drift: 4,
+	conflict: 5,
 };
 
 export class CouchDBSyncSettingTab extends PluginSettingTab {
@@ -304,6 +311,20 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	private renderIndexStatus(root: HTMLElement): void {
 		new Setting(root).setHeading().setName("Index status");
 
+		new Setting(root)
+			.setName("Show excluded files")
+			.setDesc(
+				"List files that the skip rules exclude (so you can sync one once). Bounded: only excluded files already present as a normal file or in the database are shown."
+			)
+			.addToggle((t) =>
+				t.setValue(this.plugin.settings.showExcluded).onChange(async (v) => {
+					this.plugin.settings.showExcluded = v;
+					await this.plugin.saveSettings();
+					this.treeSig = ""; // force the tree/lists to rebuild
+					await this.loadIndex(true);
+				})
+			);
+
 		// live status line (updates instantly from the engine)
 		this.liveStatusEl = root.createDiv({ cls: "couchdb-sync-livestatus" });
 		this.statusUnsub?.();
@@ -430,8 +451,10 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		for (const p of report.localOnly) setState(p, "local");
 		for (const p of report.drift) setState(p, "drift");
 		for (const p of report.conflicts) setState(p, "conflict");
+		for (const p of report.excluded) setState(p, "excluded");
 
 		const groups: Record<FileState, string[]> = {
+			excluded: [],
 			synced: [],
 			remote: [],
 			local: [],
@@ -442,15 +465,16 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		for (const k of Object.keys(groups) as FileState[]) groups[k].sort((a, b) => a.localeCompare(b));
 
 		const allPaths = [...stateByPath.keys()].sort((a, b) => a.localeCompare(b));
-		const total = allPaths.length;
-		const pending = total - groups.synced.length;
-		const pct = total === 0 ? 100 : Math.round((groups.synced.length / total) * 100);
+		// the summary counts only SYNCABLE files; excluded are informational
+		const syncTotal = SYNCABLE.reduce((n, s) => n + groups[s].length, 0);
+		const pending = syncTotal - groups.synced.length;
+		const pct = syncTotal === 0 ? 100 : Math.round((groups.synced.length / syncTotal) * 100);
 
 		summary.className = pending === 0 ? "couchdb-sync-ok" : "couchdb-sync-warn";
 		summary.setText(
 			pending === 0
-				? `✓ In sync — ${groups.synced.length} / ${total} files (100%)`
-				: `⚠ Syncing — ${groups.synced.length} / ${total} files (${pct}%) · ${pending} pending`
+				? `✓ In sync — ${groups.synced.length} / ${syncTotal} files (100%)`
+				: `⚠ Syncing — ${groups.synced.length} / ${syncTotal} files (${pct}%) · ${pending} pending`
 		);
 		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
 
@@ -474,13 +498,13 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			treeBox.empty();
 			const tree = treeBox.createEl("details", { cls: "couchdb-sync-tree-root" });
 			tree.createEl("summary", {
-				text: `🗂 Sync state — ${total} files (this device + database)`,
+				text: `🗂 Sync state — ${allPaths.length} files (this device + database)`,
 			});
 			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
 			const legend = body.createDiv({ cls: "couchdb-sync-legend" });
 			legend.createEl("p", {
 				cls: "couchdb-sync-legend-intro",
-				text: "Every file across this device and the server. Colour shows its state:",
+				text: "Every file across this device and the server. Colour shows its state. Use 🕘 for history, ⋯ for actions:",
 			});
 			const mk = (state: FileState, label: string) => {
 				const item = legend.createSpan({ cls: "couchdb-sync-legend-item" });
@@ -492,6 +516,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			mk("remote", `remote only (${groups.remote.length})`);
 			mk("drift", `differs (${groups.drift.length})`);
 			mk("conflict", `conflict (${groups.conflict.length})`);
+			if (groups.excluded.length > 0) mk("excluded", `excluded (${groups.excluded.length})`);
 			this.renderTree(body.createDiv(), allPaths, stateByPath);
 		}
 	}
@@ -552,7 +577,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		// So a folder is green only when its whole subtree is in sync, and turns red
 		// the moment anything inside conflicts — no expanding needed to spot trouble.
 		const folderState = (node: Node): FileState => {
-			let worst: FileState = "synced";
+			let worst: FileState = "excluded";
 			const visit = (n: Node) => {
 				for (const f of n.files) {
 					const s = stateByPath.get(f.path) ?? "remote";
@@ -564,9 +589,47 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			return worst;
 		};
 
-		// red "X": remove a file (folder=false) or whole folder (folder=true) from the
-		// DB index. No confirmation — it only touches the database; local files stay and
-		// can be re-synced. Refresh the tree afterwards.
+		const stateTitle: Record<FileState, string> = {
+			synced: "On this device and in sync with the database",
+			local: "On this device only — not yet uploaded to the database",
+			remote: "In the database only — not downloaded to this device",
+			drift: "On both sides but the content differs — will be reconciled by your conflict strategy",
+			conflict: "Unresolved conflict revisions in the database — needs attention",
+			excluded: "Excluded by the skip rules — not synced (you can still sync it once)",
+		};
+
+		// --- shared action helpers ---
+		const p = this.plugin;
+		const refresh = async () => {
+			this.treeSig = "";
+			this.driftSig = "";
+			await this.loadIndex(true);
+		};
+		const run = async (verb: string, fn: () => Promise<unknown>) => {
+			try {
+				await fn();
+				new Notice(`CouchDB Sync: ${verb}`);
+			} catch (e) {
+				new Notice(`CouchDB Sync: ${verb} failed — ${e instanceof Error ? e.message : String(e)}`);
+			} finally {
+				await refresh();
+			}
+		};
+		const runMany = async (verb: string, list: string[], fn: (q: string) => Promise<unknown>) => {
+			let ok = 0;
+			for (const q of list) {
+				try {
+					await fn(q);
+					ok++;
+				} catch {
+					/* keep going; report the tally */
+				}
+			}
+			new Notice(`CouchDB Sync: ${verb} ${ok}/${list.length}`);
+			await refresh();
+		};
+
+		// red "X": remove a file/folder from the DB index. Local files are kept.
 		const addRemove = (row: HTMLElement, target: string, folder: boolean) => {
 			const x = row.createEl("button", { text: "✕", cls: "couchdb-sync-x" });
 			x.setAttr("aria-label", `Remove ${target} from the index`);
@@ -575,18 +638,70 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				ev.stopPropagation();
 				x.disabled = true;
 				await this.plugin.removeFromIndex(target, folder);
-				this.treeSig = ""; // force tree rebuild
-				this.driftSig = "";
-				await this.loadIndex(true);
+				await refresh();
 			};
 		};
 
-		const stateTitle: Record<FileState, string> = {
-			synced: "On this device and in sync with the database",
-			local: "On this device only — not yet uploaded to the database",
-			remote: "In the database only — not downloaded to this device",
-			drift: "On both sides but the content differs — will be reconciled by your conflict strategy",
-			conflict: "Unresolved conflict revisions in the database — needs attention",
+		const iconBtn = (row: HTMLElement, icon: string, label: string, onClick: (ev: MouseEvent) => void) => {
+			const b = row.createEl("button", { cls: "couchdb-sync-iconbtn" });
+			setIcon(b, icon);
+			b.setAttr("aria-label", label);
+			b.onclick = (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				onClick(ev);
+			};
+			return b;
+		};
+
+		// context-aware per-file actions menu (only what makes sense for the state)
+		const fileMenu = (ev: MouseEvent, path: string, state: FileState) => {
+			const m = new Menu();
+			if (state === "drift" || state === "conflict") {
+				m.addItem((i) => i.setTitle("Use server version (overwrite local)").setIcon("download").onClick(() => run("downloaded server version", () => p.takeRemotePath(path))));
+				m.addItem((i) => i.setTitle("Use local version (overwrite server)").setIcon("upload").onClick(() => run("uploaded local version", () => p.takeLocalPath(path))));
+			} else if (state === "remote") {
+				m.addItem((i) => i.setTitle("Download to this device").setIcon("download").onClick(() => run("downloaded", () => p.takeRemotePath(path))));
+			} else if (state === "local") {
+				m.addItem((i) => i.setTitle("Upload to server").setIcon("upload").onClick(() => run("uploaded", () => p.takeLocalPath(path))));
+			}
+			m.addItem((i) => i.setTitle(state === "excluded" ? "Sync once" : "Sync now").setIcon("refresh-cw").onClick(() => run("synced", () => p.forceSyncPath(path))));
+			m.addItem((i) => i.setTitle("Show history…").setIcon("history").onClick(() => new HistoryModal(p, path, refresh).open()));
+			m.addSeparator();
+			if (state !== "remote") {
+				m.addItem((i) => i.setTitle("Delete on this device").setIcon("trash").onClick(() =>
+					confirm(this.app, { title: "Delete on this device?", body: `Removes "${path}" from this device only. The server keeps its copy (it may re-download while live sync is on).`, cta: "Delete here", danger: true, onConfirm: () => run("deleted locally", () => p.deleteLocalPath(path)) })));
+			}
+			if (state === "synced" || state === "remote" || state === "drift" || state === "conflict") {
+				m.addItem((i) => i.setTitle("Delete everywhere").setIcon("trash-2").onClick(() =>
+					confirm(this.app, { title: "Delete everywhere?", body: `Deletes "${path}" on ALL devices. It stays in history and can be restored.`, cta: "Delete everywhere", danger: true, onConfirm: () => run("deleted everywhere", () => p.deleteEverywherePath(path)) })));
+			}
+			if (state !== "local") {
+				m.addItem((i) => i.setTitle("Remove from database index (keep local)").setIcon("database").onClick(() =>
+					confirm(this.app, { title: "Remove from index?", body: `Stops syncing "${path}" and removes it from the database. Every device keeps its local copy; it re-appears if re-indexed.`, cta: "Remove from index", onConfirm: () => run("removed from index", () => p.removeFromIndex(path, false)) })));
+			}
+			m.showAtMouseEvent(ev);
+		};
+
+		// folder bulk actions, applied to the descendant files of the relevant state
+		const folderMenu = (ev: MouseEvent, folderPath: string) => {
+			const prefix = folderPath + "/";
+			const under = paths.filter((q) => q === folderPath || q.startsWith(prefix));
+			const byState = (states: FileState[]) => under.filter((q) => states.includes(stateByPath.get(q) ?? "remote"));
+			const dl = byState(["remote", "drift", "conflict"]);
+			const ul = byState(["local", "drift", "conflict"]);
+			const m = new Menu();
+			if (dl.length) m.addItem((i) => i.setTitle(`Download ${dl.length} to this device`).setIcon("download").onClick(() => runMany("downloaded", dl, (q) => p.takeRemotePath(q))));
+			if (ul.length) m.addItem((i) => i.setTitle(`Upload ${ul.length} to server`).setIcon("upload").onClick(() => runMany("uploaded", ul, (q) => p.takeLocalPath(q))));
+			m.addItem((i) => i.setTitle("Sync all now").setIcon("refresh-cw").onClick(() => runMany("synced", byState(SYNCABLE), (q) => p.forceSyncPath(q))));
+			m.addSeparator();
+			m.addItem((i) => i.setTitle("Delete folder on this device").setIcon("trash").onClick(() =>
+				confirm(this.app, { title: "Delete folder on this device?", body: `Removes ${under.length} file(s) under "${folderPath}" from this device only.`, cta: "Delete here", danger: true, onConfirm: () => runMany("deleted locally", byState(["synced", "local", "drift", "conflict", "excluded"]), (q) => p.deleteLocalPath(q)) })));
+			m.addItem((i) => i.setTitle("Delete folder everywhere").setIcon("trash-2").onClick(() =>
+				confirm(this.app, { title: "Delete folder everywhere?", body: `Deletes every file under "${folderPath}" on ALL devices. Restorable from history.`, cta: "Delete everywhere", danger: true, onConfirm: () => runMany("deleted everywhere", byState(["synced", "remote", "drift", "conflict"]), (q) => p.deleteEverywherePath(q)) })));
+			m.addItem((i) => i.setTitle("Remove folder from index (keep local)").setIcon("database").onClick(() =>
+				confirm(this.app, { title: "Remove folder from index?", body: `Stops syncing everything under "${folderPath}". Local files are kept everywhere.`, cta: "Remove from index", onConfirm: () => run("removed folder from index", () => p.removeFromIndex(folderPath, true)) })));
+			m.showAtMouseEvent(ev);
 		};
 
 		const render = (node: Node, el: HTMLElement, prefix: string) => {
@@ -601,6 +716,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				});
 				sum.setAttr("aria-label", stateTitle[fState]);
 				sum.createSpan({ text: `📁 ${name}` });
+				iconBtn(sum, "more-horizontal", "Folder actions", (ev) => folderMenu(ev, folderPath));
 				addRemove(sum, folderPath, true);
 				render(child, det.createDiv({ cls: "couchdb-sync-tree-children" }), folderPath);
 			}
@@ -610,6 +726,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				div.setAttr("aria-label", stateTitle[fState]);
 				div.createSpan({ cls: "couchdb-sync-dot" });
 				div.createSpan({ text: `📄 ${file.name}`, cls: "couchdb-sync-tree-fname" });
+				iconBtn(div, "history", "History", () => new HistoryModal(p, file.path, refresh).open());
+				iconBtn(div, "more-horizontal", "Actions", (ev) => fileMenu(ev, file.path, fState));
 				addRemove(div, file.path, false);
 				div.dataset.couchdbPath = file.path;
 			}

@@ -5,6 +5,7 @@ import {
 	SYNC_STATE,
 	SyncState,
 	SyncStatus,
+	VersionDoc,
 } from "./types";
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
@@ -270,13 +271,91 @@ export default class CouchDBSyncPlugin extends Plugin {
 		return this.engine?.getActiveTransfers() ?? [];
 	}
 
+	/**
+	 * Ensure a sync session is running, starting one if needed, and return the engine.
+	 * All mutating per-file actions go through the engine (single code path for
+	 * chunking/encryption/IO), so they require a live session.
+	 */
+	private async ensureEngine(): Promise<SyncEngine> {
+		if (!this.engine) await this.restartSync();
+		if (!this.engine) throw new Error("Sync is not configured. Set up the connection first.");
+		return this.engine;
+	}
+
 	/** Force (re)sync a single file. Starts a session first if none is running. */
 	async forceSyncPath(path: string): Promise<void> {
-		if (!this.engine) {
-			await this.restartSync();
-			return;
+		const engine = await this.ensureEngine();
+		await engine.forceSync(path);
+	}
+
+	/** Overwrite this device's copy with the database version. */
+	async takeRemotePath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.takeRemote(path);
+	}
+
+	/** Overwrite the database with this device's copy. */
+	async takeLocalPath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.takeLocal(path);
+	}
+
+	/** Delete a file on this device only (the server keeps its copy). */
+	async deleteLocalPath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.deleteLocalOnly(path);
+	}
+
+	/** Delete a file everywhere (propagating tombstone + local removal). */
+	async deleteEverywherePath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.deleteEverywhere(path);
+	}
+
+	/**
+	 * Run a READ-ONLY engine operation. Uses the live engine when one is running;
+	 * otherwise spins up a transient, NON-started engine bound to a transient DB so
+	 * that merely viewing history never kicks off a full live sync. The transient DB
+	 * connects to the remote so chunk reads can fall back to the server.
+	 */
+	private async withReader<T>(fn: (engine: SyncEngine) => Promise<T>): Promise<T> {
+		if (this.engine) return fn(this.engine);
+		if (!this.settings.serverUrl) throw new Error("Sync is not configured.");
+		const db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
+		try {
+			db.connectRemote();
+		} catch {
+			/* offline reads still work from the local replica */
 		}
-		await this.engine.forceSync(path);
+		const reader = new SyncEngine(this.app, db, this.settings, () => undefined, () => undefined);
+		try {
+			return await fn(reader);
+		} finally {
+			await db.close().catch(() => undefined);
+		}
+	}
+
+	// --- file history ---------------------------------------------------------
+
+	/** All versions of a file, newest first. */
+	getFileHistory(path: string): Promise<VersionDoc[]> {
+		return this.withReader((e) => e.listHistory(path));
+	}
+
+	/** Decoded text of a version (null for binary / deletion entries). */
+	getVersionText(v: VersionDoc): Promise<string | null> {
+		return this.withReader((e) => e.getVersionText(v));
+	}
+
+	/** Current on-disk text of a file (null if missing or binary). */
+	getLocalText(path: string): Promise<string | null> {
+		return this.withReader((e) => e.getLocalText(path));
+	}
+
+	/** Restore an earlier version as the current content everywhere (mutating). */
+	async restoreVersion(path: string, v: VersionDoc): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.restoreVersion(path, v);
 	}
 
 	/** Remove a file/folder from the DB index (works even when idle). */

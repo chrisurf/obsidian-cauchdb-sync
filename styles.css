@@ -108,6 +108,14 @@
 	font-weight: 600;
 }
 
+/* excluded: filtered out by the skip rules — dimmed & italic */
+.couchdb-sync-state-excluded,
+.couchdb-sync-state-excluded .couchdb-sync-tree-fname {
+	color: var(--text-faint);
+	font-style: italic;
+	opacity: 0.8;
+}
+
 /* legend above the tree */
 .couchdb-sync-legend {
 	margin-bottom: 0.5em;
@@ -156,6 +164,11 @@
 
 .couchdb-sync-swatch.couchdb-sync-state-conflict {
 	background: var(--color-red);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-excluded {
+	background: var(--text-faint);
+	opacity: 0.6;
 }
 
 .couchdb-sync-legend-note {
@@ -295,4 +308,175 @@
 	height: 1.6em;
 	font-size: var(--font-ui-smaller);
 	cursor: pointer;
+}
+
+/* --- per-row icon buttons (history / actions) --- */
+
+.couchdb-sync-iconbtn {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.5em;
+	height: 1.5em;
+	padding: 0;
+	background: transparent;
+	border: none;
+	border-radius: 3px;
+	cursor: pointer;
+	color: var(--text-muted);
+	opacity: 0.7;
+}
+
+.couchdb-sync-iconbtn:hover {
+	opacity: 1;
+	background: var(--background-modifier-hover);
+}
+
+.couchdb-sync-iconbtn svg {
+	width: 0.95em;
+	height: 0.95em;
+}
+
+/* --- confirm dialog --- */
+
+.couchdb-sync-confirm-body {
+	color: var(--text-muted);
+}
+
+.couchdb-sync-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 0.5em;
+	margin-top: 1em;
+}
+
+/* --- history modal --- */
+
+.couchdb-sync-history-modal {
+	width: min(900px, 92vw);
+}
+
+.couchdb-sync-history-controls {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.4em;
+	margin-bottom: 0.6em;
+}
+
+.couchdb-sync-history-sel {
+	max-width: 22em;
+}
+
+.couchdb-sync-history-mode {
+	margin-left: auto;
+	cursor: pointer;
+}
+
+.couchdb-sync-diff {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	max-height: 45vh;
+	overflow: auto;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	background: var(--background-primary);
+}
+
+.couchdb-sync-diff-note {
+	color: var(--text-muted);
+	padding: 0.8em;
+}
+
+.couchdb-sync-diff-inline > div,
+.couchdb-sync-diff-side .cdl-col > div {
+	padding: 0 0.5em;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	border-left: 3px solid transparent;
+}
+
+.cdl-eq {
+	color: var(--text-normal);
+}
+
+.cdl-del {
+	background: rgba(var(--color-red-rgb), 0.12);
+	border-left-color: var(--color-red) !important;
+}
+
+.cdl-add {
+	background: rgba(var(--color-green-rgb), 0.12);
+	border-left-color: var(--color-green) !important;
+}
+
+.cdl-pad {
+	background: var(--background-secondary);
+}
+
+.couchdb-sync-diff-side {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+}
+
+.couchdb-sync-diff-side .cdl-col {
+	min-width: 0;
+}
+
+.couchdb-sync-diff-side .cdl-col:first-child {
+	border-right: 1px solid var(--background-modifier-border);
+}
+
+/* --- history timeline --- */
+
+.couchdb-sync-timeline {
+	margin-top: 1em;
+}
+
+.couchdb-sync-timeline h4 {
+	margin: 0 0 0.4em;
+}
+
+.couchdb-sync-timeline-row {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	padding: 0.3em 0;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.couchdb-sync-timeline-dot {
+	flex: none;
+	width: 0.6em;
+	height: 0.6em;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+}
+
+.couchdb-sync-timeline-dot.is-deleted {
+	background: var(--color-red);
+}
+
+.couchdb-sync-timeline-meta {
+	flex: 1;
+	min-width: 0;
+}
+
+.couchdb-sync-timeline-when {
+	font-size: var(--font-ui-smaller);
+}
+
+.couchdb-sync-timeline-note {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.couchdb-sync-badge {
+	margin-left: 0.4em;
+	padding: 0 0.4em;
+	border-radius: 3px;
+	font-size: var(--font-ui-smaller);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
 }

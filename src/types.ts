@@ -40,6 +40,20 @@ export interface CouchDBSyncSettings {
 	hiddenInclude: string[];
 
 	/**
+	 * How many past versions to keep per file in the explicit history log. Content
+	 * chunks are content-addressed and shared, so history mostly costs small metadata.
+	 */
+	keepHistory: number;
+
+	/**
+	 * Show excluded files (matched by the skip rules) in the Sync state tree so they
+	 * can be inspected and synced once on demand. Off by default; bounded — only
+	 * excluded files that already exist as normal vault files or as database docs are
+	 * listed (never a full walk of .git/node_modules).
+	 */
+	showExcluded: boolean;
+
+	/**
 	 * Crash guard. Set to true while a sync session is starting/running and cleared
 	 * once it reaches a safe steady state. If it is still true at launch, the previous
 	 * session did not finish cleanly (hang/crash), so we start in safe mode (no
@@ -76,6 +90,8 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	],
 	// when hidden sync is OFF, sync nothing hidden by default
 	hiddenInclude: [],
+	keepHistory: 50,
+	showExcluded: false,
 	unsafeShutdown: false,
 };
 
@@ -114,6 +130,41 @@ export interface FileDoc {
 
 	/** cheap fingerprint of the content (hash of the ordered children) */
 	hash: string;
+}
+
+/**
+ * One immutable entry in a file's explicit version history. We keep history
+ * ourselves (instead of relying on PouchDB `_rev` history, which compaction and a
+ * low `_revs_limit` prune away) so the timeline is always complete and restorable.
+ *
+ * `_id` is "H:" + path + "\n" + zero-padded timestamp + "\n" + short hash. The
+ * newline delimiter cannot appear in a vault path, so a path-prefixed range query
+ * is unambiguous; the padded timestamp makes the lexicographic order chronological.
+ * History docs replicate like any other doc, so every device shares one timeline.
+ * They sort BEFORE the "f:" file docs and "h:" chunks, so file-doc range scans
+ * never see them.
+ */
+export interface VersionDoc {
+	_id: string;
+	_rev?: string;
+	_deleted?: boolean;
+
+	type: "version";
+	path: string;
+	/** when this version was committed (ms since epoch) */
+	ts: number;
+	mtime: number;
+	size: number;
+	hash: string;
+	deviceId: string;
+	binary: boolean;
+	enc: boolean;
+	/** ordered chunk ids of this version (empty for a deletion entry) */
+	children: string[];
+	/** true when this entry records a deletion */
+	deleted: boolean;
+	/** optional human note, e.g. "restored from <date>" */
+	note?: string;
 }
 
 /**
@@ -169,3 +220,7 @@ export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
  */
 export const FILE_PREFIX = "f:";
 export const CHUNK_PREFIX = "h:";
+/** History/version docs. Sorts before "f:" so file-doc range scans skip them. */
+export const HISTORY_PREFIX = "H:";
+/** Delimiter inside a history id; a newline can never appear in a vault path. */
+export const HISTORY_SEP = "\n";

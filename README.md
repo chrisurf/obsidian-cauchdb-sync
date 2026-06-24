@@ -42,8 +42,17 @@ plain-language UX.
 - 🩹 **Self-healing** — if a download references a chunk that went missing (e.g. an interrupted
   earlier upload) and the file exists locally, the plugin re-uploads it to regenerate the chunk
   instead of getting stuck.
-- 🧰 **Per-file controls** — a **Sync** button to force-sync one file, and a red **✕** on every file
-  and folder in the tree to remove it from the database index (local files are kept).
+- 🧰 **Per-file & per-folder controls** — every row has a **⋯ actions** menu (only the moves that make
+  sense for its state: *download/overwrite local*, *upload/overwrite server*, *sync now/once*,
+  *delete on this device*, *delete everywhere*, *remove from index*), a red **✕** to remove from the
+  index, and a 🕘 **History** button (see below). Folders apply the same actions in bulk to everything
+  inside them.
+- 🕘 **Full file history & restore** — the plugin keeps an explicit, append-only version log per file
+  (content chunks are deduplicated, so history costs only small metadata). Browse every version
+  chronologically, **diff any two** versions *side-by-side* or *inline*, and **restore** any earlier
+  version on all devices with one click — restores are themselves reversible.
+- 🚫 **Excluded files, on demand** — optionally surface files the skip rules exclude (bounded, opt-in)
+  so you can inspect or sync one once, for full transparency over *all* data.
 - 📁 **Hidden files (optional)** — sync `.obsidian` (settings, plugins), `.git`, etc. with a simple
   toggle and an exclude/include list. Off by default.
 - 🛟 **Safe by design** — no destructive "rebuild" ritual; a **crash guard** disables auto-start
