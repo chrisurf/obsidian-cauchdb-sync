@@ -66,6 +66,14 @@ export interface CouchDBSyncSettings {
 	 * until the user has demonstrated control of the matching remote.
 	 */
 	connectionVerified: boolean;
+
+	/**
+	 * Privacy mode: destroy the local PouchDB on plugin disable / unload, so the
+	 * cached file metadata is not left behind on the machine when the user turns
+	 * the plugin off. Trade-off: re-enabling forces a full re-replication from
+	 * the server (no warm cache). Off by default.
+	 */
+	forgetCacheOnDisable: boolean;
 }
 
 export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
@@ -99,6 +107,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	hiddenInclude: [],
 	unsafeShutdown: false,
 	connectionVerified: false,
+	forgetCacheOnDisable: false,
 };
 
 /**

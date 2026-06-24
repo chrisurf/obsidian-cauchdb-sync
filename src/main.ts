@@ -122,6 +122,20 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
+		// Privacy mode: destroy the local PouchDB before closing so the cached
+		// metadata is not left behind when the plugin is disabled. Must run
+		// BEFORE close() (destroy on a closed handle is a no-op in PouchDB).
+		// If no sync session ever ran this Obsidian session, this.db is null,
+		// so we open a fresh handle just for destruction.
+		if (this.settings.forgetCacheOnDisable) {
+			const dbToWipe = this.db ?? new SyncDatabase(this.settings, localDbName(this.settings));
+			try {
+				await dbToWipe.destroyLocal();
+			} catch (e) {
+				console.warn("[couchdb-sync] forget-on-disable failed", e);
+			}
+			this.db = null; // already destroyed; don't try to close()
+		}
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
 		this.db = null;
