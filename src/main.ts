@@ -63,6 +63,15 @@ export default class CouchDBSyncPlugin extends Plugin {
 	status: SyncStatus = { state: SYNC_STATE.IDLE };
 	private statusListeners = new Set<(s: SyncStatus) => void>();
 
+	/**
+	 * Cached drift summary from the most recent index report. Used by the status
+	 * bar so the checkmark only appears when truly 100 % synced — engine SYNCED
+	 * alone is not enough (replication can be idle while disk and DB still
+	 * diverge, e.g. cached docs not yet materialized).
+	 */
+	private effectiveDrift: { drift: number; pct: number } | null = null;
+	private driftRefreshTimer: number | null = null;
+
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
@@ -116,6 +125,23 @@ export default class CouchDBSyncPlugin extends Plugin {
 		} else {
 			this.setStatus(SYNC_STATE.IDLE, "auto-start off");
 		}
+
+		// Keep the status bar honest: the engine reports SYNCED as soon as
+		// replication is idle, but disk and DB can still be out of sync. The
+		// status bar should only show the checkmark when drift is truly zero,
+		// so we recompute the drift summary on a slow tick and re-render.
+		this.driftRefreshTimer = window.setInterval(
+			() => void this.refreshDriftSummary(),
+			5000
+		);
+		this.register(() => {
+			if (this.driftRefreshTimer !== null) {
+				window.clearInterval(this.driftRefreshTimer);
+				this.driftRefreshTimer = null;
+			}
+		});
+		// First read once the layout has had a moment to settle (don't block onload).
+		window.setTimeout(() => void this.refreshDriftSummary(), 1500);
 	}
 
 	async onunload(): Promise<void> {
@@ -149,21 +175,90 @@ export default class CouchDBSyncPlugin extends Plugin {
 		detail?: string,
 		progress?: { done: number; total: number }
 	): void {
+		const wasSyncing = this.status.state === SYNC_STATE.SYNCING;
 		this.status = { state, detail, done: progress?.done, total: progress?.total };
-
-		// status bar: spinning icon while syncing, with a percentage when known
-		setIcon(this.statusIconEl, STATUS_ICON[state]);
-		this.statusIconEl.toggleClass("couchdb-sync-spin", state === SYNC_STATE.SYNCING);
-		let label = "CouchDB";
-		if (state === SYNC_STATE.SYNCING && progress && progress.total > 0) {
-			label = `CouchDB ${Math.round((progress.done / progress.total) * 100)}%`;
-		}
-		this.statusTextEl.setText(label);
-		this.statusEl.setAttr("aria-label", detail ? `${state}: ${detail}` : `CouchDB sync: ${state}`);
 
 		if (state === SYNC_STATE.ERROR && detail) console.error("[couchdb-sync]", detail);
 
+		this.renderStatusBar();
 		for (const cb of this.statusListeners) cb(this.status);
+
+		// Just settled? Refresh the drift summary so the bar can flip from a %
+		// to the checkmark immediately, without waiting for the periodic tick.
+		if (wasSyncing && state === SYNC_STATE.SYNCED) {
+			void this.refreshDriftSummary();
+		}
+	}
+
+	/**
+	 * Combine the raw engine state with the cached drift summary into the icon,
+	 * label and ARIA description of the status bar. The checkmark is only shown
+	 * when both: the engine is idle/synced AND drift is exactly zero. Any
+	 * pending drift forces the syncing icon plus the real percentage.
+	 */
+	private renderStatusBar(): void {
+		const raw = this.status;
+		const drift = this.effectiveDrift;
+
+		let displayed: SyncState = raw.state;
+		let label = "CouchDB";
+		let ariaSuffix = raw.detail ?? raw.state;
+
+		const engineSyncingWithProgress =
+			raw.state === SYNC_STATE.SYNCING && raw.total !== undefined && raw.total > 0;
+
+		if (raw.state === SYNC_STATE.ERROR || raw.state === SYNC_STATE.OFFLINE || raw.state === SYNC_STATE.CONNECTING) {
+			// these states win unconditionally — drift % would be misleading here
+			displayed = raw.state;
+		} else if (engineSyncingWithProgress) {
+			// initial index pass etc. — engine knows the exact progress
+			displayed = SYNC_STATE.SYNCING;
+			const pct = Math.round((raw.done! / raw.total!) * 100);
+			label = `CouchDB ${pct}%`;
+			ariaSuffix = `syncing ${pct}% — ${raw.detail ?? "indexing"}`;
+		} else if (drift && drift.drift > 0) {
+			// engine settled but disk and DB still diverge -> not "in sync"
+			displayed = SYNC_STATE.SYNCING;
+			label = `CouchDB ${drift.pct}%`;
+			ariaSuffix = `syncing ${drift.pct}% — ${drift.drift} pending`;
+		} else if (
+			drift &&
+			drift.drift === 0 &&
+			(raw.state === SYNC_STATE.SYNCED || raw.state === SYNC_STATE.IDLE || raw.state === SYNC_STATE.PAUSED)
+		) {
+			// truly 100 % in sync
+			displayed = SYNC_STATE.SYNCED;
+			label = "CouchDB ✓";
+			ariaSuffix = "in sync (100%)";
+		} else {
+			// no drift data yet (gated, before first report, or after error). Stay
+			// neutral — do NOT show the checkmark just because the engine is idle.
+			displayed = raw.state === SYNC_STATE.SYNCED ? SYNC_STATE.IDLE : raw.state;
+		}
+
+		setIcon(this.statusIconEl, STATUS_ICON[displayed]);
+		this.statusIconEl.toggleClass("couchdb-sync-spin", displayed === SYNC_STATE.SYNCING);
+		this.statusTextEl.setText(label);
+		this.statusEl.setAttr("aria-label", `CouchDB sync: ${ariaSuffix}`);
+	}
+
+	/** Recompute the cached drift summary from the current index report. */
+	private async refreshDriftSummary(): Promise<void> {
+		try {
+			const report = await this.getIndexReport();
+			if (!report) {
+				this.effectiveDrift = null;
+			} else {
+				const drift = report.localOnly.length + report.dbOnly.length + report.drift.length;
+				const total = report.inSync.length + drift;
+				const pct = total === 0 ? 100 : Math.round((report.inSync.length / total) * 100);
+				this.effectiveDrift = { drift, pct };
+			}
+		} catch {
+			// silent: keep whatever we had — the next tick will retry
+			return;
+		}
+		this.renderStatusBar();
 	}
 
 	/** Subscribe to status updates (used by the settings view). Returns an unsubscribe. */
