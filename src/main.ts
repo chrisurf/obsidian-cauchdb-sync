@@ -280,27 +280,40 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * the previous remote's filenames).
 	 */
 	async checkOriginFingerprint(): Promise<"match" | "mismatch" | "unset"> {
-		const db = new SyncDatabase(this.settings, localDbName(this.settings));
+		// CRITICAL: when a sync session is running, reuse its open SyncDatabase
+		// instead of opening a second one. PouchDB caches its browser-side
+		// IndexedDB connection per database name, so two `new SyncDatabase(...)`
+		// calls with the same local name share ONE underlying IDBDatabase. If we
+		// then `close()` our temporary one in the finally block, we tear down
+		// the engine's connection too — and the next allDocs() throws
+		// "Failed to execute 'transaction' on 'IDBDatabase': The database
+		// connection is closing." Only open (and close) our own handle when the
+		// engine is idle and no shared connection exists.
+		const shared = this.db;
+		const db = shared ?? new SyncDatabase(this.settings, localDbName(this.settings));
 		try {
 			const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
 			if (!stored || !stored.fp) return "unset";
 			const current = await originFingerprint(this.settings);
 			return stored.fp === current ? "match" : "mismatch";
 		} finally {
-			await db.close().catch(() => undefined);
+			if (!shared) await db.close().catch(() => undefined);
 		}
 	}
 
 	/** Stamp the current origin fingerprint into the cache so we recognize it later. */
 	async stampOriginFingerprint(): Promise<void> {
-		const db = new SyncDatabase(this.settings, localDbName(this.settings));
+		// Same shared-connection rule as checkOriginFingerprint above — without
+		// this, markCleanState() would close the engine's PouchDB.
+		const shared = this.db;
+		const db = shared ?? new SyncDatabase(this.settings, localDbName(this.settings));
 		try {
 			const fp = await originFingerprint(this.settings);
 			await db.putLocalDoc(ORIGIN_FP_DOC, { fp });
 		} catch (e) {
 			console.warn("[couchdb-sync] could not stamp origin fingerprint", e);
 		} finally {
-			await db.close().catch(() => undefined);
+			if (!shared) await db.close().catch(() => undefined);
 		}
 	}
 
@@ -361,12 +374,18 @@ export default class CouchDBSyncPlugin extends Plugin {
 		// they own the configured remote — otherwise typing random text into the
 		// URL field is enough to inspect anything the local cache happens to hold.
 		if (!this.settings.connectionVerified) return null;
-		// Origin gate: if the cache was last stamped by a different remote, do not
-		// reveal its contents. The UI exposes this state via getOriginState() and
-		// offers Wipe / Re-stamp actions.
-		if ((await this.checkOriginFingerprint()) === "mismatch") return null;
+		// ONE open/close per call: the origin check and the doc scan must share
+		// the same SyncDatabase handle. Opening two in series would still share
+		// the underlying IDB connection (PouchDB caches by name), and closing the
+		// first can leave the second's pending transactions in a "connection is
+		// closing" state — exactly the IDBDatabase error users saw before.
 		const db = new SyncDatabase(this.settings, localDbName(this.settings));
 		try {
+			const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
+			if (stored && stored.fp) {
+				const current = await originFingerprint(this.settings);
+				if (stored.fp !== current) return null; // mismatch -> hide
+			}
 			return await buildIndexReport(this.app, this.settings, db);
 		} finally {
 			await db.close().catch(() => undefined);

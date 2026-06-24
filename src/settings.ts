@@ -19,6 +19,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	private treeEl?: HTMLElement;
 	private driftSig = "";
 	private treeSig = "";
+	private indexLoading = false; // prevent overlapping loadIndex() runs (PouchDB connection races)
 
 	constructor(app: App, plugin: CouchDBSyncPlugin) {
 		super(app, plugin);
@@ -429,6 +430,20 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	 * so the page doesn't flicker and an expanded tree stays expanded.
 	 */
 	private async loadIndex(force: boolean): Promise<void> {
+		// Re-entrancy guard. The auto-refresh interval fires every AUTO_REFRESH_MS,
+		// but the previous call may still be in flight (slow IDB, big vault). Two
+		// concurrent runs would open the same PouchDB twice and the second close()
+		// can race with the first's pending IDB transactions ("connection is closing").
+		if (this.indexLoading && !force) return;
+		this.indexLoading = true;
+		try {
+			await this.loadIndexInner(force);
+		} finally {
+			this.indexLoading = false;
+		}
+	}
+
+	private async loadIndexInner(force: boolean): Promise<void> {
 		const summary = this.summaryEl;
 		const counts = this.countsEl;
 		const driftBox = this.driftEl;
