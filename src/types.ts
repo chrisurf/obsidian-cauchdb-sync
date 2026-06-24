@@ -21,6 +21,16 @@ export interface CouchDBSyncSettings {
 	/** stable per-install id (auto-generated) */
 	deviceId: string;
 
+	/**
+	 * Stable, random per-VAULT id used to name the local PouchDB so two vaults on
+	 * the same machine can never share their local replica. Auto-generated on
+	 * first load; persisted in data.json (which lives inside each vault's
+	 * .obsidian/plugins/couchdb-sync/, so it is already vault-scoped). Adding the
+	 * random component guarantees uniqueness even across vaults that happen to
+	 * have the same name or path.
+	 */
+	localDbId: string;
+
 	/** whether live (continuous) sync is enabled */
 	liveSync: boolean;
 
@@ -58,6 +68,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	conflictStrategy: "newest",
 	isMaster: false,
 	deviceId: "",
+	localDbId: "",
 	liveSync: true,
 	autoStart: true,
 	syncHidden: false,

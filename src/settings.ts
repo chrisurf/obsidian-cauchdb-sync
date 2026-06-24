@@ -278,8 +278,30 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					})
 			);
 
+		// Legacy cleanup: before vault isolation, every vault on the machine shared
+		// one global PouchDB named "couchdb-sync-local". Offer to delete it so the
+		// data from old vaults stops leaking into the index status.
+		void this.plugin.legacyLocalDbDocCount().then((n) => {
+			if (n <= 0) return;
+			new Setting(containerEl)
+				.setName("Wipe legacy shared cache")
+				.setDesc(
+					`A pre-vault-isolation local cache with ${n} document(s) was found. It is shared across ALL vaults on this machine and may show files from other vaults in the index. Safe to delete — the server is not touched.`
+				)
+				.addButton((b) =>
+					b
+						.setWarning()
+						.setButtonText("Wipe legacy cache")
+						.onClick(async () => {
+							await this.plugin.wipeLegacyLocalDb();
+							new Notice("Legacy shared cache wiped.");
+							this.display();
+						})
+				);
+		});
+
 		containerEl.createEl("p", {
-			text: `Device ID: ${s.deviceId || "(not yet assigned)"}`,
+			text: `Device ID: ${s.deviceId || "(not yet assigned)"}  ·  Local DB id: ${s.localDbId || "(not yet assigned)"}`,
 			cls: "setting-item-description",
 		});
 	}

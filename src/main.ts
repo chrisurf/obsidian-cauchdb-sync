@@ -1,4 +1,5 @@
 import { Notice, Plugin, setIcon } from "obsidian";
+import PouchDB from "pouchdb-browser";
 import {
 	CouchDBSyncSettings,
 	DEFAULT_SETTINGS,
@@ -11,7 +12,19 @@ import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engin
 import { CouchDBSyncSettingTab } from "./settings";
 import { generateDeviceId } from "./util";
 
-const LOCAL_DB_NAME = "couchdb-sync-local";
+/**
+ * Obsidian runs all vaults under the same Electron origin (`app://obsidian.md`),
+ * so a hardcoded local PouchDB name would be shared across every vault on the
+ * machine — leaking files between vaults and risking cross-vault writes. We
+ * therefore derive the name from a random per-vault id persisted in this
+ * vault's data.json (which Obsidian already scopes per-vault).
+ */
+const LOCAL_DB_PREFIX = "couchdb-sync-local";
+const LEGACY_LOCAL_DB_NAME = "couchdb-sync-local"; // pre-vault-isolation default
+
+function localDbName(settings: CouchDBSyncSettings): string {
+	return `${LOCAL_DB_PREFIX}-${settings.localDbId}`;
+}
 
 // Lucide icon name per state for the status bar.
 const STATUS_ICON: Record<SyncState, string> = {
@@ -178,7 +191,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.settings.unsafeShutdown = true;
 		await this.saveSettings();
 
-		const db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
+		const db = new SyncDatabase(this.settings, localDbName(this.settings));
 		const engine = new SyncEngine(
 			this.app,
 			db,
@@ -214,7 +227,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 			.catch(() => undefined)
 			.then(async () => {
 				this.engine?.stop();
-				const db = this.db ?? new SyncDatabase(this.settings, LOCAL_DB_NAME);
+				const db = this.db ?? new SyncDatabase(this.settings, localDbName(this.settings));
 				await db.destroyLocal().catch(() => undefined);
 				this.engine = null;
 				this.db = null;
@@ -257,7 +270,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	async getIndexReport(): Promise<IndexReport | null> {
 		if (this.engine) return this.engine.getIndexReport();
 		if (!this.settings.serverUrl) return null; // not configured yet
-		const db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
+		const db = new SyncDatabase(this.settings, localDbName(this.settings));
 		try {
 			return await buildIndexReport(this.app, this.settings, db);
 		} finally {
@@ -283,7 +296,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	async removeFromIndex(target: string, folder: boolean): Promise<number> {
 		if (this.engine) return this.engine.removeFromIndex(target, folder);
 		if (!this.settings.serverUrl) return 0;
-		const db = new SyncDatabase(this.settings, LOCAL_DB_NAME);
+		const db = new SyncDatabase(this.settings, localDbName(this.settings));
 		try {
 			return await removeFromDb(db, target, folder);
 		} finally {
@@ -293,9 +306,49 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		let dirty = false;
 		if (!this.settings.deviceId) {
 			this.settings.deviceId = generateDeviceId();
-			await this.saveSettings();
+			dirty = true;
+		}
+		// Vault-isolated local PouchDB name (see LOCAL_DB_PREFIX comment). The id is
+		// random so two vaults can never collide even if they share a name or path.
+		if (!this.settings.localDbId) {
+			this.settings.localDbId = generateDeviceId();
+			dirty = true;
+		}
+		if (dirty) await this.saveSettings();
+	}
+
+	/**
+	 * Does the legacy, vault-shared PouchDB ("couchdb-sync-local", no suffix) still
+	 * exist on this machine and hold data? If yes, it is a leftover from before
+	 * vault isolation and the user should explicitly wipe it (we cannot tell which
+	 * vault its contents belong to). Returns the doc count, or 0 if absent/empty.
+	 */
+	async legacyLocalDbDocCount(): Promise<number> {
+		// Don't probe our own current DB.
+		if (this.settings.localDbId === "" || localDbName(this.settings) === LEGACY_LOCAL_DB_NAME) {
+			return 0;
+		}
+		const db = new PouchDB(LEGACY_LOCAL_DB_NAME, { skip_setup: true } as PouchDB.Configuration.LocalDatabaseConfiguration);
+		try {
+			const info = await db.info();
+			return info.doc_count ?? 0;
+		} catch {
+			return 0;
+		} finally {
+			await db.close().catch(() => undefined);
+		}
+	}
+
+	/** Permanently destroy the legacy vault-shared local PouchDB. */
+	async wipeLegacyLocalDb(): Promise<void> {
+		const db = new PouchDB(LEGACY_LOCAL_DB_NAME);
+		try {
+			await db.destroy();
+		} catch (e) {
+			console.warn("[couchdb-sync] could not destroy legacy local DB", e);
 		}
 	}
 
