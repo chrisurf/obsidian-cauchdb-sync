@@ -401,43 +401,45 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			return;
 		}
 
-		const drifted = report.localOnly.length + report.dbOnly.length + report.drift.length;
-		const total = report.inSync.length + drifted;
-		const pct = total === 0 ? 100 : Math.round((report.inSync.length / total) * 100);
-		summary.className = drifted === 0 ? "couchdb-sync-ok" : "couchdb-sync-warn";
-		summary.setText(
-			drifted === 0
-				? `✓ In sync — ${report.inSync.length} / ${total} files (100%)`
-				: `⚠ Syncing — ${report.inSync.length} / ${total} files (${pct}%) · ${drifted} pending`
-		);
-		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
-
-		// drift lists — rebuild only when the set changed
-		const driftSig = JSON.stringify([report.localOnly, report.dbOnly, report.drift]);
-		if (force || driftSig !== this.driftSig) {
-			this.driftSig = driftSig;
-			driftBox.empty();
-			this.renderDriftList(driftBox, "Only on this device (not yet uploaded)", report.localOnly);
-			this.renderDriftList(driftBox, "Only in database (not yet downloaded here)", report.dbOnly);
-			this.renderDriftList(driftBox, "Content differs (will be resolved by your conflict strategy)", report.drift);
-		}
-
-		// Per-path state driving the tree colours. The tree shows the full picture —
-		// every file on this device AND in the database — so all four states appear.
-		// Priority: conflict (red) > local-only (amber) > remote-only (grey) > synced.
+		// ---- single source of truth: classify every file into one of four states ----
+		// Priority: conflict (red) > local-only (amber) > remote-only (grey) > synced (green).
+		// The same map drives the summary, the lists below, and the tree — so they can
+		// never disagree.
 		const stateByPath = new Map<string, FileState>();
 		for (const p of report.inSync) stateByPath.set(p, "synced");
 		for (const p of report.dbOnly) stateByPath.set(p, "remote");
 		for (const p of report.localOnly) stateByPath.set(p, "local");
 		for (const p of report.drift) stateByPath.set(p, "conflict");
 		for (const p of report.conflicts) stateByPath.set(p, "conflict");
-		const conflictCount = new Set([...report.drift, ...report.conflicts]).size;
 
-		// Union of database paths and local-only paths = the complete file set.
-		const allPaths = [...new Set([...report.allDbPaths, ...report.localOnly])].sort((a, b) =>
-			a.localeCompare(b)
+		const groups: Record<FileState, string[]> = { synced: [], local: [], remote: [], conflict: [] };
+		for (const [p, s] of stateByPath) groups[s].push(p);
+		for (const k of Object.keys(groups) as FileState[]) groups[k].sort((a, b) => a.localeCompare(b));
+
+		const allPaths = [...stateByPath.keys()].sort((a, b) => a.localeCompare(b));
+		const total = allPaths.length;
+		const pending = groups.local.length + groups.remote.length + groups.conflict.length;
+		const pct = total === 0 ? 100 : Math.round((groups.synced.length / total) * 100);
+
+		summary.className = pending === 0 ? "couchdb-sync-ok" : "couchdb-sync-warn";
+		summary.setText(
+			pending === 0
+				? `✓ In sync — ${groups.synced.length} / ${total} files (100%)`
+				: `⚠ Syncing — ${groups.synced.length} / ${total} files (${pct}%) · ${pending} pending`
 		);
+		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
 
+		// ---- per-state lists (same colours as the tree) ----
+		const listSig = JSON.stringify([groups.conflict, groups.local, groups.remote]);
+		if (force || listSig !== this.driftSig) {
+			this.driftSig = listSig;
+			driftBox.empty();
+			this.renderStateList(driftBox, "conflict", "Conflicts — diverged / unresolved", groups.conflict);
+			this.renderStateList(driftBox, "local", "Local only — not yet uploaded", groups.local);
+			this.renderStateList(driftBox, "remote", "Remote only — not downloaded here", groups.remote);
+		}
+
+		// ---- tree: the complete file set (this device + database) ----
 		// rebuild only when the set OR any path's state changed (so colours update as
 		// files download/converge; keeps the tree expanded otherwise)
 		const treeSig = JSON.stringify(allPaths.map((p) => [p, stateByPath.get(p)]));
@@ -446,7 +448,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			treeBox.empty();
 			const tree = treeBox.createEl("details", { cls: "couchdb-sync-tree-root" });
 			tree.createEl("summary", {
-				text: `🗂 Sync state — ${allPaths.length} files (this device + database)`,
+				text: `🗂 Sync state — ${total} files (this device + database)`,
 			});
 			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
 			const legend = body.createDiv({ cls: "couchdb-sync-legend" });
@@ -459,18 +461,25 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
 				item.createSpan({ text: label });
 			};
-			mk("synced", `in sync (${report.inSync.length})`);
-			mk("local", `local only (${report.localOnly.length})`);
-			mk("remote", `remote only (${report.dbOnly.length})`);
-			mk("conflict", `conflict (${conflictCount})`);
+			mk("synced", `in sync (${groups.synced.length})`);
+			mk("local", `local only (${groups.local.length})`);
+			mk("remote", `remote only (${groups.remote.length})`);
+			mk("conflict", `conflict (${groups.conflict.length})`);
 			this.renderTree(body.createDiv(), allPaths, stateByPath);
 		}
 	}
 
-	private renderDriftList(box: HTMLElement, title: string, paths: string[]): void {
+	private renderStateList(
+		box: HTMLElement,
+		state: FileState,
+		title: string,
+		paths: string[]
+	): void {
 		if (paths.length === 0) return;
-		const det = box.createEl("details", { cls: "couchdb-sync-drift" });
-		det.createEl("summary", { text: `${title} (${paths.length})` });
+		const det = box.createEl("details", { cls: `couchdb-sync-drift couchdb-sync-state-${state}` });
+		const sum = det.createEl("summary");
+		sum.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
+		sum.createSpan({ text: ` ${title} (${paths.length})` });
 		const ul = det.createEl("ul");
 		for (const p of paths) {
 			const li = ul.createEl("li", { cls: "couchdb-sync-drift-item" });

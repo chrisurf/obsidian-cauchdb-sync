@@ -19,13 +19,14 @@
 
 .couchdb-sync-drift summary {
 	cursor: pointer;
-	color: var(--color-orange);
+	/* colour comes from the state class on the <details> (red / amber / grey) */
 }
 
 .couchdb-sync-drift ul {
 	margin: 0.25em 0 0.5em 1em;
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
+	font-weight: normal;
 }
 
 .couchdb-sync-tree-root > summary {
@@ -134,6 +135,7 @@
 	height: 0.7em;
 	border-radius: 2px;
 	flex: none;
+	vertical-align: middle;
 }
 
 .couchdb-sync-swatch.couchdb-sync-state-synced {
