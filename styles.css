@@ -74,6 +74,77 @@
 	flex: 1;
 }
 
+/* --- local-vs-remote colour coding for the Remote state tree --- */
+
+/* green: file is here on this device and in sync with the database */
+.couchdb-sync-state-synced,
+.couchdb-sync-state-synced .couchdb-sync-tree-fname {
+	color: var(--color-green);
+}
+
+/* amber: file is here but its content differs from the database */
+.couchdb-sync-state-drift,
+.couchdb-sync-state-drift .couchdb-sync-tree-fname {
+	color: var(--color-orange);
+}
+
+/* grey: file is only in the database, not on this device */
+.couchdb-sync-state-remote,
+.couchdb-sync-state-remote .couchdb-sync-tree-fname {
+	color: var(--text-faint);
+}
+
+/* mixed folder: some descendants here, some remote-only — stay neutral */
+.couchdb-sync-state-mixed,
+.couchdb-sync-state-mixed > span:first-child {
+	color: var(--text-normal);
+}
+
+/* legend above the tree */
+.couchdb-sync-legend {
+	margin-bottom: 0.5em;
+	font-family: var(--font-interface);
+}
+
+.couchdb-sync-legend-intro {
+	margin: 0 0 0.35em;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.couchdb-sync-legend-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35em;
+	margin-right: 1em;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.couchdb-sync-swatch {
+	display: inline-block;
+	width: 0.7em;
+	height: 0.7em;
+	border-radius: 2px;
+	flex: none;
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-synced {
+	background: var(--color-green);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-drift {
+	background: var(--color-orange);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-remote {
+	background: var(--text-faint);
+}
+
+.couchdb-sync-legend-note {
+	margin: 0.35em 0 0;
+}
+
 /* red X to remove an entry from the index */
 .couchdb-sync-x {
 	flex: none;

@@ -6,6 +6,9 @@ import { SYNC_STATE, SyncStatus } from "./types";
 
 const AUTO_REFRESH_MS = 3_000;
 
+/** How a database file relates to this device (drives the tree colour coding). */
+type FileState = "synced" | "drift" | "remote";
+
 export class CouchDBSyncSettingTab extends PluginSettingTab {
 	plugin: CouchDBSyncPlugin;
 	private statusUnsub?: () => void;
@@ -414,14 +417,46 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			this.renderDriftList(driftBox, "Content differs (will be resolved by your conflict strategy)", report.drift);
 		}
 
-		// file tree — rebuild only when the indexed set changed (keeps it expanded otherwise)
-		const treeSig = JSON.stringify(report.allDbPaths);
+		// Per-path local-vs-remote state for the tree colour coding.
+		//   synced = in the database AND identical on this device   (green)
+		//   drift  = in the database AND on this device but differs  (amber)
+		//   remote = in the database but NOT on this device          (grey)
+		// The tree shows the REMOTE (database) state, so it covers exactly these three.
+		const stateByPath = new Map<string, FileState>();
+		for (const p of report.inSync) stateByPath.set(p, "synced");
+		for (const p of report.drift) stateByPath.set(p, "drift");
+		for (const p of report.dbOnly) stateByPath.set(p, "remote");
+
+		// rebuild only when the indexed set OR any path's state changed (so colours
+		// update when a file finishes downloading; keeps the tree expanded otherwise)
+		const localCount = report.inSync.length + report.drift.length;
+		const treeSig = JSON.stringify(report.allDbPaths.map((p) => [p, stateByPath.get(p)]));
 		if (force || treeSig !== this.treeSig) {
 			this.treeSig = treeSig;
 			treeBox.empty();
 			const tree = treeBox.createEl("details", { cls: "couchdb-sync-tree-root" });
-			tree.createEl("summary", { text: `📂 File tree — ${report.allDbPaths.length} indexed files` });
-			this.renderTree(tree.createDiv({ cls: "couchdb-sync-tree" }), report.allDbPaths);
+			tree.createEl("summary", {
+				text: `☁️ Remote state — ${report.allDbPaths.length} files in the database`,
+			});
+			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
+			const legend = body.createDiv({ cls: "couchdb-sync-legend" });
+			legend.createEl("p", {
+				cls: "couchdb-sync-legend-intro",
+				text: "What the server holds. Colour shows whether each file is also on THIS device:",
+			});
+			const mk = (state: FileState, label: string) => {
+				const item = legend.createSpan({ cls: "couchdb-sync-legend-item" });
+				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
+				item.createSpan({ text: label });
+			};
+			mk("synced", `here, in sync (${report.inSync.length})`);
+			mk("drift", `here, differs (${report.drift.length})`);
+			mk("remote", `remote only (${report.dbOnly.length})`);
+			legend.createEl("p", {
+				cls: "setting-item-description couchdb-sync-legend-note",
+				text: `${localCount} of ${report.allDbPaths.length} database files are present on this device.`,
+			});
+			this.renderTree(body.createDiv(), report.allDbPaths, stateByPath);
 		}
 	}
 
@@ -448,7 +483,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		}
 	}
 
-	private renderTree(container: HTMLElement, paths: string[]): void {
+	private renderTree(
+		container: HTMLElement,
+		paths: string[],
+		stateByPath: Map<string, FileState>
+	): void {
 		interface Node {
 			folders: Map<string, Node>;
 			files: { name: string; path: string }[];
@@ -465,6 +504,23 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			}
 			node.files.push({ name: parts[parts.length - 1], path });
 		}
+
+		// A folder is "synced" only if everything under it is here, "remote" only if
+		// nothing under it is here, otherwise "mixed" (a partially-downloaded subtree).
+		const folderState = (node: Node): FileState | "mixed" => {
+			let sawHere = false;
+			let sawRemote = false;
+			const visit = (n: Node) => {
+				for (const f of n.files) {
+					if (stateByPath.get(f.path) === "remote") sawRemote = true;
+					else sawHere = true;
+				}
+				for (const child of n.folders.values()) visit(child);
+			};
+			visit(node);
+			if (sawHere && sawRemote) return "mixed";
+			return sawRemote ? "remote" : "synced";
+		};
 
 		// red "X": remove a file (folder=false) or whole folder (folder=true) from the
 		// DB index. No confirmation — it only touches the database; local files stay and
@@ -483,19 +539,32 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			};
 		};
 
+		const stateTitle: Record<FileState | "mixed", string> = {
+			synced: "On this device, in sync with the database",
+			drift: "On this device but the content differs (your conflict strategy decides)",
+			remote: "In the database only — not downloaded to this device",
+			mixed: "Partly on this device (some files not downloaded here)",
+		};
+
 		const render = (node: Node, el: HTMLElement, prefix: string) => {
 			const folderNames = [...node.folders.keys()].sort((a, b) => a.localeCompare(b));
 			for (const name of folderNames) {
 				const child = node.folders.get(name)!;
 				const folderPath = prefix ? `${prefix}/${name}` : name;
+				const fState = folderState(child);
 				const det = el.createEl("details");
-				const sum = det.createEl("summary", { cls: "couchdb-sync-tree-folder" });
+				const sum = det.createEl("summary", {
+					cls: `couchdb-sync-tree-folder couchdb-sync-state-${fState}`,
+				});
+				sum.setAttr("aria-label", stateTitle[fState]);
 				sum.createSpan({ text: `📁 ${name}` });
 				addRemove(sum, folderPath, true);
 				render(child, det.createDiv({ cls: "couchdb-sync-tree-children" }), folderPath);
 			}
 			for (const file of node.files.sort((a, b) => a.name.localeCompare(b.name))) {
-				const div = el.createDiv({ cls: "couchdb-sync-tree-file" });
+				const fState = stateByPath.get(file.path) ?? "remote";
+				const div = el.createDiv({ cls: `couchdb-sync-tree-file couchdb-sync-state-${fState}` });
+				div.setAttr("aria-label", stateTitle[fState]);
 				div.createSpan({ cls: "couchdb-sync-dot" });
 				div.createSpan({ text: `📄 ${file.name}`, cls: "couchdb-sync-tree-fname" });
 				addRemove(div, file.path, false);
