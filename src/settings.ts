@@ -433,15 +433,52 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			const s = this.plugin.settings;
 			if (!s.serverUrl) {
 				summary.setText("Sync is not running. Configure the connection (and passphrase) and restart sync.");
+				driftBox.empty();
 			} else if (!s.connectionVerified) {
 				summary.setText(
 					"Index status is hidden until the server connection is verified. Press 'Test connection' above — on success the index unlocks."
 				);
+				driftBox.empty();
 			} else {
-				summary.setText("Sync is not running. Press 'Sync now' or 'Download only' to start.");
+				// Verified, but the report still came back null — most likely an origin
+				// mismatch (cache was stamped by a different remote). Tell the user and
+				// expose the two recovery actions: wipe (safe default) or re-stamp
+				// (adopt the cache for this remote, if they know it is theirs).
+				const origin = await this.plugin.getOriginState().catch(() => "unset" as const);
+				if (origin === "mismatch") {
+					summary.className = "couchdb-sync-warn";
+					summary.setText(
+						"⚠ Local cache belongs to a different remote (server URL / database / username changed since it was filled). " +
+							"Its contents are hidden to avoid showing files from the previous remote."
+					);
+					driftBox.empty();
+					const actions = driftBox.createDiv({ cls: "couchdb-sync-drift" });
+					const wipeBtn = actions.createEl("button", {
+						text: "Wipe local cache",
+						cls: "couchdb-sync-rowbtn",
+					});
+					wipeBtn.onclick = async () => {
+						await this.plugin.wipeLocalOnly();
+						new Notice("Local cache wiped. Press 'Sync now' to rebuild from the new remote.");
+						this.display();
+					};
+					const adoptBtn = actions.createEl("button", {
+						text: "Adopt cache for this remote",
+						cls: "couchdb-sync-rowbtn",
+					});
+					adoptBtn.onclick = async () => {
+						await this.plugin.stampOriginFingerprint();
+						new Notice("Cache adopted for the current remote.");
+						this.driftSig = "";
+						this.treeSig = "";
+						await this.loadIndex(true);
+					};
+				} else {
+					summary.setText("Sync is not running. Press 'Sync now' or 'Download only' to start.");
+					driftBox.empty();
+				}
 			}
 			counts.setText("");
-			driftBox.empty();
 			treeBox.empty();
 			this.driftSig = this.treeSig = "";
 			return;

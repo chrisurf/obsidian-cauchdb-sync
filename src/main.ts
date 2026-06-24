@@ -10,7 +10,20 @@ import {
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
-import { generateDeviceId } from "./util";
+import { generateDeviceId, sha256Hex, textToBytes } from "./util";
+
+/** _local doc id under which we remember which remote this cache belongs to. */
+const ORIGIN_FP_DOC = "_local/couchdb-sync-origin";
+
+/**
+ * Stable fingerprint of the "remote identity" — the tuple that determines
+ * which remote a local cache belongs to. Username is included so two users
+ * sharing the same server+database are still distinguishable.
+ */
+async function originFingerprint(settings: CouchDBSyncSettings): Promise<string> {
+	const norm = `${settings.serverUrl.trim().replace(/\/+$/, "")}|${settings.dbName.trim()}|${settings.username.trim()}`;
+	return sha256Hex(textToBytes(norm));
+}
 
 /**
  * Obsidian runs all vaults under the same Electron origin (`app://obsidian.md`),
@@ -224,6 +237,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 			dirty = true;
 		}
 		if (dirty) await this.saveSettings();
+		// Reaching steady state also means this local cache is now legitimately
+		// tied to the configured remote — record the fingerprint so a later
+		// credential change can be detected.
+		await this.stampOriginFingerprint();
 	}
 
 	/** Mark the configured connection as verified (called by the Test button on success). */
@@ -238,6 +255,39 @@ export default class CouchDBSyncPlugin extends Plugin {
 		if (!this.settings.connectionVerified) return;
 		this.settings.connectionVerified = false;
 		await this.saveSettings();
+	}
+
+	/**
+	 * Compare the cache's stored origin fingerprint against the current settings.
+	 * Returns null when there is no stored fingerprint yet (fresh DB or pre-fingerprint
+	 * data), 'match' when they agree, or 'mismatch' when the cache was filled by a
+	 * different remote — in which case the index view must NOT be shown without an
+	 * explicit user action (otherwise switching credentials would silently surface
+	 * the previous remote's filenames).
+	 */
+	async checkOriginFingerprint(): Promise<"match" | "mismatch" | "unset"> {
+		const db = new SyncDatabase(this.settings, localDbName(this.settings));
+		try {
+			const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
+			if (!stored || !stored.fp) return "unset";
+			const current = await originFingerprint(this.settings);
+			return stored.fp === current ? "match" : "mismatch";
+		} finally {
+			await db.close().catch(() => undefined);
+		}
+	}
+
+	/** Stamp the current origin fingerprint into the cache so we recognize it later. */
+	async stampOriginFingerprint(): Promise<void> {
+		const db = new SyncDatabase(this.settings, localDbName(this.settings));
+		try {
+			const fp = await originFingerprint(this.settings);
+			await db.putLocalDoc(ORIGIN_FP_DOC, { fp });
+		} catch (e) {
+			console.warn("[couchdb-sync] could not stamp origin fingerprint", e);
+		} finally {
+			await db.close().catch(() => undefined);
+		}
 	}
 
 	/**
@@ -297,12 +347,21 @@ export default class CouchDBSyncPlugin extends Plugin {
 		// they own the configured remote — otherwise typing random text into the
 		// URL field is enough to inspect anything the local cache happens to hold.
 		if (!this.settings.connectionVerified) return null;
+		// Origin gate: if the cache was last stamped by a different remote, do not
+		// reveal its contents. The UI exposes this state via getOriginState() and
+		// offers Wipe / Re-stamp actions.
+		if ((await this.checkOriginFingerprint()) === "mismatch") return null;
 		const db = new SyncDatabase(this.settings, localDbName(this.settings));
 		try {
 			return await buildIndexReport(this.app, this.settings, db);
 		} finally {
 			await db.close().catch(() => undefined);
 		}
+	}
+
+	/** UI helper: state of the origin fingerprint for the current settings. */
+	getOriginState(): Promise<"match" | "mismatch" | "unset"> {
+		return this.checkOriginFingerprint();
 	}
 
 	/** Files currently being transferred with chunk progress (for live highlighting). */
