@@ -30,11 +30,13 @@ plain-language UX.
   transit. Only the passphrase must match across devices; it never touches the server.
 - ⚖️ **No-prompt conflict resolution**: *newest version wins* or *master device wins*.
 - 📊 **Full-transparency index status** — at a glance: how many of your files are in sync (`X / Y`,
-  with %), what's drifting, and a collapsible **Sync state** tree of every file across this device
-  *and* the server, **colour-coded** into four states: 🟢 green = in sync, 🟠 amber = local only
-  (not uploaded yet), ⚪ grey = remote only (not downloaded here), 🔴 red = conflict / diverged.
-  Folders roll their children up (and turn red if anything inside conflicts). Updates **in place**
-  every few seconds — no flicker.
+  with %), and a collapsible **Sync state** tree of every file across this device *and* the server,
+  **colour-coded** into five distinct states so you can tell exactly what each file needs:
+  🟢 green = in sync, 🟠 amber = local only (not uploaded yet), ⚪ grey = remote only (not downloaded
+  here), 🟣 purple = content differs (auto-reconcilable drift), 🔴 red = unresolved conflict.
+  Folders roll up to the most urgent state inside them (green only when the whole subtree is clean),
+  and the summary/lists/tree all derive from one classification so they never disagree. Updates
+  **in place** every few seconds — no flicker.
 - ✨ **Live per-file feedback** — files being transferred pulse with a left-to-right "scan" shimmer
   and show **chunk progress** (`12 / 40 chunks · 30%`).
 - 🩹 **Self-healing** — if a download references a chunk that went missing (e.g. an interrupted

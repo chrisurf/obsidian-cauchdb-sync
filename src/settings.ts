@@ -6,13 +6,28 @@ import { SYNC_STATE, SyncStatus } from "./types";
 
 const AUTO_REFRESH_MS = 3_000;
 
-/** How a file relates to this device vs the database (drives the tree colours).
- *   synced   — on this device and in sync, no conflict   (green)
- *   local    — on this device only, not in the database  (amber)
- *   remote   — in the database only, not on this device  (grey)
- *   conflict — diverged: content differs / unresolved    (red)
+/** How a file relates to this device vs the database (drives the colour coding).
+ *   synced   — on this device and in sync                      (green)
+ *   remote   — in the database only, not on this device        (grey)
+ *   local    — on this device only, not in the database        (amber)
+ *   drift    — on both, content differs (auto-reconcilable)    (purple)
+ *   conflict — unresolved conflict revisions in the database   (red)
  */
-type FileState = "synced" | "local" | "remote" | "conflict";
+type FileState = "synced" | "remote" | "local" | "drift" | "conflict";
+
+/**
+ * Single severity ordering used everywhere: it decides which state a file gets
+ * when several apply, the order the lists are shown in, and the colour a folder
+ * rolls up to (the most urgent state anywhere inside it). One table = one source
+ * of truth, so the summary, the lists, the files and the folders never disagree.
+ */
+const SEVERITY: Record<FileState, number> = {
+	synced: 0,
+	remote: 1,
+	local: 2,
+	drift: 3,
+	conflict: 4,
+};
 
 export class CouchDBSyncSettingTab extends PluginSettingTab {
 	plugin: CouchDBSyncPlugin;
@@ -401,24 +416,34 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			return;
 		}
 
-		// ---- single source of truth: classify every file into one of four states ----
-		// Priority: conflict (red) > local-only (amber) > remote-only (grey) > synced (green).
-		// The same map drives the summary, the lists below, and the tree — so they can
-		// never disagree.
+		// ---- single source of truth: classify every file into exactly one state ----
+		// Each file gets the most severe state that applies (see SEVERITY). The same
+		// map drives the summary, the lists below, and the tree — so they can never
+		// disagree.
 		const stateByPath = new Map<string, FileState>();
-		for (const p of report.inSync) stateByPath.set(p, "synced");
-		for (const p of report.dbOnly) stateByPath.set(p, "remote");
-		for (const p of report.localOnly) stateByPath.set(p, "local");
-		for (const p of report.drift) stateByPath.set(p, "conflict");
-		for (const p of report.conflicts) stateByPath.set(p, "conflict");
+		const setState = (p: string, s: FileState) => {
+			const cur = stateByPath.get(p);
+			if (cur === undefined || SEVERITY[s] > SEVERITY[cur]) stateByPath.set(p, s);
+		};
+		for (const p of report.inSync) setState(p, "synced");
+		for (const p of report.dbOnly) setState(p, "remote");
+		for (const p of report.localOnly) setState(p, "local");
+		for (const p of report.drift) setState(p, "drift");
+		for (const p of report.conflicts) setState(p, "conflict");
 
-		const groups: Record<FileState, string[]> = { synced: [], local: [], remote: [], conflict: [] };
+		const groups: Record<FileState, string[]> = {
+			synced: [],
+			remote: [],
+			local: [],
+			drift: [],
+			conflict: [],
+		};
 		for (const [p, s] of stateByPath) groups[s].push(p);
 		for (const k of Object.keys(groups) as FileState[]) groups[k].sort((a, b) => a.localeCompare(b));
 
 		const allPaths = [...stateByPath.keys()].sort((a, b) => a.localeCompare(b));
 		const total = allPaths.length;
-		const pending = groups.local.length + groups.remote.length + groups.conflict.length;
+		const pending = total - groups.synced.length;
 		const pct = total === 0 ? 100 : Math.round((groups.synced.length / total) * 100);
 
 		summary.className = pending === 0 ? "couchdb-sync-ok" : "couchdb-sync-warn";
@@ -429,12 +454,13 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		);
 		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
 
-		// ---- per-state lists (same colours as the tree) ----
-		const listSig = JSON.stringify([groups.conflict, groups.local, groups.remote]);
+		// ---- per-state lists, most urgent first (same colours as the tree) ----
+		const listSig = JSON.stringify([groups.conflict, groups.drift, groups.local, groups.remote]);
 		if (force || listSig !== this.driftSig) {
 			this.driftSig = listSig;
 			driftBox.empty();
-			this.renderStateList(driftBox, "conflict", "Conflicts — diverged / unresolved", groups.conflict);
+			this.renderStateList(driftBox, "conflict", "Conflicts — unresolved revisions", groups.conflict);
+			this.renderStateList(driftBox, "drift", "Content differs — will be reconciled", groups.drift);
 			this.renderStateList(driftBox, "local", "Local only — not yet uploaded", groups.local);
 			this.renderStateList(driftBox, "remote", "Remote only — not downloaded here", groups.remote);
 		}
@@ -464,6 +490,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			mk("synced", `in sync (${groups.synced.length})`);
 			mk("local", `local only (${groups.local.length})`);
 			mk("remote", `remote only (${groups.remote.length})`);
+			mk("drift", `differs (${groups.drift.length})`);
 			mk("conflict", `conflict (${groups.conflict.length})`);
 			this.renderTree(body.createDiv(), allPaths, stateByPath);
 		}
@@ -521,17 +548,20 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			node.files.push({ name: parts[parts.length - 1], path });
 		}
 
-		// A folder takes the single state shared by all its descendants; any conflict
-		// inside bubbles up to red; anything else with >1 state shows as "mixed".
-		const folderState = (node: Node): FileState | "mixed" => {
-			const states = new Set<FileState>();
+		// A folder rolls up to the MOST URGENT state anywhere inside it (by SEVERITY).
+		// So a folder is green only when its whole subtree is in sync, and turns red
+		// the moment anything inside conflicts — no expanding needed to spot trouble.
+		const folderState = (node: Node): FileState => {
+			let worst: FileState = "synced";
 			const visit = (n: Node) => {
-				for (const f of n.files) states.add(stateByPath.get(f.path) ?? "remote");
+				for (const f of n.files) {
+					const s = stateByPath.get(f.path) ?? "remote";
+					if (SEVERITY[s] > SEVERITY[worst]) worst = s;
+				}
 				for (const child of n.folders.values()) visit(child);
 			};
 			visit(node);
-			if (states.has("conflict")) return "conflict";
-			return states.size === 1 ? [...states][0] : "mixed";
+			return worst;
 		};
 
 		// red "X": remove a file (folder=false) or whole folder (folder=true) from the
@@ -551,12 +581,12 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			};
 		};
 
-		const stateTitle: Record<FileState | "mixed", string> = {
+		const stateTitle: Record<FileState, string> = {
 			synced: "On this device and in sync with the database",
 			local: "On this device only — not yet uploaded to the database",
 			remote: "In the database only — not downloaded to this device",
-			conflict: "Diverged — content differs / unresolved (your conflict strategy decides)",
-			mixed: "Mixed — files in different states inside this folder",
+			drift: "On both sides but the content differs — will be reconciled by your conflict strategy",
+			conflict: "Unresolved conflict revisions in the database — needs attention",
 		};
 
 		const render = (node: Node, el: HTMLElement, prefix: string) => {

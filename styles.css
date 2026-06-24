@@ -75,7 +75,7 @@
 	flex: 1;
 }
 
-/* --- four-state colour coding for the Sync state tree --- */
+/* --- five-state colour coding for the Sync state tree --- */
 
 /* green: on this device and in sync with the database */
 .couchdb-sync-state-synced,
@@ -95,17 +95,17 @@
 	color: var(--text-faint);
 }
 
-/* red: diverged / unresolved conflict */
+/* purple: content differs on both sides — auto-reconcilable drift */
+.couchdb-sync-state-drift,
+.couchdb-sync-state-drift .couchdb-sync-tree-fname {
+	color: var(--color-purple);
+}
+
+/* red: unresolved conflict revisions — needs attention */
 .couchdb-sync-state-conflict,
 .couchdb-sync-state-conflict .couchdb-sync-tree-fname {
 	color: var(--color-red);
 	font-weight: 600;
-}
-
-/* mixed folder: descendants in different states — stay neutral */
-.couchdb-sync-state-mixed,
-.couchdb-sync-state-mixed > span:first-child {
-	color: var(--text-normal);
 }
 
 /* legend above the tree */
@@ -148,6 +148,10 @@
 
 .couchdb-sync-swatch.couchdb-sync-state-remote {
 	background: var(--text-faint);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-drift {
+	background: var(--color-purple);
 }
 
 .couchdb-sync-swatch.couchdb-sync-state-conflict {
