@@ -224,7 +224,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Sync now")
-			.setDesc("Connect and synchronize both ways — upload your changes AND download others'. With Live sync on, this also (re)starts continuous sync.")
+			.setDesc(
+				"Connect and synchronize both ways — upload local changes AND pull server changes. " +
+					"Also writes any cached-but-missing files from the local index to disk " +
+					"(heals 'Only in database' entries). With Live sync on, this also (re)starts continuous sync."
+			)
 			.addButton((b) =>
 				b
 					.setCta()
@@ -237,7 +241,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Download from server")
-			.setDesc("Pull the server's state to this device WITHOUT uploading local changes. Useful on a follower device, or to force the master's state.")
+			.setDesc(
+				"Pull the server's state to this device WITHOUT uploading local changes, then " +
+					"materialize anything that is in the local index but missing on disk. " +
+					"Useful on a follower device, after a Google Drive desync, or to force the master's state."
+			)
 			.addButton((b) =>
 				b.setButtonText("Download only").onClick(async () => {
 					new Notice("Downloading from server…");

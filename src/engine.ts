@@ -261,6 +261,7 @@ export class SyncEngine {
 			await this.cleanupTempFiles();
 			await this.indexLocalFiles();
 			if (this.settings.syncHidden) await this.scanHidden();
+			await this.materializeMissing();
 			await this.retryPending();
 			await this.resolveConflicts();
 			if (!this.aborted) {
@@ -272,6 +273,38 @@ export class SyncEngine {
 		} catch (e) {
 			if (!this.aborted) this.fail("initial index", e);
 		}
+	}
+
+	/**
+	 * Write to disk every DB document that the local PouchDB already holds but the
+	 * vault does not yet have on disk. Necessary because PouchDB's replication is
+	 * incremental: once a doc is replicated locally, no further `change` event fires
+	 * for it, so `applyRemoteChange` is never triggered by the live/one-shot pull.
+	 * Without this pass, "Sync now" and "Download from server" are silent no-ops the
+	 * moment the cache and the disk get out of sync (e.g. files were removed
+	 * externally, or the replicate finished but the disk write was interrupted).
+	 */
+	private async materializeMissing(): Promise<void> {
+		if (this.aborted) return;
+		const adapter = this.app.vault.adapter;
+		const docs = await this.db.getAll();
+		let written = 0;
+		for (const doc of docs) {
+			if (this.aborted) return;
+			if (doc.deleted || this.skip(doc.path)) continue;
+			const onDisk = isHidden(doc.path)
+				? await adapter.exists(doc.path)
+				: this.app.vault.getAbstractFileByPath(doc.path) instanceof TFile;
+			if (onDisk && this.lastHash.get(doc.path) === doc.hash) continue;
+			try {
+				await this.applyRemoteChange(doc);
+				written++;
+			} catch (e) {
+				this.fail(`materializing ${doc.path}`, e);
+			}
+			await this.yieldToUi();
+		}
+		if (written > 0) console.info(`[couchdb-sync] materialized ${written} cached doc(s) to disk`);
 	}
 
 	// --- hidden files (no vault events -> scanned by polling) ---------------
@@ -466,6 +499,11 @@ export class SyncEngine {
 		void (async () => {
 			await this.cleanupTempFiles();
 			await this.downloadOnce();
+			// After replication settles, write any cached-but-not-on-disk docs to the
+			// vault. The replicate may have delivered nothing new (checkpoint says we
+			// are caught up), yet the disk can still be missing files that ARE in the
+			// local DB — only this pass puts them on disk.
+			await this.materializeMissing();
 			if (!this.aborted) {
 				this.onReady();
 				this.settle(SYNC_STATE.SYNCED);
