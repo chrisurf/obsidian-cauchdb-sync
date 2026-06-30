@@ -11,7 +11,6 @@ import {
 import { SyncDatabase } from "./database";
 import { decryptString, encryptString } from "./crypto";
 import {
-	ChunkDoc,
 	CHUNK_SIZE,
 	CouchDBSyncSettings,
 	FileDoc,
@@ -763,7 +762,6 @@ export class SyncEngine {
 		const adapter = this.app.vault.adapter;
 		if (Platform.isDesktop && adapter instanceof FileSystemAdapter) {
 			const fullPath = adapter.getFullPath(path);
-			// eslint-disable-next-line @typescript-eslint/no-var-requires
 			const fs = require("fs") as typeof import("fs");
 			const fd = await fs.promises.open(fullPath, "r");
 			try {
@@ -1146,9 +1144,7 @@ export class SyncEngine {
 		adapter: FileSystemAdapter,
 		hash: string
 	): Promise<void> {
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const fs = require("fs") as typeof import("fs");
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const nodePath = require("path") as typeof import("path");
 		const full = adapter.getFullPath(path);
 		await fs.promises.mkdir(nodePath.dirname(full), { recursive: true });
