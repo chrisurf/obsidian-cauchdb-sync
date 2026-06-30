@@ -640,26 +640,26 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			totalItem.createSpan({ text: `${syncTotal}`, cls: "couchdb-sync-legend-count" });
 			totalItem.createSpan({ text: "total", cls: "couchdb-sync-legend-label" });
 
-			type LegendAction = { tooltip: string; busyLabel: string; run: (path: string) => Promise<unknown> } | null;
-			const mk = (state: FileState, label: string, count: number, action: LegendAction) => {
+			type LegendAction = { tooltip: string; busyLabel: string; run: (paths: string[]) => Promise<void> };
+			const mk = (state: FileState, label: string, count: number, action?: LegendAction) => {
 				if (count === 0 && state === "excluded") return;
-				const hasAction = action !== null;
-				const enabled = hasAction && count > 0;
+				const isBtn = action !== undefined;
+				const empty = isBtn && count === 0;
 				const cls = `couchdb-sync-legend-item couchdb-sync-state-${state}` +
-					(hasAction ? " couchdb-sync-legend-btn" : "") +
-					(hasAction && !enabled ? " couchdb-sync-legend-disabled" : "");
+					(isBtn ? " couchdb-sync-legend-btn" : "") +
+					(empty ? " couchdb-sync-legend-disabled" : "");
 				const item = legendBox.createSpan({ cls });
-				if (hasAction) item.ariaLabel = action.tooltip;
+				if (isBtn) item.ariaLabel = action.tooltip;
 				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
 				item.createSpan({ text: `${count}`, cls: "couchdb-sync-legend-count" });
 				const labelEl = item.createSpan({ text: label, cls: "couchdb-sync-legend-label" });
-				if (enabled) {
+				if (isBtn && !empty) {
 					item.onclick = async () => {
 						item.classList.add("couchdb-sync-legend-busy");
 						const origLabel = labelEl.getText();
 						labelEl.setText(action.busyLabel);
 						try {
-							for (const path of groups[state]) await action.run(path);
+							await action.run(groups[state]);
 							new Notice(`CouchDB Sync: ${action.busyLabel.replace("…", "")} ${count} file(s).`);
 						} catch (e) {
 							new Notice(`CouchDB Sync: error — ${e instanceof Error ? e.message : String(e)}`);
@@ -672,28 +672,35 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				}
 			};
 
-			mk("synced", "synced", groups.synced.length, null);
+			const runEach = (fn: (path: string) => Promise<unknown>) =>
+				async (paths: string[]) => { for (const q of paths) await fn(q); };
+
+			mk("synced", "synced", groups.synced.length, {
+				tooltip: "Sync all now",
+				busyLabel: "Syncing…",
+				run: runEach((path) => p.forceSyncPath(path)),
+			});
 			mk("local", "local", groups.local.length, {
 				tooltip: "Upload all to server",
 				busyLabel: "Uploading…",
-				run: (path) => p.takeLocalPath(path),
+				run: runEach((path) => p.takeLocalPath(path)),
 			});
 			mk("remote", "remote", groups.remote.length, {
 				tooltip: "Download all to this device",
 				busyLabel: "Downloading…",
-				run: (path) => p.takeRemotePath(path),
+				run: runEach((path) => p.takeRemotePath(path)),
 			});
 			mk("drift", "differs", groups.drift.length, {
 				tooltip: "Resolve all (use newest)",
 				busyLabel: "Resolving…",
-				run: (path) => p.useNewestPath(path),
+				run: runEach((path) => p.useNewestPath(path)),
 			});
 			mk("conflict", "conflict", groups.conflict.length, {
 				tooltip: "Resolve all conflicts (use newest)",
 				busyLabel: "Resolving…",
-				run: (path) => p.useNewestPath(path),
+				run: runEach((path) => p.useNewestPath(path)),
 			});
-			mk("excluded", "excluded", groups.excluded.length, null);
+			mk("excluded", "excluded", groups.excluded.length);
 		}
 
 		// ---- save open/closed state of all <details> before rebuilding ----
