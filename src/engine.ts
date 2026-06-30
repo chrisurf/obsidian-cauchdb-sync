@@ -148,22 +148,20 @@ export async function buildIndexReport(
 		if (Array.isArray(d._conflicts) && d._conflicts.length > 0) conflicts.push(d.path);
 	}
 
-	// Excluded files (opt-in, bounded): only those that already exist as a normal
+	// Excluded files (bounded): only those that already exist as a normal
 	// vault file or as a DB doc — never a full walk of .git/node_modules.
 	const excluded: string[] = [];
-	if (settings.showExcluded) {
-		const seen = new Set<string>();
-		for (const d of allDocs) {
-			if (isSkipped(d.path, app, settings) && !seen.has(d.path)) {
-				seen.add(d.path);
-				excluded.push(d.path);
-			}
+	const seen = new Set<string>();
+	for (const d of allDocs) {
+		if (isSkipped(d.path, app, settings) && !seen.has(d.path)) {
+			seen.add(d.path);
+			excluded.push(d.path);
 		}
-		for (const p of normal) {
-			if (isSkipped(p, app, settings) && !seen.has(p)) {
-				seen.add(p);
-				excluded.push(p);
-			}
+	}
+	for (const p of normal) {
+		if (isSkipped(p, app, settings) && !seen.has(p)) {
+			seen.add(p);
+			excluded.push(p);
 		}
 	}
 

@@ -48,6 +48,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	private legendEl?: HTMLElement;
 	private driftEl?: HTMLElement;
 	private treeEl?: HTMLElement;
+	private excludedToggleEl?: HTMLElement;
 	private driftSig = "";
 	private treeSig = "";
 	private openSections = new Set<string>();
@@ -387,25 +388,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		this.summaryEl.setText("Loading…");
 
-		// --- show-excluded toggle ---
-		new Setting(root)
-			.setName("Show excluded files")
-			.setDesc(
-				"List files that the skip rules exclude (so you can sync one once). Bounded: only excluded files already present as a normal file or in the database are shown."
-			)
-			.addToggle((t) =>
-				t.setValue(this.plugin.settings.showExcluded).onChange(async (v) => {
-					this.plugin.settings.showExcluded = v;
-					await this.plugin.saveSettings();
-					this.treeSig = "";
-					await this.loadIndex(true);
-				})
-			);
-
-		// --- index content (drift lists + tree) ---
+		// --- index content (drift lists + tree + excluded toggle) ---
 		const box = root.createDiv({ cls: "couchdb-sync-index" });
 		this.driftEl = box.createDiv();
 		this.treeEl = box.createDiv();
+		this.excludedToggleEl = box.createDiv();
 		this.driftSig = "";
 		this.treeSig = "";
 
@@ -579,7 +566,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		for (const p of report.localOnly) setState(p, "local");
 		for (const p of report.drift) setState(p, "drift");
 		for (const p of report.conflicts) setState(p, "conflict");
-		for (const p of report.excluded) setState(p, "excluded");
+		if (this.plugin.settings.showExcluded) {
+			for (const p of report.excluded) setState(p, "excluded");
+		}
 
 		const groups: Record<FileState, string[]> = {
 			excluded: [],
@@ -659,6 +648,28 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
 			this.renderTree(body.createDiv(), allPaths, stateByPath);
 			this.restoreOpenState(treeBox);
+		}
+
+		// --- excluded-files toggle: only visible when excluded files exist ---
+		const toggleBox = this.excludedToggleEl;
+		if (toggleBox) {
+			toggleBox.empty();
+			if (report.excluded.length > 0) {
+				new Setting(toggleBox)
+					.setName(`Show ${report.excluded.length} excluded hidden file(s)`)
+					.setDesc(
+						"Hidden files (dot-folders like .obsidian or .git) that are skipped by your sync rules. " +
+						"Turn on to reveal them in the tree above so you can sync individual files once."
+					)
+					.addToggle((t) =>
+						t.setValue(this.plugin.settings.showExcluded).onChange(async (v) => {
+							this.plugin.settings.showExcluded = v;
+							await this.plugin.saveSettings();
+							this.treeSig = "";
+							await this.loadIndex(true);
+						})
+					);
+			}
 		}
 	}
 
