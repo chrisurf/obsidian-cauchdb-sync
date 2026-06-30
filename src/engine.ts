@@ -11,14 +11,16 @@ import {
 import { SyncDatabase } from "./database";
 import { decryptString, encryptString } from "./crypto";
 import {
-	ChunkDoc,
 	CHUNK_SIZE,
 	CouchDBSyncSettings,
 	FileDoc,
 	FILE_PREFIX,
+	HISTORY_PREFIX,
+	HISTORY_SEP,
 	SYNC_STATE,
 	SyncRecord,
 	SyncState,
+	VersionDoc,
 } from "./types";
 import {
 	base64ToUint8,
@@ -47,6 +49,8 @@ export interface IndexReport {
 	localOnly: string[]; // on this device, not yet in the database
 	dbOnly: string[]; // in the database, not on this device
 	drift: string[]; // present on both but content differs
+	conflicts: string[]; // unresolved conflict revisions in the database
+	excluded: string[]; // present locally or in the DB but filtered out by the skip rules
 	allDbPaths: string[]; // every indexed path (for the tree view)
 }
 
@@ -115,16 +119,19 @@ export async function buildIndexReport(
 	const vaultPaths = [...normal, ...hidden].filter((p) => !isSkipped(p, app, settings));
 	const vaultSet = new Set(vaultPaths);
 
-	// Only count/show docs we are actually allowed to sync. The database may contain
-	// hidden docs pushed by another device; with hidden sync off (or a path excluded)
-	// they must NOT appear here as "pending" or in the tree — they are never written.
-	const docs = (await db.getAll()).filter((d) => !d.deleted && !isSkipped(d.path, app, settings));
+	// One scan, with conflict info attached (allDocs conflicts:true). The database may
+	// contain hidden docs pushed by another device; with hidden sync off (or a path
+	// excluded) they must NOT appear as "pending" or in the tree — they are never
+	// written — so we split the docs into allowed vs excluded by the same skip rules.
+	const allDocs = (await db.getAll()).filter((d) => !d.deleted);
+	const docs = allDocs.filter((d) => !isSkipped(d.path, app, settings));
 	const docByPath = new Map(docs.map((d) => [d.path, d] as const));
 
 	const inSync: string[] = [];
 	const localOnly: string[] = [];
 	const dbOnly: string[] = [];
 	const drift: string[] = [];
+	const conflicts: string[] = [];
 
 	for (const path of vaultPaths) {
 		const doc = docByPath.get(path);
@@ -137,6 +144,25 @@ export async function buildIndexReport(
 	}
 	for (const d of docs) {
 		if (!vaultSet.has(d.path)) dbOnly.push(d.path);
+		// conflict info came free with the same scan (allDocs conflicts:true)
+		if (Array.isArray(d._conflicts) && d._conflicts.length > 0) conflicts.push(d.path);
+	}
+
+	// Excluded files (bounded): only those that already exist as a normal
+	// vault file or as a DB doc — never a full walk of .git/node_modules.
+	const excluded: string[] = [];
+	const seen = new Set<string>();
+	for (const d of allDocs) {
+		if (isSkipped(d.path, app, settings) && !seen.has(d.path)) {
+			seen.add(d.path);
+			excluded.push(d.path);
+		}
+	}
+	for (const p of normal) {
+		if (isSkipped(p, app, settings) && !seen.has(p)) {
+			seen.add(p);
+			excluded.push(p);
+		}
 	}
 
 	const sort = (a: string[]) => a.sort((x, y) => x.localeCompare(y));
@@ -147,6 +173,8 @@ export async function buildIndexReport(
 		localOnly: sort(localOnly),
 		dbOnly: sort(dbOnly),
 		drift: sort(drift),
+		conflicts: sort(conflicts),
+		excluded: sort(excluded),
 		allDbPaths: sort(docs.map((d) => d.path)),
 	};
 }
@@ -261,7 +289,6 @@ export class SyncEngine {
 			await this.cleanupTempFiles();
 			await this.indexLocalFiles();
 			if (this.settings.syncHidden) await this.scanHidden();
-			await this.materializeMissing();
 			await this.retryPending();
 			await this.resolveConflicts();
 			if (!this.aborted) {
@@ -273,38 +300,6 @@ export class SyncEngine {
 		} catch (e) {
 			if (!this.aborted) this.fail("initial index", e);
 		}
-	}
-
-	/**
-	 * Write to disk every DB document that the local PouchDB already holds but the
-	 * vault does not yet have on disk. Necessary because PouchDB's replication is
-	 * incremental: once a doc is replicated locally, no further `change` event fires
-	 * for it, so `applyRemoteChange` is never triggered by the live/one-shot pull.
-	 * Without this pass, "Sync now" and "Download from server" are silent no-ops the
-	 * moment the cache and the disk get out of sync (e.g. files were removed
-	 * externally, or the replicate finished but the disk write was interrupted).
-	 */
-	private async materializeMissing(): Promise<void> {
-		if (this.aborted) return;
-		const adapter = this.app.vault.adapter;
-		const docs = await this.db.getAll();
-		let written = 0;
-		for (const doc of docs) {
-			if (this.aborted) return;
-			if (doc.deleted || this.skip(doc.path)) continue;
-			const onDisk = isHidden(doc.path)
-				? await adapter.exists(doc.path)
-				: this.app.vault.getAbstractFileByPath(doc.path) instanceof TFile;
-			if (onDisk && this.lastHash.get(doc.path) === doc.hash) continue;
-			try {
-				await this.applyRemoteChange(doc);
-				written++;
-			} catch (e) {
-				this.fail(`materializing ${doc.path}`, e);
-			}
-			await this.yieldToUi();
-		}
-		if (written > 0) console.info(`[couchdb-sync] materialized ${written} cached doc(s) to disk`);
 	}
 
 	// --- hidden files (no vault events -> scanned by polling) ---------------
@@ -499,11 +494,6 @@ export class SyncEngine {
 		void (async () => {
 			await this.cleanupTempFiles();
 			await this.downloadOnce();
-			// After replication settles, write any cached-but-not-on-disk docs to the
-			// vault. The replicate may have delivered nothing new (checkpoint says we
-			// are caught up), yet the disk can still be missing files that ARE in the
-			// local DB — only this pass puts them on disk.
-			await this.materializeMissing();
 			if (!this.aborted) {
 				this.onReady();
 				this.settle(SYNC_STATE.SYNCED);
@@ -660,6 +650,16 @@ export class SyncEngine {
 		doc.mtime = Date.now();
 		doc.deviceId = this.settings.deviceId;
 		await this.db.put(doc);
+		await this.recordVersion({
+			path,
+			mtime: doc.mtime,
+			size: 0,
+			hash: "",
+			binary: false,
+			enc: this.settings.e2eeEnabled,
+			children: [],
+			deleted: true,
+		});
 		this.lastHash.delete(path);
 		this.syncState.delete(path);
 		this.saveStateSoon();
@@ -748,6 +748,7 @@ export class SyncEngine {
 		await this.db.put(doc);
 		this.lastHash.set(path, hash);
 		this.recordSynced(path, mtime, size, hash);
+		await this.recordVersion({ path, mtime, size, hash, binary, enc, children, deleted: false });
 	}
 
 	/**
@@ -759,7 +760,6 @@ export class SyncEngine {
 		const adapter = this.app.vault.adapter;
 		if (Platform.isDesktop && adapter instanceof FileSystemAdapter) {
 			const fullPath = adapter.getFullPath(path);
-			// eslint-disable-next-line @typescript-eslint/no-var-requires
 			const fs = require("fs") as typeof import("fs");
 			const fd = await fs.promises.open(fullPath, "r");
 			try {
@@ -866,6 +866,261 @@ export class SyncEngine {
 		await this.resolveConflicts();
 	}
 
+	// --- explicit file history -------------------------------------------------
+
+	/** Append a version entry for a freshly-committed change and prune to the cap. */
+	private async recordVersion(d: {
+		path: string;
+		mtime: number;
+		size: number;
+		hash: string;
+		binary: boolean;
+		enc: boolean;
+		children: string[];
+		deleted: boolean;
+		note?: string;
+	}): Promise<void> {
+		const keep = Math.max(0, this.settings.keepHistory ?? 0);
+		if (keep === 0) return;
+		const ts = Date.now();
+		const id =
+			HISTORY_PREFIX +
+			d.path +
+			HISTORY_SEP +
+			String(ts).padStart(15, "0") +
+			HISTORY_SEP +
+			(d.hash || "del").slice(0, 8);
+		try {
+			await this.db.putVersionIfAbsent({
+				_id: id,
+				type: "version",
+				path: d.path,
+				ts,
+				mtime: d.mtime,
+				size: d.size,
+				hash: d.hash,
+				deviceId: this.settings.deviceId,
+				binary: d.binary,
+				enc: d.enc,
+				children: d.children,
+				deleted: d.deleted,
+				note: d.note,
+			});
+			await this.pruneHistory(d.path, keep);
+		} catch (e) {
+			console.warn(`[couchdb-sync] history record failed for ${d.path}:`, e);
+		}
+	}
+
+	private async pruneHistory(path: string, keep: number): Promise<void> {
+		const vers = await this.db.listVersions(path); // oldest -> newest
+		for (let i = 0; i < vers.length - keep; i++) {
+			const v = vers[i];
+			if (v._rev) await this.db.removeVersion(v._id, v._rev).catch(() => undefined);
+		}
+	}
+
+	/** Full history of a path, newest first. */
+	async listHistory(path: string): Promise<VersionDoc[]> {
+		const vers = await this.db.listVersions(path);
+		return vers.sort((a, b) => b.ts - a.ts);
+	}
+
+	private async assembleChildren(children: string[]): Promise<Uint8Array> {
+		const parts: Uint8Array[] = [];
+		for (const id of children) parts.push(await this.readChunkBytes(id));
+		return concatBytes(parts);
+	}
+
+	/** Decoded text of a version (null for binary or deletion entries). */
+	async getVersionText(v: VersionDoc): Promise<string | null> {
+		if (v.binary || v.deleted) return null;
+		return bytesToText(await this.assembleChildren(v.children));
+	}
+
+	/** Current on-disk text of a path (null if missing or binary). */
+	async getLocalText(path: string): Promise<string | null> {
+		const adapter = this.app.vault.adapter;
+		const hidden = isHidden(path);
+		const exists = hidden
+			? await adapter.exists(path)
+			: this.app.vault.getAbstractFileByPath(path) instanceof TFile;
+		if (!exists) return null;
+		const bytes = new Uint8Array(await adapter.readBinary(path));
+		if (!looksLikeText(bytes)) return null;
+		return bytesToText(bytes);
+	}
+
+	/** Restore an earlier version: make it the current content everywhere. */
+	async restoreVersion(path: string, v: VersionDoc): Promise<void> {
+		if (v.deleted) {
+			await this.deleteEverywhere(path);
+			return;
+		}
+		const existing = await this.db.get(FILE_PREFIX + path);
+		const mtime = Date.now();
+		const doc: FileDoc = {
+			_id: FILE_PREFIX + path,
+			_rev: existing?._rev,
+			type: "file",
+			path,
+			mtime,
+			ctime: existing?.ctime ?? mtime,
+			size: v.size,
+			deleted: false,
+			deviceId: this.settings.deviceId,
+			binary: v.binary,
+			enc: v.enc,
+			children: [...v.children],
+			hash: v.hash,
+		};
+		this.lastHash.delete(path);
+		await this.db.put(doc);
+		await this.dropLosingRevs(path);
+		await this.recordVersion({
+			path,
+			mtime,
+			size: v.size,
+			hash: v.hash,
+			binary: v.binary,
+			enc: v.enc,
+			children: [...v.children],
+			deleted: false,
+			note: `restored from ${new Date(v.ts).toLocaleString()}`,
+		});
+		await this.applyRemoteChange({ ...doc, _rev: undefined });
+	}
+
+	// --- direct per-file actions ----------------------------------------------
+
+	/** Drop all losing conflict leaves so the current head is the sole winner. */
+	private async dropLosingRevs(path: string): Promise<void> {
+		const id = FILE_PREFIX + path;
+		const doc = await this.db.get(id);
+		for (const r of doc?._conflicts ?? []) {
+			await this.db.removeRev(id, r).catch(() => undefined);
+		}
+	}
+
+	/** Overwrite this device's copy with the database version (force download). */
+	async takeRemote(path: string): Promise<void> {
+		const doc = await this.db.get(FILE_PREFIX + path);
+		if (!doc || doc.deleted) throw new Error("not in the database");
+		this.lastHash.delete(path);
+		await this.applyRemoteChange({ ...doc, _rev: undefined });
+		await this.dropLosingRevs(path);
+	}
+
+	/**
+	 * Compare local and remote mtime and take whichever is newer.
+	 * Falls back to takeRemote when the file only exists on one side.
+	 */
+	async useNewest(path: string): Promise<"local" | "remote"> {
+		const adapter = this.app.vault.adapter;
+		const hidden = isHidden(path);
+
+		let localMtime: number | null = null;
+		if (hidden) {
+			if (await adapter.exists(path)) {
+				const st = await adapter.stat(path);
+				if (st) localMtime = st.mtime;
+			}
+		} else {
+			const f = this.app.vault.getAbstractFileByPath(path);
+			if (f instanceof TFile) localMtime = f.stat.mtime;
+		}
+
+		const doc = await this.db.get(FILE_PREFIX + path) as FileDoc | null;
+		const remoteMtime = doc && !doc.deleted ? doc.mtime : null;
+
+		if (localMtime != null && remoteMtime != null) {
+			if (localMtime >= remoteMtime) {
+				await this.takeLocal(path);
+				return "local";
+			}
+			await this.takeRemote(path);
+			return "remote";
+		}
+		if (localMtime != null) {
+			await this.takeLocal(path);
+			return "local";
+		}
+		if (remoteMtime != null) {
+			await this.takeRemote(path);
+			return "remote";
+		}
+		throw new Error("file exists neither locally nor in the database");
+	}
+
+	/** Overwrite the database with this device's copy (force upload). */
+	async takeLocal(path: string): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const hidden = isHidden(path);
+		this.lastHash.delete(path);
+		if (hidden) {
+			if (!(await adapter.exists(path))) throw new Error("not on this device");
+			const st = await adapter.stat(path);
+			if (st) await this.pushPath(path, st.mtime, st.ctime, st.size);
+		} else {
+			const f = this.app.vault.getAbstractFileByPath(path);
+			if (!(f instanceof TFile)) throw new Error("not on this device");
+			await this.pushPath(path, f.stat.mtime, f.stat.ctime, f.stat.size);
+		}
+		await this.dropLosingRevs(path);
+	}
+
+	/** Delete the file on THIS device only (the database copy is kept). */
+	async deleteLocalOnly(path: string): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const hidden = isHidden(path);
+		this.suppress.add(path); // don't let the delete event tombstone the DB
+		let removed = false;
+		if (hidden) {
+			if (await adapter.exists(path)) {
+				await adapter.remove(path);
+				removed = true;
+			}
+		} else {
+			const f = this.app.vault.getAbstractFileByPath(path);
+			if (f instanceof TFile) {
+				await this.app.fileManager.trashFile(f);
+				removed = true;
+			}
+		}
+		if (!removed) this.suppress.delete(path);
+		this.lastHash.delete(path);
+		this.syncState.delete(path);
+		this.saveStateSoon();
+	}
+
+	/** Delete a file everywhere: propagate a tombstone AND remove it locally now. */
+	async deleteEverywhere(path: string): Promise<void> {
+		const id = FILE_PREFIX + path;
+		const doc = await this.db.get(id);
+		if (doc && !doc.deleted) {
+			doc.deleted = true;
+			doc._deleted = false; // logical tombstone (replicates the deletion)
+			doc.children = [];
+			doc.hash = "";
+			doc.size = 0;
+			doc.mtime = Date.now();
+			doc.deviceId = this.settings.deviceId;
+			await this.db.put(doc);
+			await this.dropLosingRevs(path);
+			await this.recordVersion({
+				path,
+				mtime: doc.mtime,
+				size: 0,
+				hash: "",
+				binary: false,
+				enc: this.settings.e2eeEnabled,
+				children: [],
+				deleted: true,
+			});
+		}
+		await this.deleteLocalOnly(path);
+	}
+
 	/** Read one chunk's decrypted bytes (local, falling back to remote). */
 	private async readChunkBytes(id: string): Promise<Uint8Array> {
 		let chunk = await this.db.getChunkLocal(id);
@@ -887,9 +1142,7 @@ export class SyncEngine {
 		adapter: FileSystemAdapter,
 		hash: string
 	): Promise<void> {
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const fs = require("fs") as typeof import("fs");
-		// eslint-disable-next-line @typescript-eslint/no-var-requires
 		const nodePath = require("path") as typeof import("path");
 		const full = adapter.getFullPath(path);
 		await fs.promises.mkdir(nodePath.dirname(full), { recursive: true });

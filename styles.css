@@ -1,43 +1,107 @@
 /* CouchDB Sync — settings UI styles. The runtime status indicator lives in the status bar. */
 
-.couchdb-sync-index {
+/* --- status card: unified block for status + summary + legend --- */
+
+.couchdb-sync-card {
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 0.8em 1em;
 	margin-bottom: 1em;
 }
 
 .couchdb-sync-summary {
 	font-weight: 600;
+	font-size: var(--font-ui-small);
+	margin-top: 0.3em;
 }
 
-.couchdb-sync-ok .couchdb-sync-summary {
+.couchdb-sync-summary-ok {
 	color: var(--color-green);
 }
 
-.couchdb-sync-warn,
-.couchdb-sync-warn .couchdb-sync-summary {
+.couchdb-sync-summary-pending {
 	color: var(--color-orange);
 }
 
-.couchdb-sync-drift summary {
-	cursor: pointer;
-	color: var(--color-orange);
-}
-
-.couchdb-sync-drift ul {
-	margin: 0.25em 0 0.5em 1em;
+.couchdb-sync-counts {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
+	margin-top: 0.15em;
 }
 
-.couchdb-sync-tree-root > summary {
+.couchdb-sync-index {
+	margin-bottom: 1em;
+}
+
+.couchdb-sync-warn {
+	color: var(--color-orange);
+}
+
+/* --- collapsible sections (state lists + sync tree) --- */
+
+.couchdb-sync-section {
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	margin-bottom: 0.4em;
+	overflow: hidden;
+}
+
+.couchdb-sync-section-header {
+	display: flex;
+	align-items: center;
+	gap: 0.45em;
+	padding: 0.5em 0.8em;
 	cursor: pointer;
-	margin-top: 0.5em;
 	font-weight: 600;
+	font-size: var(--font-ui-small);
+	user-select: none;
+}
+
+.couchdb-sync-section-header::-webkit-details-marker,
+.couchdb-sync-section-header::marker {
+	display: none;
+	content: "";
+}
+
+.couchdb-sync-section-header::before {
+	content: "";
+	flex: none;
+	width: 0;
+	height: 0;
+	border-top: 5px solid transparent;
+	border-bottom: 5px solid transparent;
+	border-left: 6px solid currentColor;
+	transition: transform 120ms ease;
+}
+
+.couchdb-sync-section[open] > .couchdb-sync-section-header::before {
+	transform: rotate(90deg);
+}
+
+.couchdb-sync-section-count {
+	margin-left: auto;
+	font-weight: 600;
+	font-size: var(--font-ui-smaller);
+	background: var(--background-modifier-hover);
+	padding: 0 0.5em;
+	border-radius: 10px;
+	min-width: 1.4em;
+	text-align: center;
+}
+
+.couchdb-sync-section-list {
+	margin: 0;
+	padding: 0 0.8em 0.6em 2.2em;
+	font-size: var(--font-ui-smaller);
+	list-style: none;
 }
 
 .couchdb-sync-tree {
 	font-size: var(--font-ui-smaller);
 	font-family: var(--font-monospace);
-	margin-top: 0.5em;
+	padding: 0 0.8em 0.6em;
 }
 
 .couchdb-sync-tree details > summary {
@@ -55,7 +119,6 @@
 	align-items: center;
 	gap: 0.3em;
 	padding-left: 0.2em;
-	color: var(--text-muted);
 }
 
 .couchdb-sync-tree-fname {
@@ -74,25 +137,136 @@
 	flex: 1;
 }
 
-/* red X to remove an entry from the index */
-.couchdb-sync-x {
-	flex: none;
-	width: 1.4em;
-	height: 1.4em;
-	padding: 0;
-	line-height: 1;
-	font-size: var(--font-ui-smaller);
-	color: var(--text-on-accent);
-	background: var(--color-red);
-	border: none;
-	border-radius: 3px;
-	cursor: pointer;
-	opacity: 0.55;
+/* --- five-state colour coding for the Sync state tree --- */
+
+/* green: on this device and in sync with the database */
+.couchdb-sync-state-synced,
+.couchdb-sync-state-synced .couchdb-sync-tree-fname {
+	color: var(--color-green);
 }
 
-.couchdb-sync-x:hover {
-	opacity: 1;
+/* amber: on this device only — not yet in the database */
+.couchdb-sync-state-local,
+.couchdb-sync-state-local .couchdb-sync-tree-fname {
+	color: var(--color-orange);
 }
+
+/* muted yellow: in the database only — not on this device (pending download) */
+.couchdb-sync-state-remote,
+.couchdb-sync-state-remote .couchdb-sync-tree-fname {
+	color: #c4a846;
+}
+
+/* purple: content differs on both sides — auto-reconcilable drift */
+.couchdb-sync-state-drift,
+.couchdb-sync-state-drift .couchdb-sync-tree-fname {
+	color: var(--color-purple);
+}
+
+/* red: unresolved conflict revisions — needs attention */
+.couchdb-sync-state-conflict,
+.couchdb-sync-state-conflict .couchdb-sync-tree-fname {
+	color: var(--color-red);
+	font-weight: 600;
+}
+
+/* excluded: filtered out by the skip rules — dimmed & italic */
+.couchdb-sync-state-excluded,
+.couchdb-sync-state-excluded .couchdb-sync-tree-fname {
+	color: var(--text-faint);
+	font-style: italic;
+	opacity: 0.8;
+}
+
+/* legend in the status card */
+.couchdb-sync-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5em 0.9em;
+	margin-top: 0.5em;
+	padding-top: 0.5em;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.couchdb-sync-legend-total {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3em;
+	font-size: var(--font-ui-smaller);
+	padding-right: 0.5em;
+	margin-right: 0.4em;
+	border-right: 1px solid var(--background-modifier-border);
+}
+
+.couchdb-sync-legend-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3em;
+	font-size: var(--font-ui-smaller);
+	border-radius: 4px;
+	padding: 0.15em 0.35em;
+	transition: background 120ms ease;
+}
+
+.couchdb-sync-legend-btn {
+	border: 1px solid var(--text-faint);
+	background: var(--background-primary);
+	cursor: pointer;
+	padding: 0.25em 0.5em;
+}
+
+.couchdb-sync-legend-btn:hover {
+	background: var(--background-modifier-hover);
+	border-color: var(--interactive-accent);
+}
+
+.couchdb-sync-legend-busy {
+	opacity: 0.6;
+	pointer-events: none;
+}
+
+.couchdb-sync-legend-count {
+	font-weight: 600;
+}
+
+.couchdb-sync-legend-label {
+	color: var(--text-muted);
+}
+
+.couchdb-sync-swatch {
+	display: inline-block;
+	width: 0.7em;
+	height: 0.7em;
+	border-radius: 2px;
+	flex: none;
+	vertical-align: middle;
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-synced {
+	background: var(--color-green);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-local {
+	background: var(--color-orange);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-remote {
+	background: #c4a846;
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-drift {
+	background: var(--color-purple);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-conflict {
+	background: var(--color-red);
+}
+
+.couchdb-sync-swatch.couchdb-sync-state-excluded {
+	background: var(--text-faint);
+	opacity: 0.6;
+}
+
 
 /* --- status indicator + progress --- */
 
@@ -121,10 +295,6 @@
 	animation: couchdb-sync-rot 1s linear infinite;
 }
 
-.couchdb-sync-livestatus {
-	margin: 0.25em 0 0.75em;
-}
-
 .couchdb-sync-livestatus-row {
 	display: flex;
 	align-items: center;
@@ -133,7 +303,36 @@
 }
 
 .couchdb-sync-livestatus-label {
-	color: var(--text-normal);
+	font-size: var(--font-ui-medium);
+}
+
+.couchdb-sync-estop {
+	margin-left: auto;
+	padding: 0.15em 0.7em;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	border: 1px solid var(--color-red);
+	border-radius: 4px;
+	background: transparent;
+	color: var(--color-red);
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease;
+}
+
+.couchdb-sync-estop:hover {
+	background: var(--color-red);
+	color: var(--text-on-accent);
+}
+
+.couchdb-sync-estop-active {
+	background: var(--color-red);
+	color: var(--text-on-accent);
+	cursor: default;
+	font-variant-numeric: tabular-nums;
+}
+
+.couchdb-sync-estop-active:hover {
+	opacity: 0.9;
 }
 
 .couchdb-sync-progress {
@@ -207,4 +406,175 @@
 	height: 1.6em;
 	font-size: var(--font-ui-smaller);
 	cursor: pointer;
+}
+
+/* --- per-row icon buttons (history / actions) --- */
+
+.couchdb-sync-iconbtn {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1.5em;
+	height: 1.5em;
+	padding: 0;
+	background: transparent;
+	border: none;
+	border-radius: 3px;
+	cursor: pointer;
+	color: var(--text-muted);
+	opacity: 0.7;
+}
+
+.couchdb-sync-iconbtn:hover {
+	opacity: 1;
+	background: var(--background-modifier-hover);
+}
+
+.couchdb-sync-iconbtn svg {
+	width: 0.95em;
+	height: 0.95em;
+}
+
+/* --- confirm dialog --- */
+
+.couchdb-sync-confirm-body {
+	color: var(--text-muted);
+}
+
+.couchdb-sync-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 0.5em;
+	margin-top: 1em;
+}
+
+/* --- history modal --- */
+
+.couchdb-sync-history-modal {
+	width: min(900px, 92vw);
+}
+
+.couchdb-sync-history-controls {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.4em;
+	margin-bottom: 0.6em;
+}
+
+.couchdb-sync-history-sel {
+	max-width: 22em;
+}
+
+.couchdb-sync-history-mode {
+	margin-left: auto;
+	cursor: pointer;
+}
+
+.couchdb-sync-diff {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	max-height: 45vh;
+	overflow: auto;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	background: var(--background-primary);
+}
+
+.couchdb-sync-diff-note {
+	color: var(--text-muted);
+	padding: 0.8em;
+}
+
+.couchdb-sync-diff-inline > div,
+.couchdb-sync-diff-side .cdl-col > div {
+	padding: 0 0.5em;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	border-left: 3px solid transparent;
+}
+
+.cdl-eq {
+	color: var(--text-normal);
+}
+
+.cdl-del {
+	background: rgba(var(--color-red-rgb), 0.12);
+	border-left-color: var(--color-red) !important;
+}
+
+.cdl-add {
+	background: rgba(var(--color-green-rgb), 0.12);
+	border-left-color: var(--color-green) !important;
+}
+
+.cdl-pad {
+	background: var(--background-secondary);
+}
+
+.couchdb-sync-diff-side {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+}
+
+.couchdb-sync-diff-side .cdl-col {
+	min-width: 0;
+}
+
+.couchdb-sync-diff-side .cdl-col:first-child {
+	border-right: 1px solid var(--background-modifier-border);
+}
+
+/* --- history timeline --- */
+
+.couchdb-sync-timeline {
+	margin-top: 1em;
+}
+
+.couchdb-sync-timeline h4 {
+	margin: 0 0 0.4em;
+}
+
+.couchdb-sync-timeline-row {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	padding: 0.3em 0;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.couchdb-sync-timeline-dot {
+	flex: none;
+	width: 0.6em;
+	height: 0.6em;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+}
+
+.couchdb-sync-timeline-dot.is-deleted {
+	background: var(--color-red);
+}
+
+.couchdb-sync-timeline-meta {
+	flex: 1;
+	min-width: 0;
+}
+
+.couchdb-sync-timeline-when {
+	font-size: var(--font-ui-smaller);
+}
+
+.couchdb-sync-timeline-note {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.couchdb-sync-badge {
+	margin-left: 0.4em;
+	padding: 0 0.4em;
+	border-radius: 3px;
+	font-size: var(--font-ui-smaller);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
 }
