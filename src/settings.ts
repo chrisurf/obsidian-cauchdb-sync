@@ -59,6 +59,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	}
 
 	hide(): void {
+		if (this.driftEl) this.saveOpenState(this.driftEl);
+		if (this.treeEl) this.saveOpenState(this.treeEl);
 		this.statusUnsub?.();
 		this.statusUnsub = undefined;
 		if (this.autoRefresh !== undefined) {
