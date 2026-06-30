@@ -649,7 +649,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			const tree = treeBox.createEl("details", { cls: "couchdb-sync-section" });
 			tree.dataset.sectionId = "sync-tree";
 			const treeSummary = tree.createEl("summary", { cls: "couchdb-sync-section-header" });
-			treeSummary.createSpan({ text: `Sync state — ${allPaths.length} files` });
+			treeSummary.createSpan({ text: "Sync state" });
+			treeSummary.createSpan({ text: `${allPaths.length}`, cls: "couchdb-sync-section-count" });
 			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
 			this.renderTree(body.createDiv(), allPaths, stateByPath);
 			this.restoreOpenState(treeBox);
@@ -679,8 +680,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		const det = box.createEl("details", { cls: `couchdb-sync-section couchdb-sync-state-${state}` });
 		det.dataset.sectionId = `list-${state}`;
 		const sum = det.createEl("summary", { cls: "couchdb-sync-section-header" });
-		sum.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
-		sum.createSpan({ text: `${title}` });
+		sum.createSpan({ text: title });
 		sum.createSpan({ text: `${paths.length}`, cls: "couchdb-sync-section-count" });
 		const ul = det.createEl("ul", { cls: "couchdb-sync-section-list" });
 		for (const p of paths) {

@@ -66,9 +66,13 @@
 }
 
 .couchdb-sync-section-header::before {
-	content: "▸";
+	content: "";
 	flex: none;
-	font-size: 0.8em;
+	width: 0;
+	height: 0;
+	border-top: 5px solid transparent;
+	border-bottom: 5px solid transparent;
+	border-left: 6px solid var(--text-muted);
 	transition: transform 120ms ease;
 }
 
