@@ -38,28 +38,66 @@
 	color: var(--color-orange);
 }
 
-.couchdb-sync-drift summary {
-	cursor: pointer;
+/* --- collapsible sections (state lists + sync tree) --- */
+
+.couchdb-sync-section {
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	margin-bottom: 0.4em;
+	overflow: hidden;
 }
 
-.couchdb-sync-drift ul {
-	margin: 0.25em 0 0.5em 1em;
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-	font-weight: normal;
-}
-
-.couchdb-sync-tree-root > summary {
+.couchdb-sync-section-header {
+	display: flex;
+	align-items: center;
+	gap: 0.45em;
+	padding: 0.5em 0.8em;
 	cursor: pointer;
 	font-weight: 600;
 	font-size: var(--font-ui-small);
-	padding: 0.4em 0;
+	user-select: none;
+}
+
+.couchdb-sync-section-header::-webkit-details-marker,
+.couchdb-sync-section-header::marker {
+	display: none;
+	content: "";
+}
+
+.couchdb-sync-section-header::before {
+	content: "▸";
+	flex: none;
+	font-size: 0.8em;
+	transition: transform 120ms ease;
+}
+
+.couchdb-sync-section[open] > .couchdb-sync-section-header::before {
+	transform: rotate(90deg);
+}
+
+.couchdb-sync-section-count {
+	margin-left: auto;
+	font-weight: 600;
+	font-size: var(--font-ui-smaller);
+	background: var(--background-modifier-hover);
+	padding: 0 0.5em;
+	border-radius: 10px;
+	min-width: 1.4em;
+	text-align: center;
+}
+
+.couchdb-sync-section-list {
+	margin: 0;
+	padding: 0 0.8em 0.6em 2.2em;
+	font-size: var(--font-ui-smaller);
+	list-style: none;
 }
 
 .couchdb-sync-tree {
 	font-size: var(--font-ui-smaller);
 	font-family: var(--font-monospace);
-	margin-top: 0.3em;
+	padding: 0 0.8em 0.6em;
 }
 
 .couchdb-sync-tree details > summary {

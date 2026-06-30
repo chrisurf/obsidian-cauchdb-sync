@@ -50,6 +50,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	private treeEl?: HTMLElement;
 	private driftSig = "";
 	private treeSig = "";
+	private openSections = new Set<string>();
 	private indexLoading = false; // prevent overlapping loadIndex() runs (PouchDB connection races)
 
 	constructor(app: App, plugin: CouchDBSyncPlugin) {
@@ -624,31 +625,48 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			mk("excluded", "excluded", groups.excluded.length);
 		}
 
+		// ---- save open/closed state of all <details> before rebuilding ----
+		this.saveOpenState(driftBox);
+		this.saveOpenState(treeBox);
+
 		// ---- per-state lists, most urgent first (same colours as the tree) ----
 		const listSig = JSON.stringify([groups.conflict, groups.drift, groups.local, groups.remote]);
 		if (force || listSig !== this.driftSig) {
 			this.driftSig = listSig;
 			driftBox.empty();
-			this.renderStateList(driftBox, "conflict", "Conflicts — unresolved revisions", groups.conflict);
-			this.renderStateList(driftBox, "drift", "Content differs — will be reconciled", groups.drift);
-			this.renderStateList(driftBox, "local", "Local only — not yet uploaded", groups.local);
-			this.renderStateList(driftBox, "remote", "Remote only — not downloaded here", groups.remote);
+			this.renderStateList(driftBox, "conflict", "Conflicts", groups.conflict);
+			this.renderStateList(driftBox, "drift", "Differs", groups.drift);
+			this.renderStateList(driftBox, "local", "Local only", groups.local);
+			this.renderStateList(driftBox, "remote", "Remote only", groups.remote);
+			this.restoreOpenState(driftBox);
 		}
 
 		// ---- tree: the complete file set (this device + database) ----
-		// rebuild only when the set OR any path's state changed (so colours update as
-		// files download/converge; keeps the tree expanded otherwise)
 		const treeSig = JSON.stringify(allPaths.map((p) => [p, stateByPath.get(p)]));
 		if (force || treeSig !== this.treeSig) {
 			this.treeSig = treeSig;
 			treeBox.empty();
-			const tree = treeBox.createEl("details", { cls: "couchdb-sync-tree-root" });
-			tree.createEl("summary", {
-				text: `Sync state — ${allPaths.length} files`,
-			});
+			const tree = treeBox.createEl("details", { cls: "couchdb-sync-section" });
+			tree.dataset.sectionId = "sync-tree";
+			const treeSummary = tree.createEl("summary", { cls: "couchdb-sync-section-header" });
+			treeSummary.createSpan({ text: `Sync state — ${allPaths.length} files` });
 			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
 			this.renderTree(body.createDiv(), allPaths, stateByPath);
+			this.restoreOpenState(treeBox);
 		}
+	}
+
+	private saveOpenState(root: HTMLElement): void {
+		root.querySelectorAll<HTMLDetailsElement>("details[data-section-id]").forEach((det) => {
+			if (det.open) this.openSections.add(det.dataset.sectionId!);
+			else this.openSections.delete(det.dataset.sectionId!);
+		});
+	}
+
+	private restoreOpenState(root: HTMLElement): void {
+		root.querySelectorAll<HTMLDetailsElement>("details[data-section-id]").forEach((det) => {
+			det.open = this.openSections.has(det.dataset.sectionId!);
+		});
 	}
 
 	private renderStateList(
@@ -658,11 +676,13 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		paths: string[]
 	): void {
 		if (paths.length === 0) return;
-		const det = box.createEl("details", { cls: `couchdb-sync-drift couchdb-sync-state-${state}` });
-		const sum = det.createEl("summary");
+		const det = box.createEl("details", { cls: `couchdb-sync-section couchdb-sync-state-${state}` });
+		det.dataset.sectionId = `list-${state}`;
+		const sum = det.createEl("summary", { cls: "couchdb-sync-section-header" });
 		sum.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
-		sum.createSpan({ text: ` ${title} (${paths.length})` });
-		const ul = det.createEl("ul");
+		sum.createSpan({ text: `${title}` });
+		sum.createSpan({ text: `${paths.length}`, cls: "couchdb-sync-section-count" });
+		const ul = det.createEl("ul", { cls: "couchdb-sync-section-list" });
 		for (const p of paths) {
 			const li = ul.createEl("li", { cls: "couchdb-sync-drift-item" });
 			li.createSpan({ cls: "couchdb-sync-dot" }); // pulses when active
@@ -840,6 +860,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				const folderPath = prefix ? `${prefix}/${name}` : name;
 				const fState = folderState(child);
 				const det = el.createEl("details");
+				det.dataset.sectionId = `folder-${folderPath}`;
 				const sum = det.createEl("summary", {
 					cls: `couchdb-sync-tree-folder couchdb-sync-state-${fState}`,
 				});
