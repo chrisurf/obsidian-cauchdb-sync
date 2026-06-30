@@ -208,12 +208,21 @@
 	transition: background 120ms ease;
 }
 
-.couchdb-sync-legend-action {
+.couchdb-sync-legend-btn {
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-primary);
 	cursor: pointer;
 }
 
-.couchdb-sync-legend-action:hover {
+.couchdb-sync-legend-btn:hover {
 	background: var(--background-modifier-hover);
+	border-color: var(--interactive-accent);
+}
+
+.couchdb-sync-legend-disabled {
+	opacity: 0.45;
+	cursor: default;
+	pointer-events: none;
 }
 
 .couchdb-sync-legend-busy {
