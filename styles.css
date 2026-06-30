@@ -189,6 +189,16 @@
 	border-top: 1px solid var(--background-modifier-border);
 }
 
+.couchdb-sync-legend-total {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3em;
+	font-size: var(--font-ui-smaller);
+	padding-right: 0.5em;
+	margin-right: 0.4em;
+	border-right: 1px solid var(--background-modifier-border);
+}
+
 .couchdb-sync-legend-item {
 	display: inline-flex;
 	align-items: center;

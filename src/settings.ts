@@ -610,6 +610,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		const legendBox = this.legendEl;
 		if (legendBox) {
 			legendBox.empty();
+			const totalItem = legendBox.createSpan({ cls: "couchdb-sync-legend-total" });
+			totalItem.createSpan({ text: `${syncTotal}`, cls: "couchdb-sync-legend-count" });
+			totalItem.createSpan({ text: "total", cls: "couchdb-sync-legend-label" });
 			const mk = (state: FileState, label: string, count: number) => {
 				if (count === 0 && state === "excluded") return;
 				const item = legendBox.createSpan({ cls: `couchdb-sync-legend-item couchdb-sync-state-${state}` });
