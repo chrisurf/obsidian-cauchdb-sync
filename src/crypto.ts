@@ -93,7 +93,7 @@ export async function decryptString(payload: string, passphrase: string): Promis
 			cipher as unknown as BufferSource
 		);
 		return dec.decode(plain);
-	} catch (e) {
+	} catch {
 		throw new Error(
 			"Decryption failed. The passphrase is most likely different from the device that wrote this note."
 		);

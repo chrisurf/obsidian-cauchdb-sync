@@ -1,6 +1,14 @@
 import { requestUrl, RequestUrlParam } from "obsidian";
 import PouchDB from "pouchdb-browser";
-import { ChunkDoc, CouchDBSyncSettings, FileDoc, FILE_PREFIX } from "./types";
+import {
+	ChunkDoc,
+	CouchDBSyncSettings,
+	FileDoc,
+	FILE_PREFIX,
+	HISTORY_PREFIX,
+	HISTORY_SEP,
+	VersionDoc,
+} from "./types";
 
 /**
  * A fetch() implementation backed by Obsidian's requestUrl(). This bypasses the
@@ -85,9 +93,12 @@ export class SyncDatabase {
 
 	async getAll(): Promise<FileDoc[]> {
 		// Range query over file docs ONLY ("f:".."f:￿") so chunk docs are never
-		// loaded into memory — that is what caused the out-of-memory crashes.
+		// loaded into memory — that is what caused the out-of-memory crashes. We pull
+		// `conflicts:true` in the SAME scan so the index report gets conflict info for
+		// free (no second pass).
 		const res = await this.local.allDocs({
 			include_docs: true,
+			conflicts: true,
 			startkey: FILE_PREFIX,
 			endkey: FILE_PREFIX + "￿",
 		});
@@ -137,6 +148,44 @@ export class SyncDatabase {
 
 	async getRev(id: string, rev: string): Promise<FileDoc> {
 		return this.local.get(id, { rev });
+	}
+
+	// --- explicit per-file version history ---------------------------------
+
+	/** All history entries for a path, oldest → newest (chronological). */
+	async listVersions(path: string): Promise<VersionDoc[]> {
+		const base = HISTORY_PREFIX + path + HISTORY_SEP;
+		const res = await this.local.allDocs({
+			include_docs: true,
+			startkey: base,
+			endkey: base + "￿",
+		});
+		const out: VersionDoc[] = [];
+		for (const row of res.rows) {
+			const d = row.doc as unknown as VersionDoc | undefined;
+			if (d && d.type === "version") out.push(d);
+		}
+		return out;
+	}
+
+	/** Append a version entry (idempotent: ignores a same-id duplicate). */
+	async putVersionIfAbsent(doc: VersionDoc): Promise<void> {
+		const db = this.local as unknown as PouchDB.Database<VersionDoc>;
+		try {
+			await db.get(doc._id);
+			return; // already recorded
+		} catch (e) {
+			if ((e as { status?: number }).status !== 404) throw e;
+		}
+		try {
+			await db.put(doc);
+		} catch (e) {
+			if ((e as { status?: number }).status !== 409) throw e; // raced
+		}
+	}
+
+	async removeVersion(id: string, rev: string): Promise<void> {
+		await this.local.remove(id, rev);
 	}
 
 	async removeRev(id: string, rev: string): Promise<void> {

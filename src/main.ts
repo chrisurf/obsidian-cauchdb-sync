@@ -6,6 +6,7 @@ import {
 	SYNC_STATE,
 	SyncState,
 	SyncStatus,
+	VersionDoc,
 } from "./types";
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
@@ -58,6 +59,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private statusIconEl!: HTMLElement;
 	private statusTextEl!: HTMLElement;
 	private restartLock: Promise<void> = Promise.resolve();
+	private emergencyStopUntil = 0;
+	private emergencyTimer?: ReturnType<typeof setTimeout>;
 
 	/** Latest status, shared with the settings view via listeners. */
 	status: SyncStatus = { state: SYNC_STATE.IDLE };
@@ -145,6 +148,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	async onunload(): Promise<void> {
+		if (this.emergencyTimer) clearTimeout(this.emergencyTimer);
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
@@ -291,6 +295,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	private async doRestart(mode: "sync" | "download" = "sync"): Promise<void> {
+		if (this.getEmergencyRemaining() > 0) return;
 		this.engine?.stop();
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
@@ -452,6 +457,41 @@ export default class CouchDBSyncPlugin extends Plugin {
 		return this.restartLock;
 	}
 
+	/**
+	 * Emergency stop: halt sync immediately for a cooldown period without
+	 * changing any settings. After the cooldown, sync resumes automatically
+	 * if auto-start / live sync are enabled.
+	 */
+	emergencyStop(seconds = 30): void {
+		if (this.emergencyTimer) clearTimeout(this.emergencyTimer);
+		this.emergencyStopUntil = Date.now() + seconds * 1000;
+		this.engine?.abort();
+		this.restartLock = this.restartLock
+			.catch(() => undefined)
+			.then(async () => {
+				this.engine?.stop();
+				await this.db?.close().catch(() => undefined);
+				this.engine = null;
+				this.db = null;
+				this.setStatus(SYNC_STATE.PAUSED, `emergency stop (${seconds}s)`);
+			});
+		this.emergencyTimer = setTimeout(() => {
+			this.emergencyStopUntil = 0;
+			this.emergencyTimer = undefined;
+			if (this.settings.autoStart || this.settings.liveSync) {
+				void this.restartSync();
+			} else {
+				this.setStatus(SYNC_STATE.IDLE, "emergency stop ended");
+			}
+		}, seconds * 1000);
+	}
+
+	/** Seconds remaining on the emergency stop cooldown, or 0. */
+	getEmergencyRemaining(): number {
+		if (this.emergencyStopUntil === 0) return 0;
+		return Math.max(0, Math.ceil((this.emergencyStopUntil - Date.now()) / 1000));
+	}
+
 	/** Whether a sync session is currently active. */
 	isRunning(): boolean {
 		return this.engine !== null;
@@ -497,13 +537,97 @@ export default class CouchDBSyncPlugin extends Plugin {
 		return this.engine?.getActiveTransfers() ?? [];
 	}
 
+	/**
+	 * Ensure a sync session is running, starting one if needed, and return the engine.
+	 * All mutating per-file actions go through the engine (single code path for
+	 * chunking/encryption/IO), so they require a live session.
+	 */
+	private async ensureEngine(): Promise<SyncEngine> {
+		if (!this.engine) await this.restartSync();
+		if (!this.engine) throw new Error("Sync is not configured. Set up the connection first.");
+		return this.engine;
+	}
+
 	/** Force (re)sync a single file. Starts a session first if none is running. */
 	async forceSyncPath(path: string): Promise<void> {
-		if (!this.engine) {
-			await this.restartSync();
-			return;
+		const engine = await this.ensureEngine();
+		await engine.forceSync(path);
+	}
+
+	/** Overwrite this device's copy with the database version. */
+	async takeRemotePath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.takeRemote(path);
+	}
+
+	/** Compare timestamps and take whichever version is newer. */
+	async useNewestPath(path: string): Promise<"local" | "remote"> {
+		const engine = await this.ensureEngine();
+		return engine.useNewest(path);
+	}
+
+	/** Overwrite the database with this device's copy. */
+	async takeLocalPath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.takeLocal(path);
+	}
+
+	/** Delete a file on this device only (the server keeps its copy). */
+	async deleteLocalPath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.deleteLocalOnly(path);
+	}
+
+	/** Delete a file everywhere (propagating tombstone + local removal). */
+	async deleteEverywherePath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.deleteEverywhere(path);
+	}
+
+	/**
+	 * Run a READ-ONLY engine operation. Uses the live engine when one is running;
+	 * otherwise spins up a transient, NON-started engine bound to a transient DB so
+	 * that merely viewing history never kicks off a full live sync. The transient DB
+	 * connects to the remote so chunk reads can fall back to the server.
+	 */
+	private async withReader<T>(fn: (engine: SyncEngine) => Promise<T>): Promise<T> {
+		if (this.engine) return fn(this.engine);
+		if (!this.settings.serverUrl) throw new Error("Sync is not configured.");
+		const db = new SyncDatabase(this.settings, localDbName(this.settings));
+		try {
+			db.connectRemote();
+		} catch {
+			/* offline reads still work from the local replica */
 		}
-		await this.engine.forceSync(path);
+		const reader = new SyncEngine(this.app, db, this.settings, () => undefined, () => undefined);
+		try {
+			return await fn(reader);
+		} finally {
+			await db.close().catch(() => undefined);
+		}
+	}
+
+	// --- file history ---------------------------------------------------------
+
+	/** All versions of a file, newest first. */
+	getFileHistory(path: string): Promise<VersionDoc[]> {
+		return this.withReader((e) => e.listHistory(path));
+	}
+
+	/** Decoded text of a version (null for binary / deletion entries). */
+	getVersionText(v: VersionDoc): Promise<string | null> {
+		return this.withReader((e) => e.getVersionText(v));
+	}
+
+	/** Current on-disk text of a file (null if missing or binary). */
+	getLocalText(path: string): Promise<string | null> {
+		return this.withReader((e) => e.getLocalText(path));
+	}
+
+	/** Restore an earlier version as the current content everywhere (mutating). */
+	async restoreVersion(path: string, v: VersionDoc): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.restoreVersion(path, v);
 	}
 
 	/** Remove a file/folder from the DB index (works even when idle). */

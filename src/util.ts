@@ -149,3 +149,73 @@ export function matchesIgnore(path: string, patterns: string[]): boolean {
 		return path === p || path.startsWith(p);
 	});
 }
+
+/** One block of a line-by-line diff: unchanged context, or a changed region. */
+export type DiffHunk =
+	| { type: "equal"; lines: string[] }
+	| { type: "change"; local: string[]; remote: string[] };
+
+/** Beyond this many lines on either side we skip the (quadratic) LCS and emit one block. */
+const DIFF_MAX_LINES = 2500;
+
+/**
+ * Line-by-line diff of two texts via a longest-common-subsequence walk. Returns an
+ * ordered list of hunks (equal context and change blocks) that a merge UI can render
+ * and let the user resolve hunk by hunk. For very large inputs it falls back to a
+ * single change block (whole-file pick-a-side) so the editor never freezes.
+ */
+export function diffLines(aText: string, bText: string): DiffHunk[] {
+	const a = aText.split("\n");
+	const b = bText.split("\n");
+	if (a.length > DIFF_MAX_LINES || b.length > DIFF_MAX_LINES) {
+		return aText === bText ? [{ type: "equal", lines: a }] : [{ type: "change", local: a, remote: b }];
+	}
+
+	const n = a.length;
+	const m = b.length;
+	// lcs[i*(m+1)+j] = LCS length of a[i..] and b[j..]
+	const lcs = new Int32Array((n + 1) * (m + 1));
+	for (let i = n - 1; i >= 0; i--) {
+		for (let j = m - 1; j >= 0; j--) {
+			lcs[i * (m + 1) + j] =
+				a[i] === b[j]
+					? lcs[(i + 1) * (m + 1) + (j + 1)] + 1
+					: Math.max(lcs[(i + 1) * (m + 1) + j], lcs[i * (m + 1) + (j + 1)]);
+		}
+	}
+
+	const hunks: DiffHunk[] = [];
+	const pushEqual = (line: string) => {
+		const last = hunks[hunks.length - 1];
+		if (last && last.type === "equal") last.lines.push(line);
+		else hunks.push({ type: "equal", lines: [line] });
+	};
+	const pushChange = (local: string[], remote: string[]) => {
+		const last = hunks[hunks.length - 1];
+		if (last && last.type === "change") {
+			last.local.push(...local);
+			last.remote.push(...remote);
+		} else {
+			hunks.push({ type: "change", local: [...local], remote: [...remote] });
+		}
+	};
+
+	let i = 0;
+	let j = 0;
+	while (i < n && j < m) {
+		if (a[i] === b[j]) {
+			pushEqual(a[i]);
+			i++;
+			j++;
+		} else if (lcs[(i + 1) * (m + 1) + j] >= lcs[i * (m + 1) + (j + 1)]) {
+			pushChange([a[i]], []);
+			i++;
+		} else {
+			pushChange([], [b[j]]);
+			j++;
+		}
+	}
+	if (i < n) pushChange(a.slice(i), []);
+	if (j < m) pushChange([], b.slice(j));
+	return hunks;
+}
