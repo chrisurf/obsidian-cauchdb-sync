@@ -521,6 +521,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 		await engine.takeRemote(path);
 	}
 
+	/** Compare timestamps and take whichever version is newer. */
+	async useNewestPath(path: string): Promise<"local" | "remote"> {
+		const engine = await this.ensureEngine();
+		return engine.useNewest(path);
+	}
+
 	/** Overwrite the database with this device's copy. */
 	async takeLocalPath(path: string): Promise<void> {
 		const engine = await this.ensureEngine();

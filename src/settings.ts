@@ -779,6 +779,16 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		const fileMenu = (ev: MouseEvent, path: string, state: FileState) => {
 			const m = new Menu();
 			if (state === "drift" || state === "conflict") {
+				m.addItem((i) => i.setTitle("Use newest version").setIcon("clock").onClick(async () => {
+					try {
+						const side = await p.useNewestPath(path);
+						new Notice(`CouchDB Sync: took ${side} version (newest)`);
+					} catch (e) {
+						new Notice(`CouchDB Sync: use newest failed — ${e instanceof Error ? e.message : String(e)}`);
+					} finally {
+						await refresh();
+					}
+				}));
 				m.addItem((i) => i.setTitle("Use server version (overwrite local)").setIcon("download").onClick(() => run("downloaded server version", () => p.takeRemotePath(path))));
 				m.addItem((i) => i.setTitle("Use local version (overwrite server)").setIcon("upload").onClick(() => run("uploaded local version", () => p.takeLocalPath(path))));
 			} else if (state === "remote") {
@@ -812,6 +822,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			const dl = byState(["remote", "drift", "conflict"]);
 			const ul = byState(["local", "drift", "conflict"]);
 			const m = new Menu();
+			const diverged = byState(["drift", "conflict"]);
+			if (diverged.length) m.addItem((i) => i.setTitle(`Use newest for ${diverged.length} differing`).setIcon("clock").onClick(() => runMany("used newest", diverged, (q) => p.useNewestPath(q))));
 			if (dl.length) m.addItem((i) => i.setTitle(`Download ${dl.length} to this device`).setIcon("download").onClick(() => runMany("downloaded", dl, (q) => p.takeRemotePath(q))));
 			if (ul.length) m.addItem((i) => i.setTitle(`Upload ${ul.length} to server`).setIcon("upload").onClick(() => runMany("uploaded", ul, (q) => p.takeLocalPath(q))));
 			m.addItem((i) => i.setTitle("Sync all now").setIcon("refresh-cw").onClick(() => runMany("synced", byState(SYNCABLE), (q) => p.forceSyncPath(q))));

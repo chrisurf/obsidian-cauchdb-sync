@@ -1015,6 +1015,47 @@ export class SyncEngine {
 		await this.dropLosingRevs(path);
 	}
 
+	/**
+	 * Compare local and remote mtime and take whichever is newer.
+	 * Falls back to takeRemote when the file only exists on one side.
+	 */
+	async useNewest(path: string): Promise<"local" | "remote"> {
+		const adapter = this.app.vault.adapter;
+		const hidden = isHidden(path);
+
+		let localMtime: number | null = null;
+		if (hidden) {
+			if (await adapter.exists(path)) {
+				const st = await adapter.stat(path);
+				if (st) localMtime = st.mtime;
+			}
+		} else {
+			const f = this.app.vault.getAbstractFileByPath(path);
+			if (f instanceof TFile) localMtime = f.stat.mtime;
+		}
+
+		const doc = await this.db.get(FILE_PREFIX + path) as FileDoc | null;
+		const remoteMtime = doc && !doc.deleted ? doc.mtime : null;
+
+		if (localMtime != null && remoteMtime != null) {
+			if (localMtime >= remoteMtime) {
+				await this.takeLocal(path);
+				return "local";
+			}
+			await this.takeRemote(path);
+			return "remote";
+		}
+		if (localMtime != null) {
+			await this.takeLocal(path);
+			return "local";
+		}
+		if (remoteMtime != null) {
+			await this.takeRemote(path);
+			return "remote";
+		}
+		throw new Error("file exists neither locally nor in the database");
+	}
+
 	/** Overwrite the database with this device's copy (force upload). */
 	async takeLocal(path: string): Promise<void> {
 		const adapter = this.app.vault.adapter;
