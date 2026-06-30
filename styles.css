@@ -19,7 +19,7 @@
 
 .couchdb-sync-drift summary {
 	cursor: pointer;
-	/* colour comes from the state class on the <details> (red / amber / grey) */
+	/* colour comes from the state class on the <details> */
 }
 
 .couchdb-sync-drift ul {
@@ -89,10 +89,10 @@
 	color: var(--color-orange);
 }
 
-/* grey: in the database only — not on this device */
+/* muted yellow: in the database only — not on this device (pending download) */
 .couchdb-sync-state-remote,
 .couchdb-sync-state-remote .couchdb-sync-tree-fname {
-	color: var(--text-faint);
+	color: #c4a846;
 }
 
 /* purple: content differs on both sides — auto-reconcilable drift */
@@ -155,7 +155,7 @@
 }
 
 .couchdb-sync-swatch.couchdb-sync-state-remote {
-	background: var(--text-faint);
+	background: #c4a846;
 }
 
 .couchdb-sync-swatch.couchdb-sync-state-drift {
