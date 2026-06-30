@@ -644,16 +644,14 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			const mk = (state: FileState, label: string, count: number, action?: LegendAction) => {
 				if (count === 0 && state === "excluded") return;
 				const isBtn = action !== undefined;
-				const empty = isBtn && count === 0;
-				const cls = `couchdb-sync-legend-item couchdb-sync-state-${state}` +
-					(isBtn ? " couchdb-sync-legend-btn" : "") +
-					(empty ? " couchdb-sync-legend-disabled" : "");
-				const item = legendBox.createSpan({ cls });
+				const item = legendBox.createSpan({
+					cls: `couchdb-sync-legend-item couchdb-sync-state-${state}` + (isBtn ? " couchdb-sync-legend-btn" : ""),
+				});
 				if (isBtn) item.ariaLabel = action.tooltip;
 				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
 				item.createSpan({ text: `${count}`, cls: "couchdb-sync-legend-count" });
 				const labelEl = item.createSpan({ text: label, cls: "couchdb-sync-legend-label" });
-				if (isBtn && !empty) {
+				if (isBtn && count > 0) {
 					item.onclick = async () => {
 						item.classList.add("couchdb-sync-legend-busy");
 						const origLabel = labelEl.getText();

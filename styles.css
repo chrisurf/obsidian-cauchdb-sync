@@ -220,13 +220,6 @@
 	border-color: var(--interactive-accent);
 }
 
-.couchdb-sync-legend-disabled {
-	opacity: 0.5;
-	border-style: dashed;
-	cursor: default;
-	pointer-events: none;
-}
-
 .couchdb-sync-legend-busy {
 	opacity: 0.6;
 	pointer-events: none;
