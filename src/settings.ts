@@ -407,6 +407,17 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 	/** Highlight rows being worked on and show live chunk progress (done/total · %). */
 	private highlightActive(): void {
+		// update emergency-stop countdown (button text only, no full re-render)
+		const stopBtn = this.liveStatusEl?.querySelector<HTMLButtonElement>(".couchdb-sync-estop");
+		if (stopBtn) {
+			const rem = this.plugin.getEmergencyRemaining();
+			if (rem > 0) {
+				stopBtn.setText(`Stopped ${rem}s`);
+			} else if (stopBtn.disabled) {
+				this.renderLiveStatus(this.plugin.status);
+			}
+		}
+
 		const transfers = new Map(
 			this.plugin.getActiveTransfers().map((t) => [t.path, t] as const)
 		);
@@ -431,6 +442,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		if (!el) return;
 		el.empty();
 
+		const remaining = this.plugin.getEmergencyRemaining();
 		const syncing = st.state === SYNC_STATE.SYNCING;
 		const row = el.createDiv({ cls: "couchdb-sync-livestatus-row" });
 		const icon = row.createSpan({ cls: "couchdb-sync-status-icon" });
@@ -447,6 +459,22 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			[SYNC_STATE.ERROR]: "Error",
 		};
 		row.createSpan({ text: labelMap[st.state] ?? st.state, cls: "couchdb-sync-livestatus-label" });
+
+		// emergency stop button (right-aligned in the row)
+		if (remaining > 0) {
+			const btn = row.createEl("button", {
+				text: `Stopped ${remaining}s`,
+				cls: "couchdb-sync-estop couchdb-sync-estop-active",
+			});
+			btn.disabled = true;
+		} else {
+			const btn = row.createEl("button", {
+				text: "Stop",
+				cls: "couchdb-sync-estop",
+			});
+			btn.ariaLabel = "Emergency stop — pause all sync for 30 seconds";
+			btn.onclick = () => this.plugin.emergencyStop(30);
+		}
 
 		if (syncing && st.total && st.total > 0) {
 			const pct = Math.round((st.done! / st.total) * 100);

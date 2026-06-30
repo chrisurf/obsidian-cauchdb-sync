@@ -59,6 +59,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private statusIconEl!: HTMLElement;
 	private statusTextEl!: HTMLElement;
 	private restartLock: Promise<void> = Promise.resolve();
+	private emergencyStopUntil = 0;
+	private emergencyTimer?: ReturnType<typeof setTimeout>;
 
 	/** Latest status, shared with the settings view via listeners. */
 	status: SyncStatus = { state: SYNC_STATE.IDLE };
@@ -146,6 +148,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	async onunload(): Promise<void> {
+		if (this.emergencyTimer) clearTimeout(this.emergencyTimer);
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
@@ -292,6 +295,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	private async doRestart(mode: "sync" | "download" = "sync"): Promise<void> {
+		if (this.getEmergencyRemaining() > 0) return;
 		this.engine?.stop();
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
@@ -451,6 +455,41 @@ export default class CouchDBSyncPlugin extends Plugin {
 				this.setStatus(SYNC_STATE.IDLE, "stopped");
 			});
 		return this.restartLock;
+	}
+
+	/**
+	 * Emergency stop: halt sync immediately for a cooldown period without
+	 * changing any settings. After the cooldown, sync resumes automatically
+	 * if auto-start / live sync are enabled.
+	 */
+	emergencyStop(seconds = 30): void {
+		if (this.emergencyTimer) clearTimeout(this.emergencyTimer);
+		this.emergencyStopUntil = Date.now() + seconds * 1000;
+		this.engine?.abort();
+		this.restartLock = this.restartLock
+			.catch(() => undefined)
+			.then(async () => {
+				this.engine?.stop();
+				await this.db?.close().catch(() => undefined);
+				this.engine = null;
+				this.db = null;
+				this.setStatus(SYNC_STATE.PAUSED, `emergency stop (${seconds}s)`);
+			});
+		this.emergencyTimer = setTimeout(() => {
+			this.emergencyStopUntil = 0;
+			this.emergencyTimer = undefined;
+			if (this.settings.autoStart || this.settings.liveSync) {
+				void this.restartSync();
+			} else {
+				this.setStatus(SYNC_STATE.IDLE, "emergency stop ended");
+			}
+		}, seconds * 1000);
+	}
+
+	/** Seconds remaining on the emergency stop cooldown, or 0. */
+	getEmergencyRemaining(): number {
+		if (this.emergencyStopUntil === 0) return 0;
+		return Math.max(0, Math.ceil((this.emergencyStopUntil - Date.now()) / 1000));
 	}
 
 	/** Whether a sync session is currently active. */

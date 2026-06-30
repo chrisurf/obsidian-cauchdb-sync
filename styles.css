@@ -311,6 +311,35 @@
 	font-size: var(--font-ui-medium);
 }
 
+.couchdb-sync-estop {
+	margin-left: auto;
+	padding: 0.15em 0.7em;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	border: 1px solid var(--color-red);
+	border-radius: 4px;
+	background: transparent;
+	color: var(--color-red);
+	cursor: pointer;
+	transition: background 120ms ease, color 120ms ease;
+}
+
+.couchdb-sync-estop:hover {
+	background: var(--color-red);
+	color: var(--text-on-accent);
+}
+
+.couchdb-sync-estop-active {
+	background: var(--color-red);
+	color: var(--text-on-accent);
+	cursor: default;
+	font-variant-numeric: tabular-nums;
+}
+
+.couchdb-sync-estop-active:hover {
+	opacity: 0.9;
+}
+
 .couchdb-sync-progress {
 	width: 100%;
 	margin-top: 0.4em;
