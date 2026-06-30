@@ -688,15 +688,17 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				busyLabel: "Downloading…",
 				run: runEach((path) => p.takeRemotePath(path)),
 			});
+			const strategyLabel = this.plugin.settings.conflictStrategy === "master"
+				? "master device wins" : "use newest";
 			mk("drift", "differs", groups.drift.length, {
-				tooltip: "Resolve all (use newest)",
+				tooltip: `Resolve all (${strategyLabel})`,
 				busyLabel: "Resolving…",
-				run: runEach((path) => p.useNewestPath(path)),
+				run: runEach((path) => p.forceSyncPath(path)),
 			});
 			mk("conflict", "conflict", groups.conflict.length, {
-				tooltip: "Resolve all conflicts (use newest)",
+				tooltip: `Resolve all conflicts (${strategyLabel})`,
 				busyLabel: "Resolving…",
-				run: runEach((path) => p.useNewestPath(path)),
+				run: runEach((path) => p.forceSyncPath(path)),
 			});
 			mk("excluded", "excluded", groups.excluded.length);
 		}
