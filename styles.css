@@ -1,25 +1,45 @@
 /* CouchDB Sync — settings UI styles. The runtime status indicator lives in the status bar. */
 
-.couchdb-sync-index {
+/* --- status card: unified block for status + summary + legend --- */
+
+.couchdb-sync-card {
+	background: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 0.8em 1em;
 	margin-bottom: 1em;
 }
 
 .couchdb-sync-summary {
 	font-weight: 600;
+	font-size: var(--font-ui-small);
+	margin-top: 0.3em;
 }
 
-.couchdb-sync-ok .couchdb-sync-summary {
+.couchdb-sync-summary-ok {
 	color: var(--color-green);
 }
 
-.couchdb-sync-warn,
-.couchdb-sync-warn .couchdb-sync-summary {
+.couchdb-sync-summary-pending {
+	color: var(--color-orange);
+}
+
+.couchdb-sync-counts {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	margin-top: 0.15em;
+}
+
+.couchdb-sync-index {
+	margin-bottom: 1em;
+}
+
+.couchdb-sync-warn {
 	color: var(--color-orange);
 }
 
 .couchdb-sync-drift summary {
 	cursor: pointer;
-	/* colour comes from the state class on the <details> */
 }
 
 .couchdb-sync-drift ul {
@@ -31,14 +51,15 @@
 
 .couchdb-sync-tree-root > summary {
 	cursor: pointer;
-	margin-top: 0.5em;
 	font-weight: 600;
+	font-size: var(--font-ui-small);
+	padding: 0.4em 0;
 }
 
 .couchdb-sync-tree {
 	font-size: var(--font-ui-smaller);
 	font-family: var(--font-monospace);
-	margin-top: 0.5em;
+	margin-top: 0.3em;
 }
 
 .couchdb-sync-tree details > summary {
@@ -116,24 +137,28 @@
 	opacity: 0.8;
 }
 
-/* legend above the tree */
+/* legend in the status card */
 .couchdb-sync-legend {
-	margin-bottom: 0.5em;
-	font-family: var(--font-interface);
-}
-
-.couchdb-sync-legend-intro {
-	margin: 0 0 0.35em;
-	color: var(--text-muted);
-	font-size: var(--font-ui-smaller);
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5em 0.9em;
+	margin-top: 0.5em;
+	padding-top: 0.5em;
+	border-top: 1px solid var(--background-modifier-border);
 }
 
 .couchdb-sync-legend-item {
 	display: inline-flex;
 	align-items: center;
-	gap: 0.35em;
-	margin-right: 1em;
+	gap: 0.3em;
 	font-size: var(--font-ui-smaller);
+}
+
+.couchdb-sync-legend-count {
+	font-weight: 600;
+}
+
+.couchdb-sync-legend-label {
 	color: var(--text-muted);
 }
 
@@ -171,29 +196,6 @@
 	opacity: 0.6;
 }
 
-.couchdb-sync-legend-note {
-	margin: 0.35em 0 0;
-}
-
-/* red X to remove an entry from the index */
-.couchdb-sync-x {
-	flex: none;
-	width: 1.4em;
-	height: 1.4em;
-	padding: 0;
-	line-height: 1;
-	font-size: var(--font-ui-smaller);
-	color: var(--text-on-accent);
-	background: var(--color-red);
-	border: none;
-	border-radius: 3px;
-	cursor: pointer;
-	opacity: 0.55;
-}
-
-.couchdb-sync-x:hover {
-	opacity: 1;
-}
 
 /* --- status indicator + progress --- */
 
@@ -222,10 +224,6 @@
 	animation: couchdb-sync-rot 1s linear infinite;
 }
 
-.couchdb-sync-livestatus {
-	margin: 0.25em 0 0.75em;
-}
-
 .couchdb-sync-livestatus-row {
 	display: flex;
 	align-items: center;
@@ -234,7 +232,7 @@
 }
 
 .couchdb-sync-livestatus-label {
-	color: var(--text-normal);
+	font-size: var(--font-ui-medium);
 }
 
 .couchdb-sync-progress {

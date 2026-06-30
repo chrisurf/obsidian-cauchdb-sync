@@ -45,6 +45,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	// persistent index-status elements (updated in place to avoid flicker)
 	private summaryEl?: HTMLElement;
 	private countsEl?: HTMLElement;
+	private legendEl?: HTMLElement;
 	private driftEl?: HTMLElement;
 	private treeEl?: HTMLElement;
 	private driftSig = "";
@@ -370,8 +371,20 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	// --- index status view -------------------------------------------------
 
 	private renderIndexStatus(root: HTMLElement): void {
-		new Setting(root).setHeading().setName("Index status");
+		// --- status card: live status + summary + legend in one visual block ---
+		const card = root.createDiv({ cls: "couchdb-sync-card" });
 
+		this.liveStatusEl = card.createDiv({ cls: "couchdb-sync-livestatus" });
+		this.statusUnsub?.();
+		this.statusUnsub = this.plugin.onStatusChange((st) => this.renderLiveStatus(st));
+
+		this.summaryEl = card.createDiv({ cls: "couchdb-sync-summary" });
+		this.countsEl = card.createDiv({ cls: "couchdb-sync-counts" });
+		this.legendEl = card.createDiv({ cls: "couchdb-sync-legend" });
+
+		this.summaryEl.setText("Loading…");
+
+		// --- show-excluded toggle ---
 		new Setting(root)
 			.setName("Show excluded files")
 			.setDesc(
@@ -381,33 +394,23 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				t.setValue(this.plugin.settings.showExcluded).onChange(async (v) => {
 					this.plugin.settings.showExcluded = v;
 					await this.plugin.saveSettings();
-					this.treeSig = ""; // force the tree/lists to rebuild
+					this.treeSig = "";
 					await this.loadIndex(true);
 				})
 			);
 
-		// live status line (updates instantly from the engine)
-		this.liveStatusEl = root.createDiv({ cls: "couchdb-sync-livestatus" });
-		this.statusUnsub?.();
-		this.statusUnsub = this.plugin.onStatusChange((st) => this.renderLiveStatus(st));
-
-		// build the index box ONCE; later refreshes update these in place (no flicker)
+		// --- index content (drift lists + tree) ---
 		const box = root.createDiv({ cls: "couchdb-sync-index" });
-		this.summaryEl = box.createDiv();
-		this.countsEl = box.createEl("p", { cls: "setting-item-description" });
 		this.driftEl = box.createDiv();
 		this.treeEl = box.createDiv();
 		this.driftSig = "";
 		this.treeSig = "";
-		this.summaryEl.setText("Loading…");
 
 		void this.loadIndex(true);
 
-		// auto-refresh the counts/lists in place (no flicker, no full page reload)
 		if (this.autoRefresh !== undefined) window.clearInterval(this.autoRefresh);
 		this.autoRefresh = window.setInterval(() => void this.loadIndex(false), AUTO_REFRESH_MS);
 
-		// fast loop: highlight the files currently being worked on ("scanning" effect)
 		if (this.activeTimer !== undefined) window.clearInterval(this.activeTimer);
 		this.activeTimer = window.setInterval(() => this.highlightActive(), 600);
 	}
@@ -553,6 +556,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				}
 			}
 			counts.setText("");
+			this.legendEl?.empty();
 			treeBox.empty();
 			this.driftSig = this.treeSig = "";
 			return;
@@ -591,13 +595,34 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		const pending = syncTotal - groups.synced.length;
 		const pct = syncTotal === 0 ? 100 : Math.round((groups.synced.length / syncTotal) * 100);
 
-		summary.className = pending === 0 ? "couchdb-sync-ok" : "couchdb-sync-warn";
-		summary.setText(
-			pending === 0
-				? `✓ In sync — ${groups.synced.length} / ${syncTotal} files (100%)`
-				: `⚠ Syncing — ${groups.synced.length} / ${syncTotal} files (${pct}%) · ${pending} pending`
-		);
+		summary.className = "couchdb-sync-summary";
+		if (pending === 0) {
+			summary.addClass("couchdb-sync-summary-ok");
+			summary.setText(`${groups.synced.length} / ${syncTotal} files in sync`);
+		} else {
+			summary.addClass("couchdb-sync-summary-pending");
+			summary.setText(`${groups.synced.length} / ${syncTotal} files (${pct}%) · ${pending} pending`);
+		}
 		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
+
+		// legend (in the card, above the tree)
+		const legendBox = this.legendEl;
+		if (legendBox) {
+			legendBox.empty();
+			const mk = (state: FileState, label: string, count: number) => {
+				if (count === 0 && state === "excluded") return;
+				const item = legendBox.createSpan({ cls: `couchdb-sync-legend-item couchdb-sync-state-${state}` });
+				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
+				item.createSpan({ text: `${count}`, cls: "couchdb-sync-legend-count" });
+				item.createSpan({ text: label, cls: "couchdb-sync-legend-label" });
+			};
+			mk("synced", "synced", groups.synced.length);
+			mk("local", "local", groups.local.length);
+			mk("remote", "remote", groups.remote.length);
+			mk("drift", "differs", groups.drift.length);
+			mk("conflict", "conflict", groups.conflict.length);
+			mk("excluded", "excluded", groups.excluded.length);
+		}
 
 		// ---- per-state lists, most urgent first (same colours as the tree) ----
 		const listSig = JSON.stringify([groups.conflict, groups.drift, groups.local, groups.remote]);
@@ -619,25 +644,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			treeBox.empty();
 			const tree = treeBox.createEl("details", { cls: "couchdb-sync-tree-root" });
 			tree.createEl("summary", {
-				text: `🗂 Sync state — ${allPaths.length} files (this device + database)`,
+				text: `Sync state — ${allPaths.length} files`,
 			});
 			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
-			const legend = body.createDiv({ cls: "couchdb-sync-legend" });
-			legend.createEl("p", {
-				cls: "couchdb-sync-legend-intro",
-				text: "Every file across this device and the server. Colour shows its state. Use ⋯ for actions:",
-			});
-			const mk = (state: FileState, label: string) => {
-				const item = legend.createSpan({ cls: "couchdb-sync-legend-item" });
-				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
-				item.createSpan({ text: label });
-			};
-			mk("synced", `in sync (${groups.synced.length})`);
-			mk("local", `local only (${groups.local.length})`);
-			mk("remote", `remote only (${groups.remote.length})`);
-			mk("drift", `differs (${groups.drift.length})`);
-			mk("conflict", `conflict (${groups.conflict.length})`);
-			if (groups.excluded.length > 0) mk("excluded", `excluded (${groups.excluded.length})`);
 			this.renderTree(body.createDiv(), allPaths, stateByPath);
 		}
 	}
