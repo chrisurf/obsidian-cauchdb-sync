@@ -625,7 +625,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			const legend = body.createDiv({ cls: "couchdb-sync-legend" });
 			legend.createEl("p", {
 				cls: "couchdb-sync-legend-intro",
-				text: "Every file across this device and the server. Colour shows its state. Use 🕘 for history, ⋯ for actions:",
+				text: "Every file across this device and the server. Colour shows its state. Use ⋯ for actions:",
 			});
 			const mk = (state: FileState, label: string) => {
 				const item = legend.createSpan({ cls: "couchdb-sync-legend-item" });
@@ -750,19 +750,6 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			await refresh();
 		};
 
-		// red "X": remove a file/folder from the DB index. Local files are kept.
-		const addRemove = (row: HTMLElement, target: string, folder: boolean) => {
-			const x = row.createEl("button", { text: "✕", cls: "couchdb-sync-x" });
-			x.setAttr("aria-label", `Remove ${target} from the index`);
-			x.onclick = async (ev) => {
-				ev.preventDefault();
-				ev.stopPropagation();
-				x.disabled = true;
-				await this.plugin.removeFromIndex(target, folder);
-				await refresh();
-			};
-		};
-
 		const iconBtn = (row: HTMLElement, icon: string, label: string, onClick: (ev: MouseEvent) => void) => {
 			const b = row.createEl("button", { cls: "couchdb-sync-iconbtn" });
 			setIcon(b, icon);
@@ -850,7 +837,6 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				sum.setAttr("aria-label", stateTitle[fState]);
 				sum.createSpan({ text: `📁 ${name}` });
 				iconBtn(sum, "more-horizontal", "Folder actions", (ev) => folderMenu(ev, folderPath));
-				addRemove(sum, folderPath, true);
 				render(child, det.createDiv({ cls: "couchdb-sync-tree-children" }), folderPath);
 			}
 			for (const file of node.files.sort((a, b) => a.name.localeCompare(b.name))) {
@@ -859,9 +845,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				div.setAttr("aria-label", stateTitle[fState]);
 				div.createSpan({ cls: "couchdb-sync-dot" });
 				div.createSpan({ text: `📄 ${file.name}`, cls: "couchdb-sync-tree-fname" });
-				iconBtn(div, "history", "History", () => new HistoryModal(p, file.path, refresh).open());
 				iconBtn(div, "more-horizontal", "Actions", (ev) => fileMenu(ev, file.path, fState));
-				addRemove(div, file.path, false);
 				div.dataset.couchdbPath = file.path;
 			}
 		};
