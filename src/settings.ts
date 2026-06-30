@@ -597,26 +597,74 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		}
 		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
 
-		// legend (in the card, above the tree)
+		// legend (in the card, above the tree) — actionable items are clickable
 		const legendBox = this.legendEl;
 		if (legendBox) {
 			legendBox.empty();
+			const p = this.plugin;
+			const refreshAfter = async () => {
+				this.driftSig = "";
+				this.treeSig = "";
+				await this.loadIndex(true);
+			};
+
 			const totalItem = legendBox.createSpan({ cls: "couchdb-sync-legend-total" });
 			totalItem.createSpan({ text: `${syncTotal}`, cls: "couchdb-sync-legend-count" });
 			totalItem.createSpan({ text: "total", cls: "couchdb-sync-legend-label" });
-			const mk = (state: FileState, label: string, count: number) => {
+
+			type LegendAction = { tooltip: string; busyLabel: string; run: (path: string) => Promise<unknown> } | null;
+			const mk = (state: FileState, label: string, count: number, action: LegendAction) => {
 				if (count === 0 && state === "excluded") return;
-				const item = legendBox.createSpan({ cls: `couchdb-sync-legend-item couchdb-sync-state-${state}` });
+				const actionable = action !== null && count > 0;
+				const item = legendBox.createSpan({
+					cls: `couchdb-sync-legend-item couchdb-sync-state-${state}` + (actionable ? " couchdb-sync-legend-action" : ""),
+				});
+				if (actionable) item.ariaLabel = action.tooltip;
 				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
 				item.createSpan({ text: `${count}`, cls: "couchdb-sync-legend-count" });
-				item.createSpan({ text: label, cls: "couchdb-sync-legend-label" });
+				const labelEl = item.createSpan({ text: label, cls: "couchdb-sync-legend-label" });
+				if (actionable) {
+					item.onclick = async () => {
+						item.classList.add("couchdb-sync-legend-busy");
+						item.classList.remove("couchdb-sync-legend-action");
+						const origLabel = labelEl.getText();
+						labelEl.setText(action.busyLabel);
+						try {
+							for (const path of groups[state]) await action.run(path);
+							new Notice(`CouchDB Sync: ${action.busyLabel.replace("…", "")} ${count} file(s).`);
+						} catch (e) {
+							new Notice(`CouchDB Sync: error — ${e instanceof Error ? e.message : String(e)}`);
+						} finally {
+							labelEl.setText(origLabel);
+							item.classList.remove("couchdb-sync-legend-busy");
+							await refreshAfter();
+						}
+					};
+				}
 			};
-			mk("synced", "synced", groups.synced.length);
-			mk("local", "local", groups.local.length);
-			mk("remote", "remote", groups.remote.length);
-			mk("drift", "differs", groups.drift.length);
-			mk("conflict", "conflict", groups.conflict.length);
-			mk("excluded", "excluded", groups.excluded.length);
+
+			mk("synced", "synced", groups.synced.length, null);
+			mk("local", "local", groups.local.length, {
+				tooltip: "Upload all to server",
+				busyLabel: "Uploading…",
+				run: (path) => p.takeLocalPath(path),
+			});
+			mk("remote", "remote", groups.remote.length, {
+				tooltip: "Download all to this device",
+				busyLabel: "Downloading…",
+				run: (path) => p.takeRemotePath(path),
+			});
+			mk("drift", "differs", groups.drift.length, {
+				tooltip: "Resolve all (use newest)",
+				busyLabel: "Resolving…",
+				run: (path) => p.useNewestPath(path),
+			});
+			mk("conflict", "conflict", groups.conflict.length, {
+				tooltip: "Resolve all conflicts (use newest)",
+				busyLabel: "Resolving…",
+				run: (path) => p.useNewestPath(path),
+			});
+			mk("excluded", "excluded", groups.excluded.length, null);
 		}
 
 		// ---- save open/closed state of all <details> before rebuilding ----
