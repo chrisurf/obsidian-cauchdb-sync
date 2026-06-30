@@ -688,14 +688,16 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		sum.createSpan({ text: title });
 		sum.createSpan({ text: `${paths.length}`, cls: "couchdb-sync-section-count" });
 		const ul = det.createEl("ul", { cls: "couchdb-sync-section-list" });
+		const actionLabel = state === "local" ? "Upload" : state === "remote" ? "Download" : "Sync";
+		const busyLabel = state === "local" ? "Uploading…" : state === "remote" ? "Downloading…" : "Syncing…";
 		for (const p of paths) {
 			const li = ul.createEl("li", { cls: "couchdb-sync-drift-item" });
 			li.createSpan({ cls: "couchdb-sync-dot" }); // pulses when active
 			li.createSpan({ text: p, cls: "couchdb-sync-drift-name" });
-			const btn = li.createEl("button", { text: "Sync", cls: "couchdb-sync-rowbtn" });
+			const btn = li.createEl("button", { text: actionLabel, cls: "couchdb-sync-rowbtn" });
 			btn.onclick = async () => {
 				btn.disabled = true;
-				btn.setText("Syncing…");
+				btn.setText(busyLabel);
 				try {
 					await this.plugin.forceSyncPath(p);
 				} finally {
