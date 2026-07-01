@@ -61,6 +61,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private idleReportInFlight: Promise<IndexReport | null> | null = null;
 	/** guards the idle auto-resolver so overlapping refresh ticks don't stack it */
 	private resolvingIdle = false;
+	/** cached legacy-cache doc count (probed at most once per session) */
+	private legacyDocCountCache: number | null = null;
 	private statusEl!: HTMLElement;
 	private statusIconEl!: HTMLElement;
 	private statusTextEl!: HTMLElement;
@@ -725,19 +727,24 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * vault its contents belong to). Returns the doc count, or 0 if absent/empty.
 	 */
 	async legacyLocalDbDocCount(): Promise<number> {
+		// Cache the result: the settings tab calls this on every display(), and probing
+		// opens a (potentially large) PouchDB just to read its doc count.
+		if (this.legacyDocCountCache !== null) return this.legacyDocCountCache;
 		// Don't probe our own current DB.
 		if (this.settings.localDbId === "" || localDbName(this.settings) === LEGACY_LOCAL_DB_NAME) {
+			this.legacyDocCountCache = 0;
 			return 0;
 		}
 		const db = new PouchDB(LEGACY_LOCAL_DB_NAME, { skip_setup: true } as PouchDB.Configuration.LocalDatabaseConfiguration);
 		try {
 			const info = await db.info();
-			return info.doc_count ?? 0;
+			this.legacyDocCountCache = info.doc_count ?? 0;
 		} catch {
-			return 0;
+			this.legacyDocCountCache = 0;
 		} finally {
 			await db.close().catch(() => undefined);
 		}
+		return this.legacyDocCountCache;
 	}
 
 	/** Permanently destroy the legacy vault-shared local PouchDB. */
@@ -745,6 +752,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		const db = new PouchDB(LEGACY_LOCAL_DB_NAME);
 		try {
 			await db.destroy();
+			this.legacyDocCountCache = 0; // gone now — reflect it without re-probing
 		} catch (e) {
 			console.warn("[couchdb-sync] could not destroy legacy local DB", e);
 		}

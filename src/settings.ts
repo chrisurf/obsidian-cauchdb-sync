@@ -136,7 +136,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					const db = new SyncDatabase(s, "couchdb-sync-test-probe");
 					const res = await db.testConnection();
 					new Notice(res.message, res.ok ? 4000 : 8000);
-					await db.close();
+					// The probe only needs the remote; destroy the throwaway local replica
+					// instead of leaving an empty PouchDB behind on every Test click.
+					await db.destroyLocal().catch(() => undefined);
 					if (res.ok) {
 						await this.plugin.markConnectionVerified();
 						this.driftSig = ""; // force the index view to refresh

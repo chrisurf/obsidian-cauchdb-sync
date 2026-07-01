@@ -247,6 +247,13 @@ export class SyncDatabase {
 		}
 	}
 
+	/**
+	 * Upsert a document by id (read-then-write to attach the current _rev). NOTE: the
+	 * "Local" in the name means "written on the local replica", NOT "non-replicating".
+	 * Whether it replicates depends on the id: ids starting with "_local/" (the sync
+	 * state and origin fingerprint) stay per-device; any other id (e.g. the master
+	 * info doc "couchdb-sync:masterinfo") is a normal doc and DOES replicate.
+	 */
 	async putLocalDoc(id: string, value: Record<string, unknown>): Promise<void> {
 		const existing = (await this.getLocalDoc<{ _rev?: string }>(id)) ?? {};
 		await (this.local as unknown as PouchDB.Database).put({
