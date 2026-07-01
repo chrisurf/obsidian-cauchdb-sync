@@ -724,9 +724,14 @@ export class SyncEngine {
 
 		const existing = await this.db.get(FILE_PREFIX + path);
 		if (existing && !existing.deleted && existing.hash === hash) {
-			// identical content already in the DB — adopt it, no upload, no conflict
+			// identical content already in the DB — adopt it, no upload, no conflict.
+			// If this path carries conflict leaves (two devices wrote byte-identical
+			// content, each making a rev), collapse them now so it stops showing red.
 			this.lastHash.set(path, hash);
 			this.recordSynced(path, mtime, size, hash);
+			if (Array.isArray(existing._conflicts) && existing._conflicts.length > 0) {
+				await this.dropLosingRevs(path);
+			}
 			return;
 		}
 
@@ -1278,6 +1283,28 @@ export class SyncEngine {
 			await this.applyRemoteChange({ ...winner, _rev: undefined });
 		}
 		this.setStatus(SYNC_STATE.SYNCED, `Resolved ${conflicted.length} conflict(s).`);
+	}
+
+	/**
+	 * Resolve all current conflicts by the configured strategy WITHOUT a running
+	 * session. Loads the per-device sync state up front so that materializing the
+	 * winners (which calls recordSynced) cannot overwrite the persisted state map
+	 * with a near-empty one, and flushes the state at the end. Safe to run on a
+	 * transient engine bound to the shared DB handle. Returns the number of file
+	 * docs that were conflicted going in (0 if none).
+	 */
+	async resolveConflictsStandalone(): Promise<number> {
+		await this.loadSyncState();
+		let n: number;
+		try {
+			n = (await this.db.getConflicted()).length;
+		} catch {
+			return 0;
+		}
+		if (n === 0) return 0;
+		await this.resolveConflicts();
+		await this.persistSyncState();
+		return n;
 	}
 
 	// --- master coordination ----------------------------------------------

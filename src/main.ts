@@ -59,6 +59,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private engine: SyncEngine | null = null;
 	/** de-dupes concurrent idle index reports (the 3s settings + 5s drift timers) */
 	private idleReportInFlight: Promise<IndexReport | null> | null = null;
+	/** guards the idle auto-resolver so overlapping refresh ticks don't stack it */
+	private resolvingIdle = false;
 	private statusEl!: HTMLElement;
 	private statusIconEl!: HTMLElement;
 	private statusTextEl!: HTMLElement;
@@ -260,6 +262,22 @@ export default class CouchDBSyncPlugin extends Plugin {
 				const total = report.inSync.length + drift;
 				const pct = total === 0 ? 100 : Math.round((report.inSync.length / total) * 100);
 				this.effectiveDrift = { drift, pct };
+
+				// Idle auto-resolve: when no session is running but the DB still holds
+				// unresolved conflicts, clear them by the configured strategy so they
+				// don't sit red forever waiting for the next full "Sync now". Guarded so
+				// overlapping 5s/3s ticks never stack it.
+				if (!this.engine && report.conflicts.length > 0 && !this.resolvingIdle) {
+					this.resolvingIdle = true;
+					void this.resolveConflictsIdle()
+						.then((n) => {
+							if (n > 0) void this.refreshDriftSummary();
+						})
+						.catch((e) => console.warn("[couchdb-sync] idle conflict resolve failed", e))
+						.finally(() => {
+							this.resolvingIdle = false;
+						});
+				}
 			}
 		} catch {
 			// silent: keep whatever we had — the next tick will retry
@@ -610,6 +628,30 @@ export default class CouchDBSyncPlugin extends Plugin {
 		}
 		const reader = new SyncEngine(this.app, db, this.settings, () => undefined, () => undefined);
 		return fn(reader);
+	}
+
+	/**
+	 * Resolve all outstanding conflicts by the configured strategy — even when no
+	 * sync session is running. When a session is live it already auto-resolves, so
+	 * this only does work in the idle case, via a transient engine on the shared
+	 * handle. Returns how many conflicts were resolved.
+	 */
+	async resolveConflictsIdle(): Promise<number> {
+		if (this.engine) return 0; // a live session resolves conflicts on its own
+		if (!this.settings.serverUrl) return 0;
+		if (this.settings.e2eeEnabled && !this.settings.passphrase) return 0; // can't read chunks
+		const db = this.getSharedDb();
+		try {
+			db.connectRemote(); // allow chunk reads to fall back to the server
+		} catch {
+			/* offline: resolve from the local replica only */
+		}
+		const reader = new SyncEngine(this.app, db, this.settings, () => undefined, () => undefined);
+		try {
+			return await reader.resolveConflictsStandalone();
+		} finally {
+			reader.stop(); // cancel its debounced timers; never close the shared handle
+		}
 	}
 
 	// --- file history ---------------------------------------------------------
