@@ -50,6 +50,8 @@ const SYNC_STATE_PREFIX = "_local/couchdb-sync-state:";
  * the shard ids enumerable on load without needing to list _local docs.
  */
 const SYNC_STATE_BUCKETS = 64;
+/** Stop re-uploading to "heal" a file after this many consecutive attempts (anti-ping-pong). */
+const HEAL_MAX_ATTEMPTS = 3;
 /** Suffix of the temp file used while streaming a download to disk. Never synced. */
 const TMP_SUFFIX = ".cdbsync-tmp";
 
@@ -250,6 +252,8 @@ export class SyncEngine {
 	private dirtyStateBuckets = new Set<number>();
 	/** file docs we could not apply yet because some chunks were missing */
 	private pending = new Map<string, FileDoc>();
+	/** per-path count of consecutive heal (re-upload) attempts, to stop ping-pong */
+	private healAttempts = new Map<string, number>();
 	/** set when this session is being torn down; long loops bail out on it */
 	private aborted = false;
 	/** interval id for hidden-file polling (hidden files have no vault events) */
@@ -836,11 +840,15 @@ export class SyncEngine {
 			}
 			this.lastHash.delete(path);
 			this.forgetSynced(path);
+			this.healAttempts.delete(path);
 			return;
 		}
 
 		// nothing to do if we already hold this exact version
-		if (this.lastHash.get(path) === doc.hash) return;
+		if (this.lastHash.get(path) === doc.hash) {
+			this.healAttempts.delete(path);
+			return;
+		}
 
 		const children = Array.isArray(doc.children) ? doc.children : null;
 		if (!children) {
@@ -866,7 +874,23 @@ export class SyncEngine {
 				? await adapter.exists(path)
 				: this.app.vault.getAbstractFileByPath(path) instanceof TFile;
 			if (haveLocal) {
-				console.warn(`[couchdb-sync] healing ${path} by re-uploading (was: ${(e as Error).message})`);
+				const attempts = (this.healAttempts.get(path) ?? 0) + 1;
+				if (attempts > HEAL_MAX_ATTEMPTS) {
+					// Re-uploading is not converging — the local copy likely diverges from
+					// this doc (e.g. a genuine drift the pull can't materialize). Stop the
+					// ping-pong: defer it so a real edit, conflict resolution, or a manual
+					// action can settle it instead of looping forever.
+					console.warn(
+						`[couchdb-sync] giving up healing ${path} after ${HEAL_MAX_ATTEMPTS} attempts; deferring`
+					);
+					this.activeProgress.delete(path);
+					this.pending.set(doc._id, doc);
+					return;
+				}
+				this.healAttempts.set(path, attempts);
+				console.warn(
+					`[couchdb-sync] healing ${path} (attempt ${attempts}) by re-uploading (was: ${(e as Error).message})`
+				);
 				this.activeProgress.delete(path);
 				this.pending.delete(doc._id);
 				this.lastHash.delete(path);
@@ -880,7 +904,9 @@ export class SyncEngine {
 		} finally {
 			this.activeProgress.delete(path);
 		}
+		// applied cleanly -> clear pending + reset the heal backoff for this path
 		this.pending.delete(doc._id);
+		this.healAttempts.delete(path);
 	}
 
 	/** Force (re)sync of a single path: re-upload if local exists, else re-download. */
