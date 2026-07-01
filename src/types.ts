@@ -1,6 +1,16 @@
 export type ConflictStrategy = "master" | "newest";
 
+/**
+ * Settings schema version. Bumped whenever the persisted shape changes in a way
+ * that needs a one-time migration (see `migrateSettings` in main.ts). Fresh
+ * installs are stamped with the current version and skip migration.
+ */
+export const CURRENT_SETTINGS_VERSION = 1;
+
 export interface CouchDBSyncSettings {
+	/** persisted settings schema version; drives one-time migrations */
+	schemaVersion: number;
+
 	/** e.g. https://couch.example.com:6984 */
 	serverUrl: string;
 	/** remote database name */
@@ -90,7 +100,30 @@ export interface CouchDBSyncSettings {
 	forgetCacheOnDisable: boolean;
 }
 
+/**
+ * Hidden paths that are excluded BY DEFAULT (safe baseline). Kept as a named
+ * constant so the one-time settings migration can re-union them into an existing
+ * config that predates a given entry — e.g. a config that never had `.git/` or
+ * `.obsidian/` in its blacklist would otherwise sync a whole git repo. Users can
+ * still opt any of these back IN by removing the line (or whitelisting via
+ * hiddenInclude); the migration only runs once per schema bump, so a deliberate
+ * later removal is respected.
+ */
+export const DEFAULT_HIDDEN_EXCLUDE: string[] = [
+	".obsidian/",
+	".git/",
+	".trash/",
+	".DS_Store",
+	"node_modules/",
+	".claude/",
+	"tmp/",
+	".obsidian/workspace.json",
+	".obsidian/workspace-mobile.json",
+	".obsidian/cache",
+];
+
 export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
+	schemaVersion: CURRENT_SETTINGS_VERSION,
 	serverUrl: "",
 	dbName: "obsidian",
 	username: "",
@@ -105,18 +138,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	autoStart: true,
 	syncHidden: false,
 	// when hidden sync is ON, keep these volatile/risky hidden paths out
-	hiddenExclude: [
-		".obsidian/",
-		".git/",
-		".trash/",
-		".DS_Store",
-		"node_modules/",
-		".claude/",
-		"tmp/",
-		".obsidian/workspace.json",
-		".obsidian/workspace-mobile.json",
-		".obsidian/cache",
-	],
+	hiddenExclude: [...DEFAULT_HIDDEN_EXCLUDE],
 	// when hidden sync is OFF, sync nothing hidden by default
 	hiddenInclude: [],
 	keepHistory: 50,

@@ -2,12 +2,14 @@ import { Notice, Plugin, setIcon } from "obsidian";
 import PouchDB from "pouchdb-browser";
 import {
 	CouchDBSyncSettings,
+	CURRENT_SETTINGS_VERSION,
 	DEFAULT_SETTINGS,
 	SYNC_STATE,
 	SyncState,
 	SyncStatus,
 	VersionDoc,
 } from "./types";
+import { migrateSettings } from "./migrate";
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
@@ -643,8 +645,26 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		// Read the RAW persisted data first: we need the ORIGINAL schemaVersion to
+		// decide whether to migrate. (Object.assign with DEFAULT_SETTINGS would
+		// otherwise backfill schemaVersion to current and make every old config look
+		// already-migrated.)
+		const loaded = ((await this.loadData()) ?? null) as
+			| (Partial<CouchDBSyncSettings> & Record<string, unknown>)
+			| null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
 		let dirty = false;
+
+		// One-time settings migration for configs written before CURRENT_SETTINGS_VERSION.
+		const priorVersion = (loaded?.schemaVersion as number | undefined) ?? 0;
+		if (!loaded || priorVersion < CURRENT_SETTINGS_VERSION) {
+			if (migrateSettings(this.settings as CouchDBSyncSettings & Record<string, unknown>, priorVersion)) {
+				dirty = true;
+			}
+			this.settings.schemaVersion = CURRENT_SETTINGS_VERSION;
+			dirty = true;
+		}
+
 		if (!this.settings.deviceId) {
 			this.settings.deviceId = generateDeviceId();
 			dirty = true;
