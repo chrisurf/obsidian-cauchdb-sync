@@ -30,6 +30,7 @@ import {
 	isHidden,
 	looksLikeText,
 	matchesIgnore,
+	pickConflictWinner,
 	sha256Hex,
 	splitBytes,
 	textToBytes,
@@ -1264,14 +1265,7 @@ export class SyncEngine {
 			const revs = [doc._rev!, ...(doc._conflicts ?? [])];
 			const cands = await Promise.all(revs.map((r) => this.db.getRev(doc._id, r)));
 
-			let winner: FileDoc | undefined;
-			if (this.settings.conflictStrategy === "master" && masterId) {
-				winner = cands.find((c) => c.deviceId === masterId);
-			}
-			// fallback (and the "newest" strategy): largest mtime wins
-			if (!winner) {
-				winner = cands.slice().sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0))[0];
-			}
+			const winner = pickConflictWinner(cands, this.settings.conflictStrategy, masterId);
 
 			// force the winner's body onto the current winning revision...
 			await this.db.put({ ...winner, _id: doc._id, _rev: doc._rev });

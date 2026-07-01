@@ -1,3 +1,23 @@
+import type { ConflictStrategy } from "./types";
+
+/**
+ * Decide which candidate revision wins a conflict, by the configured strategy.
+ * "master": the master device's revision wins if present; otherwise fall back to
+ * newest. "newest" (and every fallback): the largest mtime wins. Pure so it can be
+ * unit-tested without a database. `cands` must be non-empty.
+ */
+export function pickConflictWinner<T extends { deviceId?: string; mtime?: number }>(
+	cands: T[],
+	strategy: ConflictStrategy,
+	masterId: string | null
+): T {
+	if (strategy === "master" && masterId) {
+		const m = cands.find((c) => c.deviceId === masterId);
+		if (m) return m;
+	}
+	return cands.slice().sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0))[0];
+}
+
 /** Fast, non-cryptographic 53-bit string hash (cyrb53) for echo detection. */
 export function cyrb53(str: string, seed = 0): string {
 	let h1 = 0xdeadbeef ^ seed;
