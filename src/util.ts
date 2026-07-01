@@ -1,5 +1,13 @@
 import type { ConflictStrategy } from "./types";
 
+/** True when two string arrays have the same length and equal elements in order. */
+export function stringArraysEqual(a: string[], b: string[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
+}
+
 /**
  * Decide which candidate revision wins a conflict, by the configured strategy.
  * "master": the master device's revision wins if present; otherwise fall back to

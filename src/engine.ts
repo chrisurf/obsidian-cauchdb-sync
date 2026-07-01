@@ -33,6 +33,7 @@ import {
 	pickConflictWinner,
 	sha256Hex,
 	splitBytes,
+	stringArraysEqual,
 	textToBytes,
 	uint8ToBase64,
 } from "./util";
@@ -336,10 +337,9 @@ export class SyncEngine {
 
 		for (const path of paths) {
 			if (this.aborted) return;
-			if (this.suppress.has(path)) {
-				this.suppress.delete(path);
-				continue;
-			}
+			// Consume any echo token but still re-check below: a real change made in
+			// the debounce window must not be swallowed just because we recently wrote.
+			this.suppress.delete(path);
 			const st = await adapter.stat(path);
 			if (!st || st.type !== "file") continue;
 			const rec = this.syncState.get(path);
@@ -645,10 +645,11 @@ export class SyncEngine {
 
 	private async handleLocalUpsert(file: TFile): Promise<void> {
 		if (this.skip(file.path)) return;
-		if (this.suppress.has(file.path)) {
-			this.suppress.delete(file.path);
-			return;
-		}
+		// Consume any echo token but do NOT return on it alone: if the user edited the
+		// file inside the debounce window, its mtime/size differ from what we recorded,
+		// so isUnchanged is false and we must still push their edit. Our own writes are
+		// recognized as echoes by isUnchanged (recordSynced stored the written stat).
+		this.suppress.delete(file.path);
 		if (this.isUnchanged(file)) return;
 		try {
 			await this.pushFile(file);
@@ -745,8 +746,16 @@ export class SyncEngine {
 		const hash = cyrb53(children.join("|"));
 
 		const existing = await this.db.get(FILE_PREFIX + path);
-		if (existing && !existing.deleted && existing.hash === hash) {
+		if (
+			existing &&
+			!existing.deleted &&
+			stringArraysEqual(existing.children ?? [], children)
+		) {
 			// identical content already in the DB — adopt it, no upload, no conflict.
+			// NB: compare the content-addressed chunk id LIST directly, not the cyrb53
+			// `hash` — a hash collision would otherwise adopt genuinely different content
+			// and silently drop this device's version. The hash stays a cheap fingerprint
+			// for the drift UI only.
 			// If this path carries conflict leaves (two devices wrote byte-identical
 			// content, each making a rev), collapse them now so it stops showing red.
 			this.lastHash.set(path, hash);
