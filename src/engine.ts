@@ -38,7 +38,17 @@ import {
 } from "./util";
 
 const MASTER_INFO_ID = "couchdb-sync:masterinfo";
+/** Legacy single-doc per-device state (pre-sharding). Read once, then migrated away. */
 const SYNC_STATE_DOC = "_local/couchdb-sync-state";
+/** Sharded per-device state docs: "<prefix><bucket>". Each holds a slice of the map. */
+const SYNC_STATE_PREFIX = "_local/couchdb-sync-state:";
+/**
+ * Number of shards the per-device sync state is split across. Each recordSynced only
+ * rewrites its own (small) shard instead of the whole map, so a media-heavy initial
+ * index no longer re-serializes thousands of records per flush. A fixed count keeps
+ * the shard ids enumerable on load without needing to list _local docs.
+ */
+const SYNC_STATE_BUCKETS = 64;
 /** Suffix of the temp file used while streaming a download to disk. Never synced. */
 const TMP_SUFFIX = ".cdbsync-tmp";
 
@@ -93,6 +103,26 @@ async function listHidden(app: App, isAborted: () => boolean = () => false): Pro
 }
 
 /**
+ * Read the full per-device sync state from disk: the legacy single doc (pre-sharding)
+ * plus every shard. Shared by the engine's loader and the standalone index report so
+ * the idle view classifies files exactly like a running session would.
+ */
+async function readSyncStateRecords(db: SyncDatabase): Promise<Map<string, SyncRecord>> {
+	const map = new Map<string, SyncRecord>();
+	const legacy = await db
+		.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_DOC)
+		.catch(() => null);
+	if (legacy?.records) for (const [p, r] of Object.entries(legacy.records)) map.set(p, r);
+	for (let b = 0; b < SYNC_STATE_BUCKETS; b++) {
+		const doc = await db
+			.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_PREFIX + b)
+			.catch(() => null);
+		if (doc?.records) for (const [p, r] of Object.entries(doc.records)) map.set(p, r);
+	}
+	return map;
+}
+
+/**
  * Build the index/drift report. Works WITHOUT a running session (reads the local
  * DB and the persisted sync record directly), and includes hidden files so the
  * settings view shows full transparency in every state.
@@ -103,17 +133,7 @@ export async function buildIndexReport(
 	db: SyncDatabase,
 	syncState?: Map<string, SyncRecord>
 ): Promise<IndexReport> {
-	const records =
-		syncState ??
-		new Map(
-			Object.entries(
-				(
-					await db
-						.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_DOC)
-						.catch(() => null)
-				)?.records ?? {}
-			)
-		);
+	const records = syncState ?? (await readSyncStateRecords(db));
 
 	const normal = app.vault.getFiles().map((f) => f.path);
 	const hidden = settings.syncHidden ? await listHidden(app) : [];
@@ -225,6 +245,8 @@ export class SyncEngine {
 	private suppress = new Set<string>();
 	/** per-device record of each file's last-synced mtime/size/hash */
 	private syncState = new Map<string, SyncRecord>();
+	/** shards touched since the last persist — only these get rewritten */
+	private dirtyStateBuckets = new Set<number>();
 	/** file docs we could not apply yet because some chunks were missing */
 	private pending = new Map<string, FileDoc>();
 	/** set when this session is being torn down; long loops bail out on it */
@@ -662,8 +684,7 @@ export class SyncEngine {
 			deleted: true,
 		});
 		this.lastHash.delete(path);
-		this.syncState.delete(path);
-		this.saveStateSoon();
+		this.forgetSynced(path);
 	}
 
 	private async pushFile(file: TFile): Promise<void> {
@@ -805,8 +826,7 @@ export class SyncEngine {
 				await this.app.fileManager.trashFile(existing);
 			}
 			this.lastHash.delete(path);
-			this.syncState.delete(path);
-			this.saveStateSoon();
+			this.forgetSynced(path);
 			return;
 		}
 
@@ -1095,8 +1115,7 @@ export class SyncEngine {
 		}
 		if (!removed) this.suppress.delete(path);
 		this.lastHash.delete(path);
-		this.syncState.delete(path);
-		this.saveStateSoon();
+		this.forgetSynced(path);
 	}
 
 	/** Delete a file everywhere: propagate a tombstone AND remove it locally now. */
@@ -1328,25 +1347,60 @@ export class SyncEngine {
 
 	// --- per-device sync state --------------------------------------------
 
+	/** Which shard a path's record lives in. Low bits of cyrb53 → even spread. */
+	private bucketOf(path: string): number {
+		const h = cyrb53(path);
+		return parseInt(h.slice(-8) || "0", 16) % SYNC_STATE_BUCKETS;
+	}
+
 	private recordSynced(path: string, mtime: number, size: number, hash: string): void {
 		this.syncState.set(path, { mtime, size, hash });
+		this.dirtyStateBuckets.add(this.bucketOf(path));
+		this.saveStateSoon();
+	}
+
+	/** Forget a path's synced record (on delete) and mark its shard for rewrite. */
+	private forgetSynced(path: string): void {
+		this.syncState.delete(path);
+		this.dirtyStateBuckets.add(this.bucketOf(path));
 		this.saveStateSoon();
 	}
 
 	private async loadSyncState(): Promise<void> {
-		const doc = await this.db
+		const legacy = await this.db
 			.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_DOC)
 			.catch(() => null);
-		this.syncState = new Map(Object.entries(doc?.records ?? {}));
+		this.syncState = await readSyncStateRecords(this.db);
+		this.dirtyStateBuckets.clear();
+		// One-time migration: if the legacy single doc still holds data, re-shard every
+		// path and blank the legacy doc so it is never migrated again.
+		if (legacy?.records && Object.keys(legacy.records).length > 0) {
+			for (const p of this.syncState.keys()) this.dirtyStateBuckets.add(this.bucketOf(p));
+			await this.persistSyncState();
+			await this.db.putLocalDoc(SYNC_STATE_DOC, { records: {} }).catch(() => undefined);
+		}
 	}
 
 	private async persistSyncState(): Promise<void> {
 		if (this.aborted) return; // DB may be closing/destroyed during teardown
+		if (this.dirtyStateBuckets.size === 0) return; // nothing changed
+		const buckets = [...this.dirtyStateBuckets];
+		this.dirtyStateBuckets.clear();
+		// Group the current records for the dirty shards only (in-memory scan is cheap;
+		// the win is writing ~N/64 records to IDB instead of the whole map every time).
+		const byBucket = new Map<number, Record<string, SyncRecord>>();
+		for (const b of buckets) byBucket.set(b, {});
+		for (const [path, rec] of this.syncState) {
+			const g = byBucket.get(this.bucketOf(path));
+			if (g) g[path] = rec;
+		}
 		try {
-			await this.db.putLocalDoc(SYNC_STATE_DOC, {
-				records: Object.fromEntries(this.syncState),
-			});
+			for (const [b, records] of byBucket) {
+				await this.db.putLocalDoc(SYNC_STATE_PREFIX + b, { records });
+			}
 		} catch (e) {
+			// Put the shards back on the dirty list so the next flush retries them.
+			for (const b of buckets) this.dirtyStateBuckets.add(b);
 			if (!this.aborted) console.warn("[couchdb-sync] could not persist sync state", e);
 		}
 	}
