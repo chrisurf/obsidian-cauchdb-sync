@@ -55,9 +55,14 @@ export class SyncDatabase {
 	remote: PouchDB.Database<FileDoc> | null = null;
 	private settings: CouchDBSyncSettings;
 
-	constructor(settings: CouchDBSyncSettings, localName: string) {
+	constructor(
+		settings: CouchDBSyncSettings,
+		localName: string,
+		localOptions?: PouchDB.Configuration.LocalDatabaseConfiguration
+	) {
 		this.settings = settings;
-		this.local = new PouchDB<FileDoc>(localName, { auto_compaction: true });
+		// localOptions lets tests swap in the in-memory adapter; production passes none.
+		this.local = new PouchDB<FileDoc>(localName, { auto_compaction: true, ...localOptions });
 	}
 
 	private remoteUrl(): string {
