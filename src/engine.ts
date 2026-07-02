@@ -9,7 +9,7 @@ import {
 	debounce,
 } from "obsidian";
 import { SyncDatabase } from "./database";
-import { decryptString, encryptString } from "./crypto";
+import { decryptBytes, encryptBytes } from "./crypto";
 import {
 	CHUNK_SIZE,
 	CouchDBSyncSettings,
@@ -23,21 +23,33 @@ import {
 	VersionDoc,
 } from "./types";
 import {
-	base64ToUint8,
 	bytesToText,
 	concatBytes,
 	cyrb53,
 	isHidden,
 	looksLikeText,
 	matchesIgnore,
+	pickConflictWinner,
 	sha256Hex,
 	splitBytes,
+	stringArraysEqual,
 	textToBytes,
-	uint8ToBase64,
 } from "./util";
 
 const MASTER_INFO_ID = "couchdb-sync:masterinfo";
+/** Legacy single-doc per-device state (pre-sharding). Read once, then migrated away. */
 const SYNC_STATE_DOC = "_local/couchdb-sync-state";
+/** Sharded per-device state docs: "<prefix><bucket>". Each holds a slice of the map. */
+const SYNC_STATE_PREFIX = "_local/couchdb-sync-state:";
+/**
+ * Number of shards the per-device sync state is split across. Each recordSynced only
+ * rewrites its own (small) shard instead of the whole map, so a media-heavy initial
+ * index no longer re-serializes thousands of records per flush. A fixed count keeps
+ * the shard ids enumerable on load without needing to list _local docs.
+ */
+const SYNC_STATE_BUCKETS = 64;
+/** Stop re-uploading to "heal" a file after this many consecutive attempts (anti-ping-pong). */
+const HEAL_MAX_ATTEMPTS = 3;
 /** Suffix of the temp file used while streaming a download to disk. Never synced. */
 const TMP_SUFFIX = ".cdbsync-tmp";
 
@@ -92,6 +104,26 @@ async function listHidden(app: App, isAborted: () => boolean = () => false): Pro
 }
 
 /**
+ * Read the full per-device sync state from disk: the legacy single doc (pre-sharding)
+ * plus every shard. Shared by the engine's loader and the standalone index report so
+ * the idle view classifies files exactly like a running session would.
+ */
+async function readSyncStateRecords(db: SyncDatabase): Promise<Map<string, SyncRecord>> {
+	const map = new Map<string, SyncRecord>();
+	const legacy = await db
+		.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_DOC)
+		.catch(() => null);
+	if (legacy?.records) for (const [p, r] of Object.entries(legacy.records)) map.set(p, r);
+	for (let b = 0; b < SYNC_STATE_BUCKETS; b++) {
+		const doc = await db
+			.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_PREFIX + b)
+			.catch(() => null);
+		if (doc?.records) for (const [p, r] of Object.entries(doc.records)) map.set(p, r);
+	}
+	return map;
+}
+
+/**
  * Build the index/drift report. Works WITHOUT a running session (reads the local
  * DB and the persisted sync record directly), and includes hidden files so the
  * settings view shows full transparency in every state.
@@ -102,17 +134,7 @@ export async function buildIndexReport(
 	db: SyncDatabase,
 	syncState?: Map<string, SyncRecord>
 ): Promise<IndexReport> {
-	const records =
-		syncState ??
-		new Map(
-			Object.entries(
-				(
-					await db
-						.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_DOC)
-						.catch(() => null)
-				)?.records ?? {}
-			)
-		);
+	const records = syncState ?? (await readSyncStateRecords(db));
 
 	const normal = app.vault.getFiles().map((f) => f.path);
 	const hidden = settings.syncHidden ? await listHidden(app) : [];
@@ -224,8 +246,12 @@ export class SyncEngine {
 	private suppress = new Set<string>();
 	/** per-device record of each file's last-synced mtime/size/hash */
 	private syncState = new Map<string, SyncRecord>();
+	/** shards touched since the last persist — only these get rewritten */
+	private dirtyStateBuckets = new Set<number>();
 	/** file docs we could not apply yet because some chunks were missing */
 	private pending = new Map<string, FileDoc>();
+	/** per-path count of consecutive heal (re-upload) attempts, to stop ping-pong */
+	private healAttempts = new Map<string, number>();
 	/** set when this session is being torn down; long loops bail out on it */
 	private aborted = false;
 	/** interval id for hidden-file polling (hidden files have no vault events) */
@@ -313,10 +339,9 @@ export class SyncEngine {
 
 		for (const path of paths) {
 			if (this.aborted) return;
-			if (this.suppress.has(path)) {
-				this.suppress.delete(path);
-				continue;
-			}
+			// Consume any echo token but still re-check below: a real change made in
+			// the debounce window must not be swallowed just because we recently wrote.
+			this.suppress.delete(path);
 			const st = await adapter.stat(path);
 			if (!st || st.type !== "file") continue;
 			const rec = this.syncState.get(path);
@@ -622,10 +647,11 @@ export class SyncEngine {
 
 	private async handleLocalUpsert(file: TFile): Promise<void> {
 		if (this.skip(file.path)) return;
-		if (this.suppress.has(file.path)) {
-			this.suppress.delete(file.path);
-			return;
-		}
+		// Consume any echo token but do NOT return on it alone: if the user edited the
+		// file inside the debounce window, its mtime/size differ from what we recorded,
+		// so isUnchanged is false and we must still push their edit. Our own writes are
+		// recognized as echoes by isUnchanged (recordSynced stored the written stat).
+		this.suppress.delete(file.path);
 		if (this.isUnchanged(file)) return;
 		try {
 			await this.pushFile(file);
@@ -661,8 +687,7 @@ export class SyncEngine {
 			deleted: true,
 		});
 		this.lastHash.delete(path);
-		this.syncState.delete(path);
-		this.saveStateSoon();
+		this.forgetSynced(path);
 	}
 
 	private async pushFile(file: TFile): Promise<void> {
@@ -707,15 +732,11 @@ export class SyncEngine {
 				binary = !looksLikeText(piece);
 				firstPiece = false;
 			}
-			const b64 = uint8ToBase64(piece);
-			const id = "h:" + (await sha256Hex(textToBytes((enc ? pass : "") + ":" + b64)));
+			// Content id over the RAW bytes, keyed with the passphrase when encrypting so
+			// the id never leaks the plaintext to someone without the passphrase.
+			const id = "h:" + (await sha256Hex(concatBytes([textToBytes((enc ? pass : "") + ":"), piece])));
 			children.push(id);
-			await this.db.putChunkIfAbsent({
-				_id: id,
-				type: "chunk",
-				enc,
-				data: enc ? await encryptString(b64, pass) : b64,
-			});
+			await this.db.putChunkIfAbsent(id, enc, enc ? await encryptBytes(piece, pass) : piece);
 			this.activeProgress.set(path, { done: children.length, total: Math.max(total, children.length) });
 			// for very large files, yield periodically so the UI/replication keep moving
 			if (children.length % 16 === 0) await this.yieldToUi();
@@ -723,10 +744,23 @@ export class SyncEngine {
 		const hash = cyrb53(children.join("|"));
 
 		const existing = await this.db.get(FILE_PREFIX + path);
-		if (existing && !existing.deleted && existing.hash === hash) {
-			// identical content already in the DB — adopt it, no upload, no conflict
+		if (
+			existing &&
+			!existing.deleted &&
+			stringArraysEqual(existing.children ?? [], children)
+		) {
+			// identical content already in the DB — adopt it, no upload, no conflict.
+			// NB: compare the content-addressed chunk id LIST directly, not the cyrb53
+			// `hash` — a hash collision would otherwise adopt genuinely different content
+			// and silently drop this device's version. The hash stays a cheap fingerprint
+			// for the drift UI only.
+			// If this path carries conflict leaves (two devices wrote byte-identical
+			// content, each making a rev), collapse them now so it stops showing red.
 			this.lastHash.set(path, hash);
 			this.recordSynced(path, mtime, size, hash);
+			if (Array.isArray(existing._conflicts) && existing._conflicts.length > 0) {
+				await this.dropLosingRevs(path);
+			}
 			return;
 		}
 
@@ -799,13 +833,16 @@ export class SyncEngine {
 				await this.app.fileManager.trashFile(existing);
 			}
 			this.lastHash.delete(path);
-			this.syncState.delete(path);
-			this.saveStateSoon();
+			this.forgetSynced(path);
+			this.healAttempts.delete(path);
 			return;
 		}
 
 		// nothing to do if we already hold this exact version
-		if (this.lastHash.get(path) === doc.hash) return;
+		if (this.lastHash.get(path) === doc.hash) {
+			this.healAttempts.delete(path);
+			return;
+		}
 
 		const children = Array.isArray(doc.children) ? doc.children : null;
 		if (!children) {
@@ -831,7 +868,23 @@ export class SyncEngine {
 				? await adapter.exists(path)
 				: this.app.vault.getAbstractFileByPath(path) instanceof TFile;
 			if (haveLocal) {
-				console.warn(`[couchdb-sync] healing ${path} by re-uploading (was: ${(e as Error).message})`);
+				const attempts = (this.healAttempts.get(path) ?? 0) + 1;
+				if (attempts > HEAL_MAX_ATTEMPTS) {
+					// Re-uploading is not converging — the local copy likely diverges from
+					// this doc (e.g. a genuine drift the pull can't materialize). Stop the
+					// ping-pong: defer it so a real edit, conflict resolution, or a manual
+					// action can settle it instead of looping forever.
+					console.warn(
+						`[couchdb-sync] giving up healing ${path} after ${HEAL_MAX_ATTEMPTS} attempts; deferring`
+					);
+					this.activeProgress.delete(path);
+					this.pending.set(doc._id, doc);
+					return;
+				}
+				this.healAttempts.set(path, attempts);
+				console.warn(
+					`[couchdb-sync] healing ${path} (attempt ${attempts}) by re-uploading (was: ${(e as Error).message})`
+				);
 				this.activeProgress.delete(path);
 				this.pending.delete(doc._id);
 				this.lastHash.delete(path);
@@ -845,7 +898,9 @@ export class SyncEngine {
 		} finally {
 			this.activeProgress.delete(path);
 		}
+		// applied cleanly -> clear pending + reset the heal backoff for this path
 		this.pending.delete(doc._id);
+		this.healAttempts.delete(path);
 	}
 
 	/** Force (re)sync of a single path: re-upload if local exists, else re-download. */
@@ -1089,8 +1144,7 @@ export class SyncEngine {
 		}
 		if (!removed) this.suppress.delete(path);
 		this.lastHash.delete(path);
-		this.syncState.delete(path);
-		this.saveStateSoon();
+		this.forgetSynced(path);
 	}
 
 	/** Delete a file everywhere: propagate a tombstone AND remove it locally now. */
@@ -1126,13 +1180,10 @@ export class SyncEngine {
 		let chunk = await this.db.getChunkLocal(id);
 		if (!chunk) {
 			chunk = await this.db.getChunkRemote(id);
-			if (chunk) await this.db.putChunkIfAbsent(chunk); // cache locally
+			if (chunk) await this.db.putChunkIfAbsent(id, chunk.enc, chunk.bytes); // cache locally
 		}
 		if (!chunk) throw new Error(`missing chunk ${id}`);
-		const b64 = chunk.enc
-			? await decryptString(chunk.data, this.settings.passphrase)
-			: chunk.data;
-		return base64ToUint8(b64);
+		return chunk.enc ? await decryptBytes(chunk.bytes, this.settings.passphrase) : chunk.bytes;
 	}
 
 	/** Desktop: write a binary file chunk-by-chunk to a temp file, then rename in. */
@@ -1259,14 +1310,7 @@ export class SyncEngine {
 			const revs = [doc._rev!, ...(doc._conflicts ?? [])];
 			const cands = await Promise.all(revs.map((r) => this.db.getRev(doc._id, r)));
 
-			let winner: FileDoc | undefined;
-			if (this.settings.conflictStrategy === "master" && masterId) {
-				winner = cands.find((c) => c.deviceId === masterId);
-			}
-			// fallback (and the "newest" strategy): largest mtime wins
-			if (!winner) {
-				winner = cands.slice().sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0))[0];
-			}
+			const winner = pickConflictWinner(cands, this.settings.conflictStrategy, masterId);
 
 			// force the winner's body onto the current winning revision...
 			await this.db.put({ ...winner, _id: doc._id, _rev: doc._rev });
@@ -1278,6 +1322,28 @@ export class SyncEngine {
 			await this.applyRemoteChange({ ...winner, _rev: undefined });
 		}
 		this.setStatus(SYNC_STATE.SYNCED, `Resolved ${conflicted.length} conflict(s).`);
+	}
+
+	/**
+	 * Resolve all current conflicts by the configured strategy WITHOUT a running
+	 * session. Loads the per-device sync state up front so that materializing the
+	 * winners (which calls recordSynced) cannot overwrite the persisted state map
+	 * with a near-empty one, and flushes the state at the end. Safe to run on a
+	 * transient engine bound to the shared DB handle. Returns the number of file
+	 * docs that were conflicted going in (0 if none).
+	 */
+	async resolveConflictsStandalone(): Promise<number> {
+		await this.loadSyncState();
+		let n: number;
+		try {
+			n = (await this.db.getConflicted()).length;
+		} catch {
+			return 0;
+		}
+		if (n === 0) return 0;
+		await this.resolveConflicts();
+		await this.persistSyncState();
+		return n;
 	}
 
 	// --- master coordination ----------------------------------------------
@@ -1307,25 +1373,60 @@ export class SyncEngine {
 
 	// --- per-device sync state --------------------------------------------
 
+	/** Which shard a path's record lives in. Low bits of cyrb53 → even spread. */
+	private bucketOf(path: string): number {
+		const h = cyrb53(path);
+		return parseInt(h.slice(-8) || "0", 16) % SYNC_STATE_BUCKETS;
+	}
+
 	private recordSynced(path: string, mtime: number, size: number, hash: string): void {
 		this.syncState.set(path, { mtime, size, hash });
+		this.dirtyStateBuckets.add(this.bucketOf(path));
+		this.saveStateSoon();
+	}
+
+	/** Forget a path's synced record (on delete) and mark its shard for rewrite. */
+	private forgetSynced(path: string): void {
+		this.syncState.delete(path);
+		this.dirtyStateBuckets.add(this.bucketOf(path));
 		this.saveStateSoon();
 	}
 
 	private async loadSyncState(): Promise<void> {
-		const doc = await this.db
+		const legacy = await this.db
 			.getLocalDoc<{ records?: Record<string, SyncRecord> }>(SYNC_STATE_DOC)
 			.catch(() => null);
-		this.syncState = new Map(Object.entries(doc?.records ?? {}));
+		this.syncState = await readSyncStateRecords(this.db);
+		this.dirtyStateBuckets.clear();
+		// One-time migration: if the legacy single doc still holds data, re-shard every
+		// path and blank the legacy doc so it is never migrated again.
+		if (legacy?.records && Object.keys(legacy.records).length > 0) {
+			for (const p of this.syncState.keys()) this.dirtyStateBuckets.add(this.bucketOf(p));
+			await this.persistSyncState();
+			await this.db.putLocalDoc(SYNC_STATE_DOC, { records: {} }).catch(() => undefined);
+		}
 	}
 
 	private async persistSyncState(): Promise<void> {
 		if (this.aborted) return; // DB may be closing/destroyed during teardown
+		if (this.dirtyStateBuckets.size === 0) return; // nothing changed
+		const buckets = [...this.dirtyStateBuckets];
+		this.dirtyStateBuckets.clear();
+		// Group the current records for the dirty shards only (in-memory scan is cheap;
+		// the win is writing ~N/64 records to IDB instead of the whole map every time).
+		const byBucket = new Map<number, Record<string, SyncRecord>>();
+		for (const b of buckets) byBucket.set(b, {});
+		for (const [path, rec] of this.syncState) {
+			const g = byBucket.get(this.bucketOf(path));
+			if (g) g[path] = rec;
+		}
 		try {
-			await this.db.putLocalDoc(SYNC_STATE_DOC, {
-				records: Object.fromEntries(this.syncState),
-			});
+			for (const [b, records] of byBucket) {
+				await this.db.putLocalDoc(SYNC_STATE_PREFIX + b, { records });
+			}
 		} catch (e) {
+			// Put the shards back on the dirty list so the next flush retries them.
+			for (const b of buckets) this.dirtyStateBuckets.add(b);
 			if (!this.aborted) console.warn("[couchdb-sync] could not persist sync state", e);
 		}
 	}

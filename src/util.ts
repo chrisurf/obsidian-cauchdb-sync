@@ -1,3 +1,31 @@
+import type { ConflictStrategy } from "./types";
+
+/** True when two string arrays have the same length and equal elements in order. */
+export function stringArraysEqual(a: string[], b: string[]): boolean {
+	if (a === b) return true;
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
+}
+
+/**
+ * Decide which candidate revision wins a conflict, by the configured strategy.
+ * "master": the master device's revision wins if present; otherwise fall back to
+ * newest. "newest" (and every fallback): the largest mtime wins. Pure so it can be
+ * unit-tested without a database. `cands` must be non-empty.
+ */
+export function pickConflictWinner<T extends { deviceId?: string; mtime?: number }>(
+	cands: T[],
+	strategy: ConflictStrategy,
+	masterId: string | null
+): T {
+	if (strategy === "master" && masterId) {
+		const m = cands.find((c) => c.deviceId === masterId);
+		if (m) return m;
+	}
+	return cands.slice().sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0))[0];
+}
+
 /** Fast, non-cryptographic 53-bit string hash (cyrb53) for echo detection. */
 export function cyrb53(str: string, seed = 0): string {
 	let h1 = 0xdeadbeef ^ seed;

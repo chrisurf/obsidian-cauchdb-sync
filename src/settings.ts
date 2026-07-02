@@ -136,7 +136,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					const db = new SyncDatabase(s, "couchdb-sync-test-probe");
 					const res = await db.testConnection();
 					new Notice(res.message, res.ok ? 4000 : 8000);
-					await db.close();
+					// The probe only needs the remote; destroy the throwaway local replica
+					// instead of leaving an empty PouchDB behind on every Test click.
+					await db.destroyLocal().catch(() => undefined);
 					if (res.ok) {
 						await this.plugin.markConnectionVerified();
 						this.driftSig = ""; // force the index view to refresh
@@ -149,7 +151,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("End-to-end encryption")
-			.setDesc("Encrypt note content at rest on the server (AES-256-GCM). Recommended; on by default.")
+			.setDesc("Encrypt note content at rest on the server (AES-256-GCM). Recommended; on by default. Note: file paths, sizes and timestamps stay unencrypted (metadata is not hidden from the server).")
 			.addToggle((t) =>
 				t.setValue(s.e2eeEnabled).onChange(async (v) => {
 					s.e2eeEnabled = v;

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { stringArraysEqual } from "../src/util";
 import {
 	cyrb53,
 	arrayBufferToBase64,
@@ -244,5 +245,23 @@ describe("diffLines", () => {
 		const hunks = diffLines("a\nb", "x\ny");
 		const changes = hunks.filter((h) => h.type === "change");
 		expect(changes.length).toBeGreaterThan(0);
+	});
+});
+
+describe("stringArraysEqual", () => {
+	it("equal arrays (same order) → true", () => {
+		expect(stringArraysEqual(["h:a", "h:b"], ["h:a", "h:b"])).toBe(true);
+	});
+	it("both empty → true", () => {
+		expect(stringArraysEqual([], [])).toBe(true);
+	});
+	it("different length → false", () => {
+		expect(stringArraysEqual(["h:a"], ["h:a", "h:b"])).toBe(false);
+	});
+	it("same length, different element → false (the collision guard)", () => {
+		expect(stringArraysEqual(["h:a", "h:b"], ["h:a", "h:c"])).toBe(false);
+	});
+	it("order matters → false", () => {
+		expect(stringArraysEqual(["h:a", "h:b"], ["h:b", "h:a"])).toBe(false);
 	});
 });

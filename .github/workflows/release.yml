@@ -20,6 +20,16 @@ jobs:
           node-version: 22
           cache: "npm"
 
+      - name: Verify tag matches manifest version
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          manifest_version="$(node -p "require('./manifest.json').version")"
+          if [ "$tag" != "$manifest_version" ]; then
+            echo "::error::Tag ($tag) does not match manifest.json version ($manifest_version). Bump the version (npm version <patch|minor|major>) and re-tag."
+            exit 1
+          fi
+          echo "Tag $tag matches manifest.json version."
+
       - name: Build plugin
         run: |
           npm ci
