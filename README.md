@@ -1,9 +1,13 @@
 # CouchDB Sync for Obsidian
 
-Simple, reliable, **end-to-end encrypted** live synchronization of your Obsidian vault against a
-self-hosted **CouchDB** server. A deliberately minimal alternative to the (excellent but very
-complex) [obsidian-livesync](https://github.com/vrtmrz/obsidian-livesync) — CouchDB only, a handful
-of settings, and **no pop-ups**.
+Simple, reliable live synchronization of your Obsidian vault against a self-hosted **CouchDB**
+server, with **end-to-end encrypted note content**. A deliberately minimal alternative to the
+(excellent but very complex) [obsidian-livesync](https://github.com/vrtmrz/obsidian-livesync) —
+CouchDB only, a handful of settings, and **no pop-ups**.
+
+> **Encryption scope:** note *content* is encrypted end-to-end; file **paths, sizes and
+> timestamps are not**. See [Security model](#security-model) for exactly what is and isn't
+> protected.
 
 > **Status (June 2026): working MVP, validated on desktop.** A vault (incl. large audio/`.lpf`
 > files) syncs cleanly and reliably into CouchDB on a single desktop device. Multi-device sync
@@ -26,8 +30,10 @@ plain-language UX.
 - 🧩 **Chunked, streaming storage** — files of any size (images, PDFs, audio, video) are split into
   1 MiB content-addressed chunks. Reads and writes stream to/from disk, so a 600 MB file never sits
   in memory; unchanged chunks are reused.
-- 🔐 **End-to-end encryption on by default** — AES-256-GCM at rest (PBKDF2-derived key), TLS in
-  transit. Only the passphrase must match across devices; it never touches the server.
+- 🔐 **End-to-end content encryption on by default** — note **content** is encrypted at rest with
+  AES-256-GCM (PBKDF2-derived key, 210k iterations), TLS in transit. The passphrase never touches the
+  server and must match across devices. File **paths, sizes and timestamps are stored in clear**
+  (metadata is not encrypted) — see [Security model](#security-model).
 - ⚖️ **No-prompt conflict resolution**: *newest version wins* or *master device wins*.
 - 📊 **Full-transparency index status** — at a glance: how many of your files are in sync (`X / Y`,
   with %), and a collapsible **Sync state** tree of every file across this device *and* the server,
@@ -80,6 +86,38 @@ are deliberate:
   operation forever. Recovery is always reachable.
 - **Single clean version.** No migration/back-compat cruft while in active development.
 
+## Security model
+
+Be precise about what "end-to-end encrypted" means here, so you can decide whether it fits your
+threat model:
+
+**Encrypted (unreadable to the server or anyone with the CouchDB data):**
+
+- **Note content.** Every chunk's bytes are encrypted with AES-256-GCM before upload. The key is
+  derived from your passphrase via PBKDF2-SHA-256 (210k iterations) with a random per-message salt
+  and IV. The passphrase is never sent to the server. TLS protects everything in transit.
+
+**NOT encrypted (visible to anyone who can read the CouchDB database):**
+
+- **File paths / names** — document ids are `f:<vault path>` in clear.
+- **File sizes, and modification/creation timestamps.**
+- **Which chunks a file is made of**, and that two files/versions share identical chunks
+  (content-addressed dedup is visible as repeated chunk ids). The chunk id is a *keyed* hash
+  (includes the passphrase), so it does **not** leak the plaintext to someone without the passphrase.
+- **Device ids** and the *master device* marker.
+
+**On this device:**
+
+- The local cache (PouchDB/IndexedDB) stores those same **unencrypted metadata** (paths, sizes,
+  hashes). Turn on **“Forget local cache when plugin is disabled”** to destroy it on disable.
+- Your **passphrase and CouchDB password are stored in clear** in the plugin's `data.json`
+  (`.obsidian/plugins/couchdb-sync/data.json`) — as with essentially every Obsidian plugin that
+  holds credentials. `data.json` is never synced, and “Forget local cache” does **not** remove it.
+  Protect it with full-disk encryption, and rotate credentials if the file was ever exposed.
+
+If you need file **paths** hidden from the server too, this plugin is not yet the right fit (path
+obfuscation is a possible future addition).
+
 ## Configuration
 
 1. Set **Server URL** (use `https://`), **Database name**, **Username**, **Password** → *Test*.
@@ -109,7 +147,8 @@ requests through Obsidian's native HTTP, so CORS issues are largely avoided rega
 
 - ✅ Core PouchDB ↔ CouchDB live + one-shot sync, CORS-free via `requestUrl`.
 - ✅ Per-file documents keyed by path + content-addressed chunks; streaming read/write (any size).
-- ✅ End-to-end encryption (AES-256-GCM) on by default.
+- ✅ End-to-end **content** encryption (AES-256-GCM) on by default (metadata/paths in clear — see
+  [Security model](#security-model)).
 - ✅ No-prompt conflict resolution (newest-wins / master-wins).
 - ✅ Memory-safe pipeline: small-files-first, background indexing, bounded replication batches,
   range-bounded DB scans (no whole-DB loads).
