@@ -9,7 +9,7 @@ import {
 	debounce,
 } from "obsidian";
 import { SyncDatabase } from "./database";
-import { decryptString, encryptString } from "./crypto";
+import { decryptBytes, encryptBytes } from "./crypto";
 import {
 	CHUNK_SIZE,
 	CouchDBSyncSettings,
@@ -23,7 +23,6 @@ import {
 	VersionDoc,
 } from "./types";
 import {
-	base64ToUint8,
 	bytesToText,
 	concatBytes,
 	cyrb53,
@@ -35,7 +34,6 @@ import {
 	splitBytes,
 	stringArraysEqual,
 	textToBytes,
-	uint8ToBase64,
 } from "./util";
 
 const MASTER_INFO_ID = "couchdb-sync:masterinfo";
@@ -734,15 +732,11 @@ export class SyncEngine {
 				binary = !looksLikeText(piece);
 				firstPiece = false;
 			}
-			const b64 = uint8ToBase64(piece);
-			const id = "h:" + (await sha256Hex(textToBytes((enc ? pass : "") + ":" + b64)));
+			// Content id over the RAW bytes, keyed with the passphrase when encrypting so
+			// the id never leaks the plaintext to someone without the passphrase.
+			const id = "h:" + (await sha256Hex(concatBytes([textToBytes((enc ? pass : "") + ":"), piece])));
 			children.push(id);
-			await this.db.putChunkIfAbsent({
-				_id: id,
-				type: "chunk",
-				enc,
-				data: enc ? await encryptString(b64, pass) : b64,
-			});
+			await this.db.putChunkIfAbsent(id, enc, enc ? await encryptBytes(piece, pass) : piece);
 			this.activeProgress.set(path, { done: children.length, total: Math.max(total, children.length) });
 			// for very large files, yield periodically so the UI/replication keep moving
 			if (children.length % 16 === 0) await this.yieldToUi();
@@ -1186,13 +1180,10 @@ export class SyncEngine {
 		let chunk = await this.db.getChunkLocal(id);
 		if (!chunk) {
 			chunk = await this.db.getChunkRemote(id);
-			if (chunk) await this.db.putChunkIfAbsent(chunk); // cache locally
+			if (chunk) await this.db.putChunkIfAbsent(id, chunk.enc, chunk.bytes); // cache locally
 		}
 		if (!chunk) throw new Error(`missing chunk ${id}`);
-		const b64 = chunk.enc
-			? await decryptString(chunk.data, this.settings.passphrase)
-			: chunk.data;
-		return base64ToUint8(b64);
+		return chunk.enc ? await decryptBytes(chunk.bytes, this.settings.passphrase) : chunk.bytes;
 	}
 
 	/** Desktop: write a binary file chunk-by-chunk to a temp file, then rename in. */

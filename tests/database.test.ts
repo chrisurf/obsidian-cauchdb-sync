@@ -44,7 +44,7 @@ describe("SyncDatabase.getAll — range query never loads chunks/history", () =>
 		await db.put(fileDoc("a.md"));
 		await db.put(fileDoc("b.md"));
 		// a chunk doc (h:) — must NEVER be returned by getAll (the old OOM source)
-		await db.putChunkIfAbsent({ _id: "h:aaa", type: "chunk", enc: false, data: "AAA" });
+		await db.putChunkIfAbsent("h:aaa", false, new Uint8Array([1, 2, 3]));
 		// a history doc (H:) — sorts before f:, must also be excluded
 		await (db.local as unknown as PouchDB.Database).put({
 			_id: "H:a.md\n000000000001000\nabc",
@@ -106,12 +106,26 @@ describe("SyncDatabase.getConflicted", () => {
 	});
 });
 
-describe("SyncDatabase chunk storage", () => {
-	it("putChunkIfAbsent is idempotent and never throws on a duplicate", async () => {
-		await db.putChunkIfAbsent({ _id: "h:dup", type: "chunk", enc: false, data: "one" });
-		await db.putChunkIfAbsent({ _id: "h:dup", type: "chunk", enc: false, data: "two" });
+describe("SyncDatabase chunk storage (attachments)", () => {
+	it("round-trips raw chunk bytes through an attachment", async () => {
+		const bytes = new Uint8Array([9, 8, 7, 6, 5, 0, 255, 128]);
+		await db.putChunkIfAbsent("h:rt", false, bytes);
+		const c = await db.getChunkLocal("h:rt");
+		expect(c?.enc).toBe(false);
+		expect(Array.from(c!.bytes)).toEqual(Array.from(bytes));
+	});
+
+	it("putChunkIfAbsent is idempotent and never throws on a duplicate (first write wins)", async () => {
+		await db.putChunkIfAbsent("h:dup", false, new Uint8Array([1]));
+		await db.putChunkIfAbsent("h:dup", false, new Uint8Array([2]));
 		const c = await db.getChunkLocal("h:dup");
-		expect(c?.data).toBe("one"); // first write wins; immutable
+		expect(Array.from(c!.bytes)).toEqual([1]); // immutable — original kept
+	});
+
+	it("preserves the enc flag", async () => {
+		await db.putChunkIfAbsent("h:enc", true, new Uint8Array([42, 42]));
+		const c = await db.getChunkLocal("h:enc");
+		expect(c?.enc).toBe(true);
 	});
 
 	it("getChunkLocal returns null for a missing chunk", async () => {

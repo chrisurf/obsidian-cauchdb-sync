@@ -100,6 +100,56 @@ export async function decryptString(payload: string, passphrase: string): Promis
 	}
 }
 
+/**
+ * Encrypt raw bytes and return a single binary blob laid out as
+ *   salt(16) || iv(12) || ciphertext(+GCM tag)
+ * Used for chunk payloads stored as CouchDB attachments — no base64 wrapping, so
+ * the stored size is ~the plaintext size instead of the old base64-of-encrypt-of-
+ * base64 (~1.77x) format.
+ */
+export async function encryptBytes(plain: Uint8Array, passphrase: string): Promise<Uint8Array> {
+	if (!passphrase) throw new Error("Cannot encrypt: passphrase is empty");
+	const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+	const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+	const key = await deriveKey(passphrase, salt);
+	const cipher = new Uint8Array(
+		await crypto.subtle.encrypt(
+			{ name: "AES-GCM", iv: iv as unknown as BufferSource },
+			key,
+			plain as unknown as BufferSource
+		)
+	);
+	const out = new Uint8Array(salt.length + iv.length + cipher.length);
+	out.set(salt, 0);
+	out.set(iv, salt.length);
+	out.set(cipher, salt.length + iv.length);
+	return out;
+}
+
+/** Inverse of encryptBytes. Throws a clear error on a wrong passphrase / corrupt blob. */
+export async function decryptBytes(blob: Uint8Array, passphrase: string): Promise<Uint8Array> {
+	if (!passphrase) throw new Error("Cannot decrypt: passphrase is empty");
+	if (blob.length < SALT_BYTES + IV_BYTES + 16) {
+		throw new Error("Invalid encrypted chunk (too short)");
+	}
+	const salt = blob.subarray(0, SALT_BYTES);
+	const iv = blob.subarray(SALT_BYTES, SALT_BYTES + IV_BYTES);
+	const cipher = blob.subarray(SALT_BYTES + IV_BYTES);
+	const key = await deriveKey(passphrase, salt);
+	try {
+		const plain = await crypto.subtle.decrypt(
+			{ name: "AES-GCM", iv: iv as unknown as BufferSource },
+			key,
+			cipher as unknown as BufferSource
+		);
+		return new Uint8Array(plain);
+	} catch {
+		throw new Error(
+			"Decryption failed. The passphrase is most likely different from the device that wrote this note."
+		);
+	}
+}
+
 /** Verify a passphrase can round-trip (used by the settings "test" button). */
 export async function selfTest(passphrase: string): Promise<boolean> {
 	const sample = "couchdb-sync-selftest";

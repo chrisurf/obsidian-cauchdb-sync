@@ -220,19 +220,26 @@ export interface VersionDoc {
 	note?: string;
 }
 
+/** Attachment name under which a chunk's (possibly encrypted) raw bytes are stored. */
+export const CHUNK_ATTACHMENT = "b";
+
 /**
  * A content-addressed chunk. `_id` is "h:" + a hash of the chunk, so identical
  * content always maps to the same document and is stored once. Chunks are
  * immutable (never updated), which means they never produce sync conflicts.
+ *
+ * The chunk bytes live in a CouchDB **attachment** (named CHUNK_ATTACHMENT), not
+ * inline as base64 — so CouchDB stores them binary (no ~1.77x base64-of-encrypt-of-
+ * base64 bloat) and large chunks never sit in the document body.
  */
 export interface ChunkDoc {
 	_id: string;
 	_rev?: string;
 	type: "chunk";
-	/** true when `data` is encrypted */
+	/** true when the attachment bytes are AES-256-GCM encrypted (encryptBytes layout) */
 	enc: boolean;
-	/** base64 of the raw chunk bytes, encrypted when enc=true */
-	data: string;
+	/** the raw/encrypted bytes live in _attachments[CHUNK_ATTACHMENT] */
+	_attachments?: Record<string, unknown>;
 }
 
 /** Per-device record of the last successfully synced state of a file (not replicated). */
