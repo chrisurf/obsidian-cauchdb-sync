@@ -1,6 +1,16 @@
 export type ConflictStrategy = "master" | "newest";
 
+/**
+ * Settings schema version. Bumped whenever the persisted shape changes in a way
+ * that needs a one-time migration (see `migrateSettings` in main.ts). Fresh
+ * installs are stamped with the current version and skip migration.
+ */
+export const CURRENT_SETTINGS_VERSION = 1;
+
 export interface CouchDBSyncSettings {
+	/** persisted settings schema version; drives one-time migrations */
+	schemaVersion: number;
+
 	/** e.g. https://couch.example.com:6984 */
 	serverUrl: string;
 	/** remote database name */
@@ -90,7 +100,30 @@ export interface CouchDBSyncSettings {
 	forgetCacheOnDisable: boolean;
 }
 
+/**
+ * Hidden paths that are excluded BY DEFAULT (safe baseline). Kept as a named
+ * constant so the one-time settings migration can re-union them into an existing
+ * config that predates a given entry — e.g. a config that never had `.git/` or
+ * `.obsidian/` in its blacklist would otherwise sync a whole git repo. Users can
+ * still opt any of these back IN by removing the line (or whitelisting via
+ * hiddenInclude); the migration only runs once per schema bump, so a deliberate
+ * later removal is respected.
+ */
+export const DEFAULT_HIDDEN_EXCLUDE: string[] = [
+	".obsidian/",
+	".git/",
+	".trash/",
+	".DS_Store",
+	"node_modules/",
+	".claude/",
+	"tmp/",
+	".obsidian/workspace.json",
+	".obsidian/workspace-mobile.json",
+	".obsidian/cache",
+];
+
 export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
+	schemaVersion: CURRENT_SETTINGS_VERSION,
 	serverUrl: "",
 	dbName: "obsidian",
 	username: "",
@@ -105,18 +138,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	autoStart: true,
 	syncHidden: false,
 	// when hidden sync is ON, keep these volatile/risky hidden paths out
-	hiddenExclude: [
-		".obsidian/",
-		".git/",
-		".trash/",
-		".DS_Store",
-		"node_modules/",
-		".claude/",
-		"tmp/",
-		".obsidian/workspace.json",
-		".obsidian/workspace-mobile.json",
-		".obsidian/cache",
-	],
+	hiddenExclude: [...DEFAULT_HIDDEN_EXCLUDE],
 	// when hidden sync is OFF, sync nothing hidden by default
 	hiddenInclude: [],
 	keepHistory: 50,
@@ -198,19 +220,26 @@ export interface VersionDoc {
 	note?: string;
 }
 
+/** Attachment name under which a chunk's (possibly encrypted) raw bytes are stored. */
+export const CHUNK_ATTACHMENT = "b";
+
 /**
  * A content-addressed chunk. `_id` is "h:" + a hash of the chunk, so identical
  * content always maps to the same document and is stored once. Chunks are
  * immutable (never updated), which means they never produce sync conflicts.
+ *
+ * The chunk bytes live in a CouchDB **attachment** (named CHUNK_ATTACHMENT), not
+ * inline as base64 — so CouchDB stores them binary (no ~1.77x base64-of-encrypt-of-
+ * base64 bloat) and large chunks never sit in the document body.
  */
 export interface ChunkDoc {
 	_id: string;
 	_rev?: string;
 	type: "chunk";
-	/** true when `data` is encrypted */
+	/** true when the attachment bytes are AES-256-GCM encrypted (encryptBytes layout) */
 	enc: boolean;
-	/** base64 of the raw chunk bytes, encrypted when enc=true */
-	data: string;
+	/** the raw/encrypted bytes live in _attachments[CHUNK_ATTACHMENT] */
+	_attachments?: Record<string, unknown>;
 }
 
 /** Per-device record of the last successfully synced state of a file (not replicated). */

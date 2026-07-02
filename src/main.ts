@@ -2,12 +2,14 @@ import { Notice, Plugin, setIcon } from "obsidian";
 import PouchDB from "pouchdb-browser";
 import {
 	CouchDBSyncSettings,
+	CURRENT_SETTINGS_VERSION,
 	DEFAULT_SETTINGS,
 	SYNC_STATE,
 	SyncState,
 	SyncStatus,
 	VersionDoc,
 } from "./types";
+import { migrateSettings } from "./migrate";
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
@@ -55,6 +57,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 	settings!: CouchDBSyncSettings;
 	private db: SyncDatabase | null = null;
 	private engine: SyncEngine | null = null;
+	/** de-dupes concurrent idle index reports (the 3s settings + 5s drift timers) */
+	private idleReportInFlight: Promise<IndexReport | null> | null = null;
+	/** guards the idle auto-resolver so overlapping refresh ticks don't stack it */
+	private resolvingIdle = false;
+	/** cached legacy-cache doc count (probed at most once per session) */
+	private legacyDocCountCache: number | null = null;
 	private statusEl!: HTMLElement;
 	private statusIconEl!: HTMLElement;
 	private statusTextEl!: HTMLElement;
@@ -152,15 +160,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
+		// Drain any in-flight idle index report before touching the shared handle.
+		if (this.idleReportInFlight) await this.idleReportInFlight.catch(() => undefined);
 		// Privacy mode: destroy the local PouchDB before closing so the cached
 		// metadata is not left behind when the plugin is disabled. Must run
 		// BEFORE close() (destroy on a closed handle is a no-op in PouchDB).
-		// If no sync session ever ran this Obsidian session, this.db is null,
-		// so we open a fresh handle just for destruction.
 		if (this.settings.forgetCacheOnDisable) {
-			const dbToWipe = this.db ?? new SyncDatabase(this.settings, localDbName(this.settings));
 			try {
-				await dbToWipe.destroyLocal();
+				await this.getSharedDb().destroyLocal();
 			} catch (e) {
 				console.warn("[couchdb-sync] forget-on-disable failed", e);
 			}
@@ -257,6 +264,22 @@ export default class CouchDBSyncPlugin extends Plugin {
 				const total = report.inSync.length + drift;
 				const pct = total === 0 ? 100 : Math.round((report.inSync.length / total) * 100);
 				this.effectiveDrift = { drift, pct };
+
+				// Idle auto-resolve: when no session is running but the DB still holds
+				// unresolved conflicts, clear them by the configured strategy so they
+				// don't sit red forever waiting for the next full "Sync now". Guarded so
+				// overlapping 5s/3s ticks never stack it.
+				if (!this.engine && report.conflicts.length > 0 && !this.resolvingIdle) {
+					this.resolvingIdle = true;
+					void this.resolveConflictsIdle()
+						.then((n) => {
+							if (n > 0) void this.refreshDriftSummary();
+						})
+						.catch((e) => console.warn("[couchdb-sync] idle conflict resolve failed", e))
+						.finally(() => {
+							this.resolvingIdle = false;
+						});
+				}
 			}
 		} catch {
 			// silent: keep whatever we had — the next tick will retry
@@ -297,9 +320,9 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private async doRestart(mode: "sync" | "download" = "sync"): Promise<void> {
 		if (this.getEmergencyRemaining() > 0) return;
 		this.engine?.stop();
-		await this.db?.close().catch(() => undefined);
 		this.engine = null;
-		this.db = null;
+		// Keep the shared local DB handle OPEN across restarts (see getSharedDb): the
+		// engine and idle readers share ONE handle, so it must never be closed here.
 
 		if (!this.settings.serverUrl || !this.settings.username) {
 			this.setStatus(SYNC_STATE.IDLE);
@@ -318,7 +341,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.settings.unsafeShutdown = true;
 		await this.saveSettings();
 
-		const db = new SyncDatabase(this.settings, localDbName(this.settings));
+		const db = this.getSharedDb();
 		const engine = new SyncEngine(
 			this.app,
 			db,
@@ -326,7 +349,6 @@ export default class CouchDBSyncPlugin extends Plugin {
 			(s, d) => this.setStatus(s, d),
 			() => void this.markCleanState() // initial index finished -> disarm guard
 		);
-		this.db = db;
 		this.engine = engine;
 		try {
 			if (mode === "download") await engine.startDownloadOnly();
@@ -380,40 +402,24 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * the previous remote's filenames).
 	 */
 	async checkOriginFingerprint(): Promise<"match" | "mismatch" | "unset"> {
-		// CRITICAL: when a sync session is running, reuse its open SyncDatabase
-		// instead of opening a second one. PouchDB caches its browser-side
-		// IndexedDB connection per database name, so two `new SyncDatabase(...)`
-		// calls with the same local name share ONE underlying IDBDatabase. If we
-		// then `close()` our temporary one in the finally block, we tear down
-		// the engine's connection too — and the next allDocs() throws
-		// "Failed to execute 'transaction' on 'IDBDatabase': The database
-		// connection is closing." Only open (and close) our own handle when the
-		// engine is idle and no shared connection exists.
-		const shared = this.db;
-		const db = shared ?? new SyncDatabase(this.settings, localDbName(this.settings));
-		try {
-			const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
-			if (!stored || !stored.fp) return "unset";
-			const current = await originFingerprint(this.settings);
-			return stored.fp === current ? "match" : "mismatch";
-		} finally {
-			if (!shared) await db.close().catch(() => undefined);
-		}
+		// One shared, always-open handle (getSharedDb) is used by the engine and all
+		// idle readers alike, so there is no second connection to close out from under
+		// a pending transaction (the old IDBDatabase "connection is closing" bug).
+		const stored = await this.getSharedDb()
+			.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC)
+			.catch(() => null);
+		if (!stored || !stored.fp) return "unset";
+		const current = await originFingerprint(this.settings);
+		return stored.fp === current ? "match" : "mismatch";
 	}
 
 	/** Stamp the current origin fingerprint into the cache so we recognize it later. */
 	async stampOriginFingerprint(): Promise<void> {
-		// Same shared-connection rule as checkOriginFingerprint above — without
-		// this, markCleanState() would close the engine's PouchDB.
-		const shared = this.db;
-		const db = shared ?? new SyncDatabase(this.settings, localDbName(this.settings));
 		try {
 			const fp = await originFingerprint(this.settings);
-			await db.putLocalDoc(ORIGIN_FP_DOC, { fp });
+			await this.getSharedDb().putLocalDoc(ORIGIN_FP_DOC, { fp });
 		} catch (e) {
 			console.warn("[couchdb-sync] could not stamp origin fingerprint", e);
-		} finally {
-			if (!shared) await db.close().catch(() => undefined);
 		}
 	}
 
@@ -427,10 +433,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 			.catch(() => undefined)
 			.then(async () => {
 				this.engine?.stop();
-				const db = this.db ?? new SyncDatabase(this.settings, localDbName(this.settings));
-				await db.destroyLocal().catch(() => undefined);
 				this.engine = null;
+				// Drain any in-flight idle report so we don't destroy the DB out from
+				// under a pending read, then destroy and drop the handle. getSharedDb()
+				// re-opens a fresh empty replica on the next read.
+				if (this.idleReportInFlight) await this.idleReportInFlight.catch(() => undefined);
+				await this.getSharedDb().destroyLocal().catch(() => undefined);
 				this.db = null;
+				this.idleReportInFlight = null;
 				this.setStatus(SYNC_STATE.IDLE, "local cache wiped — press Sync now to re-download");
 			});
 		return this.restartLock;
@@ -446,9 +456,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 			.catch(() => undefined)
 			.then(async () => {
 				this.engine?.stop();
-				await this.db?.close().catch(() => undefined);
 				this.engine = null;
-				this.db = null;
+				// keep the shared DB handle open so the idle index view still works
 				this.settings.liveSync = false;
 				this.settings.autoStart = false;
 				await this.saveSettings();
@@ -470,9 +479,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 			.catch(() => undefined)
 			.then(async () => {
 				this.engine?.stop();
-				await this.db?.close().catch(() => undefined);
 				this.engine = null;
-				this.db = null;
+				// keep the shared DB handle open (idle reads); only the engine pauses
 				this.setStatus(SYNC_STATE.PAUSED, `emergency stop (${seconds}s)`);
 			});
 		this.emergencyTimer = setTimeout(() => {
@@ -498,6 +506,20 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	/**
+	 * The single shared local DB handle. Opened lazily and kept OPEN for the whole
+	 * plugin lifetime (closed only on unload, destroyed only on wipe). The engine AND
+	 * every idle reader use THIS one handle, so we never open a second PouchDB with
+	 * the same name and then close it out from under a pending transaction — which was
+	 * the root cause of "Failed to execute 'transaction' on 'IDBDatabase': The database
+	 * connection is closing." Concurrent reads on one handle are safe; it was the
+	 * per-call open/close pairs racing across the 3s and 5s timers that broke.
+	 */
+	private getSharedDb(): SyncDatabase {
+		if (!this.db) this.db = new SyncDatabase(this.settings, localDbName(this.settings));
+		return this.db;
+	}
+
+	/**
 	 * Index/drift report for the settings view. Works even when sync is idle: if no
 	 * session is running, it reads the local DB directly so the user always sees the
 	 * full picture (counts, percentage, file tree — including hidden files).
@@ -509,21 +531,25 @@ export default class CouchDBSyncPlugin extends Plugin {
 		// they own the configured remote — otherwise typing random text into the
 		// URL field is enough to inspect anything the local cache happens to hold.
 		if (!this.settings.connectionVerified) return null;
-		// ONE open/close per call: the origin check and the doc scan must share
-		// the same SyncDatabase handle. Opening two in series would still share
-		// the underlying IDB connection (PouchDB caches by name), and closing the
-		// first can leave the second's pending transactions in a "connection is
-		// closing" state — exactly the IDBDatabase error users saw before.
-		const db = new SyncDatabase(this.settings, localDbName(this.settings));
-		try {
+		// De-dupe overlapping idle reports: the 3s settings timer and the 5s drift
+		// timer can fire together. Sharing one in-flight promise (on top of the one
+		// shared, always-open DB handle from getSharedDb) means there is never a
+		// second PouchDB opened/closed on the same name — no IDBDatabase race.
+		if (this.idleReportInFlight) return this.idleReportInFlight;
+		const p = (async (): Promise<IndexReport | null> => {
+			const db = this.getSharedDb();
 			const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
 			if (stored && stored.fp) {
 				const current = await originFingerprint(this.settings);
 				if (stored.fp !== current) return null; // mismatch -> hide
 			}
 			return await buildIndexReport(this.app, this.settings, db);
+		})();
+		this.idleReportInFlight = p;
+		try {
+			return await p;
 		} finally {
-			await db.close().catch(() => undefined);
+			if (this.idleReportInFlight === p) this.idleReportInFlight = null;
 		}
 	}
 
@@ -593,17 +619,40 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private async withReader<T>(fn: (engine: SyncEngine) => Promise<T>): Promise<T> {
 		if (this.engine) return fn(this.engine);
 		if (!this.settings.serverUrl) throw new Error("Sync is not configured.");
-		const db = new SyncDatabase(this.settings, localDbName(this.settings));
+		// Reuse the shared, always-open handle (never close it here — idle timers may
+		// be reading it concurrently). Connect the remote so chunk reads can fall back
+		// to the server for content not yet in the local replica.
+		const db = this.getSharedDb();
 		try {
 			db.connectRemote();
 		} catch {
 			/* offline reads still work from the local replica */
 		}
 		const reader = new SyncEngine(this.app, db, this.settings, () => undefined, () => undefined);
+		return fn(reader);
+	}
+
+	/**
+	 * Resolve all outstanding conflicts by the configured strategy — even when no
+	 * sync session is running. When a session is live it already auto-resolves, so
+	 * this only does work in the idle case, via a transient engine on the shared
+	 * handle. Returns how many conflicts were resolved.
+	 */
+	async resolveConflictsIdle(): Promise<number> {
+		if (this.engine) return 0; // a live session resolves conflicts on its own
+		if (!this.settings.serverUrl) return 0;
+		if (this.settings.e2eeEnabled && !this.settings.passphrase) return 0; // can't read chunks
+		const db = this.getSharedDb();
 		try {
-			return await fn(reader);
+			db.connectRemote(); // allow chunk reads to fall back to the server
+		} catch {
+			/* offline: resolve from the local replica only */
+		}
+		const reader = new SyncEngine(this.app, db, this.settings, () => undefined, () => undefined);
+		try {
+			return await reader.resolveConflictsStandalone();
 		} finally {
-			await db.close().catch(() => undefined);
+			reader.stop(); // cancel its debounced timers; never close the shared handle
 		}
 	}
 
@@ -634,17 +683,30 @@ export default class CouchDBSyncPlugin extends Plugin {
 	async removeFromIndex(target: string, folder: boolean): Promise<number> {
 		if (this.engine) return this.engine.removeFromIndex(target, folder);
 		if (!this.settings.serverUrl) return 0;
-		const db = new SyncDatabase(this.settings, localDbName(this.settings));
-		try {
-			return await removeFromDb(db, target, folder);
-		} finally {
-			await db.close().catch(() => undefined);
-		}
+		return removeFromDb(this.getSharedDb(), target, folder);
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		// Read the RAW persisted data first: we need the ORIGINAL schemaVersion to
+		// decide whether to migrate. (Object.assign with DEFAULT_SETTINGS would
+		// otherwise backfill schemaVersion to current and make every old config look
+		// already-migrated.)
+		const loaded = ((await this.loadData()) ?? null) as
+			| (Partial<CouchDBSyncSettings> & Record<string, unknown>)
+			| null;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded);
 		let dirty = false;
+
+		// One-time settings migration for configs written before CURRENT_SETTINGS_VERSION.
+		const priorVersion = (loaded?.schemaVersion as number | undefined) ?? 0;
+		if (!loaded || priorVersion < CURRENT_SETTINGS_VERSION) {
+			if (migrateSettings(this.settings as CouchDBSyncSettings & Record<string, unknown>, priorVersion)) {
+				dirty = true;
+			}
+			this.settings.schemaVersion = CURRENT_SETTINGS_VERSION;
+			dirty = true;
+		}
+
 		if (!this.settings.deviceId) {
 			this.settings.deviceId = generateDeviceId();
 			dirty = true;
@@ -665,19 +727,24 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * vault its contents belong to). Returns the doc count, or 0 if absent/empty.
 	 */
 	async legacyLocalDbDocCount(): Promise<number> {
+		// Cache the result: the settings tab calls this on every display(), and probing
+		// opens a (potentially large) PouchDB just to read its doc count.
+		if (this.legacyDocCountCache !== null) return this.legacyDocCountCache;
 		// Don't probe our own current DB.
 		if (this.settings.localDbId === "" || localDbName(this.settings) === LEGACY_LOCAL_DB_NAME) {
+			this.legacyDocCountCache = 0;
 			return 0;
 		}
 		const db = new PouchDB(LEGACY_LOCAL_DB_NAME, { skip_setup: true } as PouchDB.Configuration.LocalDatabaseConfiguration);
 		try {
 			const info = await db.info();
-			return info.doc_count ?? 0;
+			this.legacyDocCountCache = info.doc_count ?? 0;
 		} catch {
-			return 0;
+			this.legacyDocCountCache = 0;
 		} finally {
 			await db.close().catch(() => undefined);
 		}
+		return this.legacyDocCountCache;
 	}
 
 	/** Permanently destroy the legacy vault-shared local PouchDB. */
@@ -685,6 +752,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		const db = new PouchDB(LEGACY_LOCAL_DB_NAME);
 		try {
 			await db.destroy();
+			this.legacyDocCountCache = 0; // gone now — reflect it without re-probing
 		} catch (e) {
 			console.warn("[couchdb-sync] could not destroy legacy local DB", e);
 		}
