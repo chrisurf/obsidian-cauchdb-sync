@@ -10,6 +10,7 @@ import {
 } from "obsidian";
 import { SyncDatabase } from "./database";
 import { decryptBytes, encryptBytes } from "./crypto";
+import { Wire, hydrateFile } from "./envelope";
 import {
 	CHUNK_SIZE,
 	CouchDBSyncSettings,
@@ -550,8 +551,18 @@ export class SyncEngine {
 
 	private async applyPulledDocs(docs: FileDoc[]): Promise<void> {
 		if (!Array.isArray(docs)) return;
-		for (const doc of docs) {
-			if (!doc || doc.type !== "file") continue;
+		for (const raw of docs) {
+			if (!raw || raw.type !== "file") continue;
+			let doc: FileDoc;
+			try {
+				// Pulled docs arrive RAW from the replication feed in wire form
+				// (encrypted meta + hashed id); decrypt to engine form before applying.
+				// A decrypt failure here almost always means a mismatched passphrase.
+				doc = await hydrateFile(raw as unknown as Wire, this.settings);
+			} catch (e) {
+				this.fail(`decrypting pulled doc ${raw._id}`, e);
+				continue;
+			}
 			await this.applyRemoteChange(doc);
 		}
 		await this.retryPending();

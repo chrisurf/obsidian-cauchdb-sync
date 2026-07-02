@@ -5,11 +5,20 @@ import {
 	CouchDBSyncSettings,
 	FileDoc,
 	FILE_PREFIX,
-	HISTORY_PREFIX,
-	HISTORY_SEP,
 	VersionDoc,
 } from "./types";
+import {
+	Wire,
+	dehydrateFile,
+	dehydrateVersion,
+	historyRangeBase,
+	hydrateFile,
+	hydrateVersion,
+	toStoredId,
+} from "./envelope";
 import { base64ToUint8, uint8ToBase64 } from "./util";
+
+const RANGE_END = "￿";
 
 /** A chunk's decrypted-or-raw bytes plus whether they are encrypted. */
 export interface ChunkBytes {
@@ -118,24 +127,33 @@ export class SyncDatabase {
 		// Range query over file docs ONLY ("f:".."f:￿") so chunk docs are never
 		// loaded into memory — that is what caused the out-of-memory crashes. We pull
 		// `conflicts:true` in the SAME scan so the index report gets conflict info for
-		// free (no second pass).
+		// free (no second pass). The HMAC-based ids still sort under "f:", so the
+		// range is unchanged. Each doc is hydrated (decrypted) back to engine form.
 		const res = await this.local.allDocs({
 			include_docs: true,
 			conflicts: true,
 			startkey: FILE_PREFIX,
-			endkey: FILE_PREFIX + "￿",
+			endkey: FILE_PREFIX + RANGE_END,
 		});
 		const out: FileDoc[] = [];
 		for (const row of res.rows) {
-			const d = row.doc as FileDoc | undefined;
-			if (d && d.type === "file") out.push(d);
+			const d = row.doc as unknown as Wire | undefined;
+			if (!d || d.type !== "file") continue;
+			try {
+				out.push(await hydrateFile(d, this.settings));
+			} catch (e) {
+				console.error("[couchdb-sync] cannot decrypt file doc", d._id, e);
+			}
 		}
 		return out;
 	}
 
 	async get(id: string): Promise<FileDoc | null> {
 		try {
-			return await this.local.get(id, { conflicts: true });
+			const raw = await this.local.get(await toStoredId(id, this.settings), {
+				conflicts: true,
+			});
+			return await hydrateFile(raw as unknown as Wire, this.settings);
 		} catch (e) {
 			const err = e as { status?: number };
 			if (err.status === 404) return null;
@@ -144,9 +162,14 @@ export class SyncDatabase {
 	}
 
 	async put(doc: FileDoc): Promise<void> {
-		const existing = await this.get(doc._id);
-		if (existing) doc._rev = existing._rev;
-		await this.local.put(doc);
+		const wire = await dehydrateFile(doc, this.settings);
+		try {
+			const existing = await this.local.get(wire._id);
+			wire._rev = (existing as { _rev?: string })._rev;
+		} catch (e) {
+			if ((e as { status?: number }).status !== 404) throw e;
+		}
+		await this.local.put(wire as unknown as FileDoc);
 	}
 
 	/** File documents that currently have unresolved conflict revisions. */
@@ -157,62 +180,74 @@ export class SyncDatabase {
 			include_docs: true,
 			conflicts: true,
 			startkey: FILE_PREFIX,
-			endkey: FILE_PREFIX + "￿",
+			endkey: FILE_PREFIX + RANGE_END,
 		});
 		const out: FileDoc[] = [];
 		for (const row of res.rows) {
-			const d = row.doc as FileDoc | undefined;
+			const d = row.doc as unknown as Wire | undefined;
 			if (d && d.type === "file" && Array.isArray(d._conflicts) && d._conflicts.length > 0) {
-				out.push(d);
+				try {
+					out.push(await hydrateFile(d, this.settings));
+				} catch (e) {
+					console.error("[couchdb-sync] cannot decrypt conflicted doc", d._id, e);
+				}
 			}
 		}
 		return out;
 	}
 
 	async getRev(id: string, rev: string): Promise<FileDoc> {
-		return this.local.get(id, { rev });
+		const raw = await this.local.get(await toStoredId(id, this.settings), { rev });
+		return hydrateFile(raw as unknown as Wire, this.settings);
 	}
 
 	// --- explicit per-file version history ---------------------------------
 
 	/** All history entries for a path, oldest → newest (chronological). */
 	async listVersions(path: string): Promise<VersionDoc[]> {
-		const base = HISTORY_PREFIX + path + HISTORY_SEP;
+		const base = await historyRangeBase(path, this.settings);
 		const res = await this.local.allDocs({
 			include_docs: true,
 			startkey: base,
-			endkey: base + "￿",
+			endkey: base + RANGE_END,
 		});
 		const out: VersionDoc[] = [];
 		for (const row of res.rows) {
-			const d = row.doc as unknown as VersionDoc | undefined;
-			if (d && d.type === "version") out.push(d);
+			const d = row.doc as unknown as Wire | undefined;
+			if (d && d.type === "version") {
+				try {
+					out.push(await hydrateVersion(d, this.settings));
+				} catch (e) {
+					console.error("[couchdb-sync] cannot decrypt version doc", d._id, e);
+				}
+			}
 		}
 		return out;
 	}
 
 	/** Append a version entry (idempotent: ignores a same-id duplicate). */
 	async putVersionIfAbsent(doc: VersionDoc): Promise<void> {
-		const db = this.local as unknown as PouchDB.Database<VersionDoc>;
+		const wire = await dehydrateVersion(doc, this.settings);
+		const db = this.local as unknown as PouchDB.Database;
 		try {
-			await db.get(doc._id);
+			await db.get(wire._id);
 			return; // already recorded
 		} catch (e) {
 			if ((e as { status?: number }).status !== 404) throw e;
 		}
 		try {
-			await db.put(doc);
+			await db.put(wire);
 		} catch (e) {
 			if ((e as { status?: number }).status !== 409) throw e; // raced
 		}
 	}
 
 	async removeVersion(id: string, rev: string): Promise<void> {
-		await this.local.remove(id, rev);
+		await this.local.remove(await toStoredId(id, this.settings), rev);
 	}
 
 	async removeRev(id: string, rev: string): Promise<void> {
-		await this.local.remove(id, rev);
+		await this.local.remove(await toStoredId(id, this.settings), rev);
 	}
 
 	// --- chunk storage -----------------------------------------------------

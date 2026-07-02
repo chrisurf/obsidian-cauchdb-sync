@@ -157,6 +157,65 @@ export async function selfTest(passphrase: string): Promise<boolean> {
 	return out === sample;
 }
 
+// --- deterministic path HMAC (for metadata-private document ids) ------------
+
+/**
+ * Key used to HMAC vault paths into opaque document ids. Unlike the content key,
+ * this is derived with a FIXED salt so every device with the same passphrase
+ * derives the SAME key — two devices must map a given path to the same id, or they
+ * would create duplicate docs instead of one shared, conflict-mergeable doc.
+ *
+ * Security note: the fixed salt is acceptable here because the secret is the
+ * passphrase and the goal is a *keyed* one-way mapping (not password storage). The
+ * HMAC hides the plaintext path from anyone without the passphrase and defeats the
+ * offline dictionary attack that a plain SHA-256(path) would allow.
+ */
+const PATH_HMAC_SALT = enc.encode("couchdb-sync:path-hmac:v1");
+const pathKeyCache = new Map<string, CryptoKey>();
+
+async function derivePathKey(passphrase: string): Promise<CryptoKey> {
+	const cached = pathKeyCache.get(passphrase);
+	if (cached) return cached;
+	const baseKey = await crypto.subtle.importKey(
+		"raw",
+		enc.encode(passphrase),
+		"PBKDF2",
+		false,
+		["deriveKey"]
+	);
+	const key = await crypto.subtle.deriveKey(
+		{
+			name: "PBKDF2",
+			salt: PATH_HMAC_SALT as unknown as BufferSource,
+			iterations: PBKDF2_ITERATIONS,
+			hash: "SHA-256",
+		},
+		baseKey,
+		{ name: "HMAC", hash: "SHA-256", length: 256 },
+		false,
+		["sign"]
+	);
+	pathKeyCache.set(passphrase, key);
+	return key;
+}
+
+/**
+ * Deterministic keyed hash of a vault path → 64-char lowercase hex. Same path +
+ * passphrase always yields the same value (so all devices agree on the doc id);
+ * a different passphrase yields a completely different value. One-way: the path
+ * cannot be recovered from the hash (the real path travels encrypted in the doc
+ * body instead).
+ */
+export async function hmacPath(path: string, passphrase: string): Promise<string> {
+	if (!passphrase) throw new Error("Cannot hash path: passphrase is empty");
+	const key = await derivePathKey(passphrase);
+	const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(path)));
+	let hex = "";
+	for (const b of mac) hex += b.toString(16).padStart(2, "0");
+	return hex;
+}
+
 export function clearKeyCache(): void {
 	keyCache.clear();
+	pathKeyCache.clear();
 }
