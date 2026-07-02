@@ -1,12 +1,24 @@
-name: Release Obsidian plugin
+name: Auto Release
+
+# Release bot: whenever main gets a new manifest.json version (i.e. a version
+# bump is merged), build the plugin and publish a GitHub Release with the three
+# required assets. No manual tag push needed — bump the version in a PR, merge,
+# and the release is cut automatically. Re-running for an already-released
+# version is a safe no-op.
 
 on:
   push:
-    tags:
-      - "*"
+    branches: [main]
+    paths:
+      - "manifest.json"
+  workflow_dispatch: {} # allow manual trigger from the Actions tab
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -20,27 +32,38 @@ jobs:
           node-version: 22
           cache: "npm"
 
-      - name: Verify tag matches manifest version
+      - name: Read manifest version
+        id: version
+        run: echo "value=$(node -p "require('./manifest.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether this version is already released
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          manifest_version="$(node -p "require('./manifest.json').version")"
-          if [ "$tag" != "$manifest_version" ]; then
-            echo "::error::Tag ($tag) does not match manifest.json version ($manifest_version). Bump the version (npm version <patch|minor|major>) and re-tag."
-            exit 1
+          if gh release view "${{ steps.version.outputs.value }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ steps.version.outputs.value }} already exists — nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "Tag $tag matches manifest.json version."
 
       - name: Build plugin
+        if: steps.check.outputs.exists == 'false'
         run: |
           npm ci
           npm run build
 
       - name: Create release
+        if: steps.check.outputs.exists == 'false'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          gh release create "$tag" \
-            --title="$tag" \
+          version="${{ steps.version.outputs.value }}"
+          # Bare version tag (no "v" prefix) — Obsidian requires this. gh creates
+          # the tag on `main` if it does not already exist.
+          gh release create "$version" \
+            --title="$version" \
+            --target="${{ github.sha }}" \
             --generate-notes \
             main.js manifest.json styles.css

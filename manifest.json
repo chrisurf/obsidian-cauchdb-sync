@@ -1,7 +1,7 @@
 {
 	"id": "couchdb-sync",
 	"name": "CouchDB Sync",
-	"version": "0.32.0",
+	"version": "0.33.0",
 	"minAppVersion": "1.4.0",
 	"description": "Simple, reliable live synchronization of your vault with a self-hosted CouchDB server. Note content is end-to-end encrypted (AES-256-GCM); file paths and sizes are not.",
 	"author": "chrisurf",
