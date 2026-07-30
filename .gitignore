@@ -5,3 +5,10 @@ main.js
 data.json
 yarn.lock
 coverage/
+
+# E2E (wdio-obsidian-service)
+.obsidian-cache/
+logs/
+obsidian-versions-lock.txt
+# ...but keep the committed test-vault config the harness copies from
+!e2e/vaults/**
