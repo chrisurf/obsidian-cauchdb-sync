@@ -232,3 +232,47 @@ describe("SyncDatabase wrong-passphrase detection", () => {
 		await dbEnc.destroyLocal().catch(() => undefined);
 	});
 });
+
+// The hydrated-doc cache must serve CORRECT data: reuse unchanged docs but reflect
+// any change (a new _rev re-hydrates; a removed doc drops out). Decrypting a doc's
+// meta is a full PBKDF2 derivation, so caching it across the timer-driven index
+// scans is what keeps the index view from getting stuck on "Loading…".
+describe("SyncDatabase getAll hydrated-doc cache", () => {
+	it("reflects a content change on the next scan (cache invalidated by _rev)", async () => {
+		const name = `mem-cache-${counter++}`;
+		const dbEnc = new SyncDatabase(
+			{ ...DEFAULT_SETTINGS, e2eeEnabled: true, passphrase: "cache key" },
+			name,
+			{ adapter: "memory" }
+		);
+		await dbEnc.put(fileDoc("a.md", { enc: true, hash: "h1" }));
+		await dbEnc.put(fileDoc("b.md", { enc: true, hash: "hb" }));
+
+		const first = await dbEnc.getAll();
+		expect(first.find((d) => d.path === "a.md")?.hash).toBe("h1");
+
+		// Change a.md (new _rev) and confirm the scan re-hydrates it, not serving stale.
+		const cur = await dbEnc.get("f:a.md");
+		await dbEnc.put({ ...cur!, hash: "h2", _rev: cur!._rev });
+		const second = await dbEnc.getAll();
+		expect(second.find((d) => d.path === "a.md")?.hash).toBe("h2");
+		expect(second.find((d) => d.path === "b.md")?.hash).toBe("hb"); // unchanged, reused
+		expect(second.length).toBe(2);
+
+		await dbEnc.destroyLocal().catch(() => undefined);
+	});
+
+	it("drops a deleted doc from the cache", async () => {
+		const name = `mem-cache-${counter++}`;
+		const dbEnc = new SyncDatabase(
+			{ ...DEFAULT_SETTINGS, e2eeEnabled: true, passphrase: "cache key" },
+			name,
+			{ adapter: "memory" }
+		);
+		await dbEnc.put(fileDoc("keep.md", { enc: true, hash: "k" }));
+		await dbEnc.put(fileDoc("gone.md", { enc: true, hash: "g", deleted: true }));
+		const docs = (await dbEnc.getAll()).filter((d) => !d.deleted);
+		expect(docs.map((d) => d.path)).toEqual(["keep.md"]);
+		await dbEnc.destroyLocal().catch(() => undefined);
+	});
+});
