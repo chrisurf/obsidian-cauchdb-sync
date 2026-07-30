@@ -68,8 +68,21 @@ async function configureAndStart(): Promise<void> {
 			liveSync: true,
 			autoStart: true,
 			connectionVerified: true,
+			// Master mode publishes a master-info doc — assert it does not leak the
+			// device id in cleartext to the server (regression guard for B4).
+			isMaster: true,
 		},
 	);
+}
+
+/** The plugin's own device id (used to prove it is not leaked to the server). */
+function pluginDeviceId(): Promise<string> {
+	return browser.executeObsidian(({ app }, id) => {
+		const plugin = (app as unknown as {
+			plugins: { plugins: Record<string, { settings: { deviceId: string } }> };
+		}).plugins.plugins[id];
+		return plugin.settings.deviceId;
+	}, PLUGIN_ID);
 }
 
 async function waitForRemoteDoc(predicate: (docs: any[]) => boolean, timeoutMs = 30000): Promise<any[]> {
@@ -132,6 +145,18 @@ async function waitForRemoteDoc(predicate: (docs: any[]) => boolean, timeoutMs =
 		await expect(typeof fileDoc.meta).toBe("string");
 		await expect(fileDoc.enc).toBeTruthy();
 		assert.ok(!String(fileDoc._id).includes(PLAINTEXT_NAME), "the doc id itself leaked the path");
+
+		// B4: with master mode on, the master-info doc must NOT carry the device id
+		// in cleartext. It is a replicating doc, so it appears in the payload — but
+		// its body must be an encrypted `meta` blob, not a plaintext deviceId.
+		const deviceId = await pluginDeviceId();
+		assert.ok(deviceId && deviceId.length > 0, "expected a device id");
+		assert.ok(!wire.includes(deviceId), "server payload leaked the cleartext device id (master-info)");
+		const masterDoc = docs.find((d) => String(d?._id).includes("masterinfo"));
+		if (masterDoc) {
+			assert.equal(masterDoc.masterId, undefined, "master-info doc exposed a plaintext masterId");
+			await expect(typeof masterDoc.meta).toBe("string");
+		}
 	});
 
 	it("keeps the local plugin healthy and origin-stamped after sync", async function () {
