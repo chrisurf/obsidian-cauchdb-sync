@@ -33,15 +33,17 @@ const PLAINTEXT_NAME = "SecretDiary.md";
 const PLAINTEXT_BODY = "MAGIC_MARKER_zebra_umbrella_42";
 const PASSPHRASE = "correct-horse-battery-staple";
 
-function adminUrl(pathPart: string): string {
-	const u = new URL(BASE!);
-	u.username = USER;
-	u.password = PASS;
-	return new URL(pathPart, u).toString();
-}
+// Credentials go in an Authorization header, NOT inline in the URL: Node's
+// fetch (undici) throws "Request cannot be constructed from a URL that includes
+// credentials" for http://user:pass@host/... URLs.
+const AUTH = "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64");
 
-async function couch(pathPart: string, init?: RequestInit): Promise<Response> {
-	return fetch(adminUrl(pathPart), init);
+async function couch(pathPart: string, init: RequestInit = {}): Promise<Response> {
+	const url = new URL(pathPart, BASE!).toString();
+	return fetch(url, {
+		...init,
+		headers: { ...(init.headers ?? {}), Authorization: AUTH },
+	});
 }
 
 /** Configure the plugin's remote + encryption and (re)start a sync session. */

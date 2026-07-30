@@ -27,16 +27,55 @@ export function commandIds(): Promise<string[]> {
 	});
 }
 
-/** Open the plugin's settings tab (settings modal + our tab selected). */
-export async function openPluginSettings(): Promise<void> {
-	await browser.executeObsidian(({ app }, id) => {
-		const setting = (app as unknown as { setting: { open(): void; openTabById(id: string): void } }).setting;
-		setting.open();
-		setting.openTabById(id);
+/** A snapshot of what the plugin's settings tab actually renders. */
+export interface SettingsSnapshot {
+	headings: string[];
+	settingNames: string[];
+	/** true if the per-file sync tree is rendered (only after a verified connection) */
+	hasTree: boolean;
+	text: string;
+}
+
+/**
+ * Render the plugin's settings tab and read back its content.
+ *
+ * We drive the real tab object (`openTab(tab)` + `display()`) and read its
+ * `containerEl` directly, rather than asserting on the settings-modal DOM via
+ * WDIO selectors. On Obsidian 1.13.x `app.setting.open()` does not build the
+ * modal DOM in the headless test runner, but the setting tab's own
+ * `containerEl` is connected to the document and holds the rendered UI — so
+ * this reads exactly what the plugin renders, on every Obsidian version.
+ */
+export function renderSettingsSnapshot(): Promise<SettingsSnapshot> {
+	return browser.executeObsidian(({ app }, id) => {
+		const a = app as unknown as {
+			setting: {
+				open?(): void;
+				openTab?(tab: unknown): void;
+				pluginTabs?: { id: string; containerEl: HTMLElement; display(): void }[];
+				settingTabs?: { id: string; containerEl: HTMLElement; display(): void }[];
+			};
+		};
+		const tabs = [...(a.setting.pluginTabs ?? []), ...(a.setting.settingTabs ?? [])];
+		const tab = tabs.find((t) => t.id === id);
+		if (!tab) throw new Error(`settings tab '${id}' not found`);
+		a.setting.open?.();
+		a.setting.openTab?.(tab);
+		// Ensure a render even if opening the modal was a no-op headless.
+		if (!tab.containerEl || tab.containerEl.querySelectorAll("h2").length === 0) {
+			tab.display();
+		}
+		const ce = tab.containerEl;
+		return {
+			headings: Array.from(ce.querySelectorAll("h2")).map((h) => h.textContent ?? ""),
+			settingNames: Array.from(ce.querySelectorAll(".setting-item-name")).map((e) => e.textContent ?? ""),
+			hasTree: !!ce.querySelector(".couchdb-sync-tree"),
+			text: ce.textContent ?? "",
+		};
 	}, PLUGIN_ID);
 }
 
-/** Close any open settings modal. */
+/** Close the settings modal (harmless if it was never actually shown). */
 export async function closeSettings(): Promise<void> {
 	await browser.executeObsidian(({ app }) => {
 		(app as unknown as { setting: { close(): void } }).setting.close();
