@@ -1,0 +1,22 @@
+# Local CouchDB for the gated end-to-end sync spec (e2e/specs/sync-roundtrip.e2e.ts).
+#
+#   docker compose -f docker-compose.couchdb.yml up -d
+#   COUCHDB_URL=http://127.0.0.1:5984 COUCHDB_USER=admin COUCHDB_PASS=password npm run test:e2e
+#   docker compose -f docker-compose.couchdb.yml down -v
+#
+# Single-node, admin-party disabled (a real admin user), CORS enabled so the
+# plugin's replication and the test's direct _all_docs check both work.
+services:
+  couchdb:
+    image: couchdb:3
+    container_name: couchdb-sync-e2e
+    ports:
+      - "5984:5984"
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: password
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://admin:password@127.0.0.1:5984/_up"]
+      interval: 3s
+      timeout: 5s
+      retries: 20

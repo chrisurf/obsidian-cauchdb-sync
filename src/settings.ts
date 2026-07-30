@@ -151,7 +151,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("End-to-end encryption")
-			.setDesc("Encrypt note content at rest on the server (AES-256-GCM). Recommended; on by default. Note: file paths, sizes and timestamps stay unencrypted (metadata is not hidden from the server).")
+			.setDesc("Encrypt note content AND metadata — file paths, sizes and timestamps — at rest on the server (AES-256-GCM). Recommended; on by default. Changing this setting or the passphrase changes the storage format and requires a local wipe + fresh re-sync.")
 			.addToggle((t) =>
 				t.setValue(s.e2eeEnabled).onChange(async (v) => {
 					s.e2eeEnabled = v;
@@ -335,9 +335,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			.setName("Forget local cache when plugin is disabled")
 			.setDesc(
 				"Privacy mode. When you disable or uninstall the plugin, the local PouchDB " +
-					"(containing UNENCRYPTED file paths, sizes, and hashes — even with E2EE on) " +
-					"is destroyed. Trade-off: re-enabling forces a full re-download from the server. " +
-					"Off by default."
+					"is destroyed. (With E2EE on, the cache holds only encrypted data; with E2EE " +
+					"off it holds plaintext paths, sizes and hashes.) Trade-off: re-enabling forces " +
+					"a full re-download from the server. Off by default."
 			)
 			.addToggle((t) =>
 				t.setValue(s.forgetCacheOnDisable).onChange(async (v) => {

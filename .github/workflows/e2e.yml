@@ -1,0 +1,100 @@
+name: E2E
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-desktop:
+    name: E2E (Obsidian desktop, headless)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    # A real CouchDB so the gated sync-roundtrip spec runs in CI too.
+    services:
+      couchdb:
+        image: couchdb:3
+        ports:
+          - 5984:5984
+        env:
+          COUCHDB_USER: admin
+          COUCHDB_PASSWORD: password
+        options: >-
+          --health-cmd "curl -sf http://admin:password@127.0.0.1:5984/_up"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: "npm"
+
+      - run: npm ci
+
+      # Build the plugin the E2E harness loads (main.js + manifest.json at root).
+      - name: Build plugin
+        run: npm run build
+
+      # Resolve the Obsidian versions wdio.conf will use, into a cache key.
+      - name: Compute Obsidian cache key
+        run: |
+          npx tsx wdio.conf.mts 2>/dev/null | grep 'obsidian-cache-key:' > obsidian-versions-lock.txt || true
+          cat obsidian-versions-lock.txt || true
+          rm -rf .obsidian-cache
+        env:
+          CI: "true"
+
+      - name: Cache Obsidian binaries
+        uses: actions/cache@v4
+        with:
+          path: .obsidian-cache
+          key: obsidian-cache-${{ runner.os }}-${{ hashFiles('obsidian-versions-lock.txt', 'manifest.json') }}
+          restore-keys: |
+            obsidian-cache-${{ runner.os }}-
+
+      # Obsidian is an Electron app: it needs a virtual display AND a window
+      # manager on Linux (a bare Xvfb leaves some features broken).
+      - name: Set up virtual display + window manager
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq herbstluftwm dzen2 x11-xserver-utils
+          export DISPLAY=:99
+          echo "DISPLAY=$DISPLAY" >> "$GITHUB_ENV"
+          Xvfb "$DISPLAY" -screen 0 1280x1024x24 +extension GLX -noreset &
+          sleep 1
+          herbstluftwm &
+          sleep 1
+
+      - name: Run E2E tests
+        run: npm run test:e2e:only
+        env:
+          WDIO_MAX_INSTANCES: "2"
+          # Point the gated sync spec at the CouchDB service container.
+          COUCHDB_URL: http://127.0.0.1:5984
+          COUCHDB_USER: admin
+          COUCHDB_PASS: password
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wdio-logs
+          path: |
+            logs/
+            .obsidian-cache/*/logs/
+          if-no-files-found: ignore
+          retention-days: 7

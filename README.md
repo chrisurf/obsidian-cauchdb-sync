@@ -5,9 +5,10 @@ server, with **end-to-end encrypted note content**. A deliberately minimal alter
 (excellent but very complex) [obsidian-livesync](https://github.com/vrtmrz/obsidian-livesync) —
 CouchDB only, a handful of settings, and **no pop-ups**.
 
-> **Encryption scope:** note *content* is encrypted end-to-end; file **paths, sizes and
-> timestamps are not**. See [Security model](#security-model) for exactly what is and isn't
-> protected.
+> **Encryption scope:** with encryption on (the default), note *content* **and** metadata (file
+> paths, sizes, timestamps) are encrypted end-to-end. A little residual metadata remains (total data
+> volume, chunk dedup structure) — see [Security model](#security-model) for exactly what is and
+> isn't protected.
 
 > **Status (June 2026): working MVP, validated on desktop.** A vault (incl. large audio/`.lpf`
 > files) syncs cleanly and reliably into CouchDB on a single desktop device. Multi-device sync
@@ -30,10 +31,11 @@ plain-language UX.
 - 🧩 **Chunked, streaming storage** — files of any size (images, PDFs, audio, video) are split into
   1 MiB content-addressed chunks. Reads and writes stream to/from disk, so a 600 MB file never sits
   in memory; unchanged chunks are reused.
-- 🔐 **End-to-end content encryption on by default** — note **content** is encrypted at rest with
-  AES-256-GCM (PBKDF2-derived key, 210k iterations), TLS in transit. The passphrase never touches the
-  server and must match across devices. File **paths, sizes and timestamps are stored in clear**
-  (metadata is not encrypted) — see [Security model](#security-model).
+- 🔐 **End-to-end encryption on by default** — note **content and metadata** (file paths, sizes,
+  timestamps, device ids) are encrypted at rest with AES-256-GCM (PBKDF2-derived key, 210k
+  iterations), TLS in transit. Document ids are keyed HMACs of the path, so the server never sees a
+  filename. The passphrase never touches the server and must match across devices. A little residual
+  metadata remains — see [Security model](#security-model).
 - ⚖️ **No-prompt conflict resolution**: *newest version wins* or *master device wins*.
 - 📊 **Full-transparency index status** — at a glance: how many of your files are in sync (`X / Y`,
   with %), and a collapsible **Sync state** tree of every file across this device *and* the server,
@@ -91,32 +93,45 @@ are deliberate:
 Be precise about what "end-to-end encrypted" means here, so you can decide whether it fits your
 threat model:
 
+With **encryption enabled** (the default), the server stores no readable content *or* metadata.
+
 **Encrypted (unreadable to the server or anyone with the CouchDB data):**
 
 - **Note content.** Every chunk's bytes are encrypted with AES-256-GCM before upload. The key is
   derived from your passphrase via PBKDF2-SHA-256 (210k iterations) with a random per-message salt
   and IV. The passphrase is never sent to the server. TLS protects everything in transit.
+- **File paths / names.** Document ids are `f:<HMAC-SHA-256(path)>` — a *keyed* one-way hash, so the
+  server sees an opaque id, never the path. The real path travels **encrypted** inside the document.
+- **File sizes, modification/creation timestamps, and device ids.** All of it lives in the
+  encrypted document body, not in clear fields.
+- **Which chunks a file is made of** — the file→chunk mapping is encrypted, so the server cannot tie
+  chunk documents to files.
 
-**NOT encrypted (visible to anyone who can read the CouchDB database):**
+**Still visible to someone who can read the CouchDB database (residual metadata):**
 
-- **File paths / names** — document ids are `f:<vault path>` in clear.
-- **File sizes, and modification/creation timestamps.**
-- **Which chunks a file is made of**, and that two files/versions share identical chunks
-  (content-addressed dedup is visible as repeated chunk ids). The chunk id is a *keyed* hash
-  (includes the passphrase), so it does **not** leak the plaintext to someone without the passphrase.
-- **Device ids** and the *master device* marker.
+- **The existence and approximate total volume of data** — the number of chunk documents and each
+  chunk's size are visible (so an observer can estimate how much you store, but not which file any
+  chunk belongs to).
+- **Content-addressed dedup structure** — identical chunks share an id, so repetition is visible.
+  The chunk id is a *keyed* hash (includes the passphrase), so it does **not** leak the plaintext.
+- **That a document is a deletion** (a tombstone flag stays clear) and a coarse count of files/versions.
+- **Version timestamps** — encoded in the history id so the timeline can sort chronologically.
+- **The *master device* marker** — one device id in a small control document.
 
 **On this device:**
 
-- The local cache (PouchDB/IndexedDB) stores those same **unencrypted metadata** (paths, sizes,
-  hashes). Turn on **“Forget local cache when plugin is disabled”** to destroy it on disable.
+- The local cache (PouchDB/IndexedDB) stores the **same encrypted form** as the server; metadata is
+  only ever decrypted in memory. Turn on **“Forget local cache when plugin is disabled”** to destroy
+  the cache on disable.
 - Your **passphrase and CouchDB password are stored in clear** in the plugin's `data.json`
   (`.obsidian/plugins/couchdb-sync/data.json`) — as with essentially every Obsidian plugin that
   holds credentials. `data.json` is never synced, and “Forget local cache” does **not** remove it.
   Protect it with full-disk encryption, and rotate credentials if the file was ever exposed.
 
-If you need file **paths** hidden from the server too, this plugin is not yet the right fit (path
-obfuscation is a possible future addition).
+> **Changing the encryption setting or passphrase is a storage-format change:** the document ids
+> depend on the passphrase, so switching encryption on/off or rotating the passphrase requires a
+> **local wipe + fresh re-sync** (ideally a fresh remote database) so old and new documents don't
+> mix. Keep the passphrase identical across devices.
 
 ## Configuration
 
