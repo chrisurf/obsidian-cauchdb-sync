@@ -81,6 +81,9 @@ export class SyncDatabase {
 	local: PouchDB.Database<FileDoc>;
 	remote: PouchDB.Database<FileDoc> | null = null;
 	private settings: CouchDBSyncSettings;
+	/** decrypt outcome of the most recent getAll() scan (see getDecryptStats) */
+	private lastScanSeen = 0;
+	private lastScanFailed = 0;
 
 	constructor(
 		settings: CouchDBSyncSettings,
@@ -98,6 +101,11 @@ export class SyncDatabase {
 	}
 
 	connectRemote(): PouchDB.Database<FileDoc> {
+		// Close any prior handle before replacing it — idle history/conflict reads
+		// call this repeatedly, and orphaning the old PouchDB leaks its fetch state.
+		if (this.remote) {
+			void this.remote.close().catch(() => undefined);
+		}
 		this.remote = new PouchDB<FileDoc>(this.remoteUrl(), {
 			auth: { username: this.settings.username, password: this.settings.password },
 			fetch: obsidianFetch(),
@@ -136,16 +144,32 @@ export class SyncDatabase {
 			endkey: FILE_PREFIX + RANGE_END,
 		});
 		const out: FileDoc[] = [];
+		let seen = 0;
+		let failed = 0;
 		for (const row of res.rows) {
 			const d = row.doc as unknown as Wire | undefined;
 			if (!d || d.type !== "file") continue;
+			seen++;
 			try {
 				out.push(await hydrateFile(d, this.settings));
 			} catch (e) {
+				failed++;
 				console.error("[couchdb-sync] cannot decrypt file doc", d._id, e);
 			}
 		}
+		// Remember whether a scan hit encrypted docs it could not decrypt at all —
+		// the index report uses this to detect a wrong passphrase (see getDecryptStats).
+		this.lastScanSeen = seen;
+		this.lastScanFailed = failed;
 		return out;
+	}
+
+	/**
+	 * Stats from the most recent {@link getAll} scan. `failed === seen && seen > 0`
+	 * means every file doc failed to decrypt — the passphrase is wrong.
+	 */
+	getDecryptStats(): { seen: number; failed: number } {
+		return { seen: this.lastScanSeen, failed: this.lastScanFailed };
 	}
 
 	async get(id: string): Promise<FileDoc | null> {

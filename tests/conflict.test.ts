@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { pickConflictWinner } from "../src/util";
 
-type Cand = { deviceId?: string; mtime?: number; tag: string };
+type Cand = { deviceId?: string; mtime?: number; hash?: string; tag: string };
 
 describe("pickConflictWinner", () => {
 	it("newest strategy: largest mtime wins", () => {
@@ -60,5 +60,28 @@ describe("pickConflictWinner", () => {
 		];
 		pickConflictWinner(cands, "newest", null);
 		expect(cands.map((c) => c.tag)).toEqual(["first", "second"]);
+	});
+
+	// B5: on an mtime tie the winner MUST be deterministic across devices, or two
+	// devices resolving the same conflict pick different sides and never converge.
+	it("breaks an mtime tie deterministically by hash, regardless of input order", () => {
+		const a: Cand = { deviceId: "a", mtime: 100, hash: "aaa", tag: "A" };
+		const b: Cand = { deviceId: "b", mtime: 100, hash: "bbb", tag: "B" };
+		expect(pickConflictWinner([a, b], "newest", null).tag).toBe("B");
+		expect(pickConflictWinner([b, a], "newest", null).tag).toBe("B"); // same winner either order
+	});
+
+	it("mtime+hash tie falls back to deviceId deterministically", () => {
+		const a: Cand = { deviceId: "dev-a", mtime: 100, hash: "same", tag: "A" };
+		const b: Cand = { deviceId: "dev-b", mtime: 100, hash: "same", tag: "B" };
+		expect(pickConflictWinner([a, b], "newest", null).tag).toBe("B");
+		expect(pickConflictWinner([b, a], "newest", null).tag).toBe("B");
+	});
+
+	it("a real mtime difference still beats the tie-break", () => {
+		const older: Cand = { deviceId: "z", mtime: 100, hash: "zzz", tag: "older" };
+		const newer: Cand = { deviceId: "a", mtime: 200, hash: "aaa", tag: "newer" };
+		expect(pickConflictWinner([older, newer], "newest", null).tag).toBe("newer");
+		expect(pickConflictWinner([newer, older], "newest", null).tag).toBe("newer");
 	});
 });

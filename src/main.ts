@@ -335,13 +335,31 @@ export default class CouchDBSyncPlugin extends Plugin {
 			return;
 		}
 
+		const db = this.getSharedDb();
+
+		// Refuse to replicate into a remote that did NOT fill this local cache.
+		// Otherwise repointing the connection at a different server/database and
+		// letting sync run (e.g. automatically at launch) would push this vault's
+		// docs into the new remote and mix the two. "unset" (fresh cache, first
+		// sync) and "match" proceed; only a definite mismatch is blocked, and the
+		// user recovers via Wipe local cache / Adopt cache for this remote.
+		const origin = await this.checkOriginFingerprint().catch(() => "unset" as const);
+		if (origin === "mismatch") {
+			this.setStatus(
+				SYNC_STATE.ERROR,
+				"Local cache belongs to a different server/database. Wipe the local cache or adopt it for this remote before syncing."
+			);
+			new Notice(
+				"CouchDB Sync: this vault's local cache was filled by a different remote. Open settings → 'Wipe local cache' or 'Adopt cache for this remote'."
+			);
+			return;
+		}
+
 		// Arm the crash guard BEFORE doing any heavy work, and persist it to disk.
 		// If this run hangs/crashes before reaching a safe state, the next launch
 		// sees the flag and starts in safe mode.
 		this.settings.unsafeShutdown = true;
 		await this.saveSettings();
-
-		const db = this.getSharedDb();
 		const engine = new SyncEngine(
 			this.app,
 			db,
@@ -590,6 +608,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 	async useNewestPath(path: string): Promise<"local" | "remote"> {
 		const engine = await this.ensureEngine();
 		return engine.useNewest(path);
+	}
+
+	/** Resolve a drifting/conflicting file by the configured strategy (never a blind local upload). */
+	async resolveByStrategyPath(path: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.resolveByStrategy(path);
 	}
 
 	/** Overwrite the database with this device's copy. */
