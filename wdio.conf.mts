@@ -14,14 +14,20 @@ import { parseObsidianVersions } from "wdio-obsidian-service";
  * Obsidian has two independent version axes:
  *   - appVersion       — the Obsidian JS bundle (what auto-update ships)
  *   - installerVersion — the Electron/Chromium base (only replaced on reinstall)
- * We test the min-supported pair (earliest/earliest, = manifest.minAppVersion)
- * and the latest pair, so both the oldest API we promise and the newest ship
- * are covered. Override locally with e.g. OBSIDIAN_VERSIONS="latest/latest".
+ *
+ * We default to the latest stable pair, which obsidian-launcher can download
+ * from the public releases without credentials. We deliberately do NOT default
+ * to `earliest/earliest`: that resolves to this plugin's manifest.minAppVersion
+ * (1.4.0), which obsidian-versions.json flags as a BETA build — and beta builds
+ * require an Obsidian Insiders account (OBSIDIAN_EMAIL / OBSIDIAN_PASSWORD) to
+ * download, which the credential-free CI does not have. Anyone with Insiders
+ * credentials can widen the matrix via the env var, e.g.
+ *   OBSIDIAN_VERSIONS="earliest/earliest latest/latest"
  */
 
 const cacheDir = path.resolve(".obsidian-cache");
 
-const defaultVersions = "earliest/earliest latest/latest";
+const defaultVersions = "latest/latest";
 const versions = await parseObsidianVersions(env.OBSIDIAN_VERSIONS ?? defaultVersions, { cacheDir });
 
 if (env.CI) {
