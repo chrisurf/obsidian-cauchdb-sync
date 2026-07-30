@@ -189,3 +189,46 @@ describe("SyncDatabase per-device local docs", () => {
 		expect(await db.getLocalDoc("_local/missing")).toBeNull();
 	});
 });
+
+// B7: a wrong passphrase must be DETECTABLE, not silently reported as an empty
+// database (which would classify every file as "local only" and tempt an
+// "Upload all" that mints divergent duplicates under the wrong key).
+describe("SyncDatabase wrong-passphrase detection", () => {
+	it("getDecryptStats reports failed === seen when the passphrase is wrong", async () => {
+		const name = `mem-enc-${counter++}`;
+		const writer = new SyncDatabase(
+			{ ...DEFAULT_SETTINGS, e2eeEnabled: true, passphrase: "correct horse battery staple" },
+			name,
+			{ adapter: "memory" }
+		);
+		await writer.put(fileDoc("secret.md", { enc: true, hash: "h1" }));
+		await writer.put(fileDoc("notes/todo.md", { enc: true, hash: "h2" }));
+
+		// A second handle on the SAME store, but with the WRONG passphrase.
+		const reader = new SyncDatabase(
+			{ ...DEFAULT_SETTINGS, e2eeEnabled: true, passphrase: "totally different" },
+			name,
+			{ adapter: "memory" }
+		);
+		const docs = await reader.getAll();
+		const stats = reader.getDecryptStats();
+
+		expect(docs).toEqual([]); // nothing decrypts under the wrong key
+		expect(stats.seen).toBe(2); // but the encrypted docs ARE there
+		expect(stats.failed).toBe(stats.seen); // and every one failed → mismatch
+
+		await writer.destroyLocal().catch(() => undefined);
+	});
+
+	it("getDecryptStats reports no failures with the correct passphrase", async () => {
+		const name = `mem-enc-${counter++}`;
+		const s = { ...DEFAULT_SETTINGS, e2eeEnabled: true, passphrase: "the right key" };
+		const dbEnc = new SyncDatabase(s, name, { adapter: "memory" });
+		await dbEnc.put(fileDoc("a.md", { enc: true, hash: "h1" }));
+		const docs = await dbEnc.getAll();
+		const stats = dbEnc.getDecryptStats();
+		expect(docs.length).toBe(1);
+		expect(stats.failed).toBe(0);
+		await dbEnc.destroyLocal().catch(() => undefined);
+	});
+});

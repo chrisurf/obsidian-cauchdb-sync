@@ -9,8 +9,8 @@ import {
 	debounce,
 } from "obsidian";
 import { SyncDatabase } from "./database";
-import { decryptBytes, encryptBytes } from "./crypto";
-import { Wire, hydrateFile } from "./envelope";
+import { decryptBytes, decryptString, encryptBytes, encryptString } from "./crypto";
+import { Wire, encActive, hydrateFile } from "./envelope";
 import {
 	CHUNK_SIZE,
 	CouchDBSyncSettings,
@@ -65,6 +65,13 @@ export interface IndexReport {
 	conflicts: string[]; // unresolved conflict revisions in the database
 	excluded: string[]; // present locally or in the DB but filtered out by the skip rules
 	allDbPaths: string[]; // every indexed path (for the tree view)
+	/**
+	 * Set when the database holds encrypted docs but NONE could be decrypted with
+	 * the current passphrase — i.e. the passphrase is wrong. The UI must show a
+	 * passphrase warning instead of classifying every file as "local only" (which
+	 * would tempt the user to "Upload all" and mint divergent duplicates).
+	 */
+	passphraseError?: boolean;
 }
 
 /** True for paths we never sync. Shared by the engine and the index report. */
@@ -147,6 +154,11 @@ export async function buildIndexReport(
 	// excluded) they must NOT appear as "pending" or in the tree — they are never
 	// written — so we split the docs into allowed vs excluded by the same skip rules.
 	const allDocs = (await db.getAll()).filter((d) => !d.deleted);
+	// If the DB holds encrypted file docs but every one failed to decrypt, the
+	// passphrase is wrong. Flag it so the UI warns instead of classifying the whole
+	// vault as "local only" (which would tempt "Upload all" → divergent duplicates).
+	const stats = db.getDecryptStats();
+	const passphraseError = encActive(settings) && stats.seen > 0 && stats.failed === stats.seen;
 	const docs = allDocs.filter((d) => !isSkipped(d.path, app, settings));
 	const docByPath = new Map(docs.map((d) => [d.path, d] as const));
 
@@ -199,6 +211,7 @@ export async function buildIndexReport(
 		conflicts: sort(conflicts),
 		excluded: sort(excluded),
 		allDbPaths: sort(docs.map((d) => d.path)),
+		passphraseError,
 	};
 }
 
@@ -253,6 +266,13 @@ export class SyncEngine {
 	private pending = new Map<string, FileDoc>();
 	/** per-path count of consecutive heal (re-upload) attempts, to stop ping-pong */
 	private healAttempts = new Map<string, number>();
+	/**
+	 * Paths whose remote content cannot be materialized because a required chunk is
+	 * missing on every reachable device and re-uploading did not converge. Kept OUT
+	 * of `pending` so they are not retried on every pull (which would loop forever);
+	 * cleared when a local edit or a manual resolve gives the path a fresh chance.
+	 */
+	private stuck = new Set<string>();
 	/** set when this session is being torn down; long loops bail out on it */
 	private aborted = false;
 	/** interval id for hidden-file polling (hidden files have no vault events) */
@@ -658,6 +678,7 @@ export class SyncEngine {
 
 	private async handleLocalUpsert(file: TFile): Promise<void> {
 		if (this.skip(file.path)) return;
+		this.stuck.delete(file.path); // a fresh local edit is a new chance to converge
 		// Consume any echo token but do NOT return on it alone: if the user edited the
 		// file inside the debounce window, its mtime/size differ from what we recorded,
 		// so isUnchanged is false and we must still push their edit. Our own writes are
@@ -797,6 +818,70 @@ export class SyncEngine {
 	}
 
 	/**
+	 * Before a pulled change overwrites the on-disk file, make sure we are not
+	 * silently destroying an un-synced local edit. Hashes the current on-disk
+	 * content and, if it is neither what we last synced NOR the incoming version, it
+	 * is an edit that never made it into the DB (e.g. made inside the onModify
+	 * debounce window) — persist it (chunks + a history version) so the user can
+	 * restore it. Returns "same-as-remote" when the disk already holds the incoming
+	 * content (caller can skip the write), else "proceed".
+	 *
+	 * Bounded to reasonably-sized files: the race that loses data is hand-editing a
+	 * note, and buffering huge media in memory to guard it is not worth it.
+	 */
+	private async preserveUnsyncedLocalEdit(
+		path: string,
+		existing: TFile,
+		incomingHash: string
+	): Promise<"same-as-remote" | "proceed"> {
+		if (existing.stat.size > 8 * 1024 * 1024) return "proceed";
+		const enc = this.settings.e2eeEnabled;
+		const pass = this.settings.passphrase;
+		const children: string[] = [];
+		const pieces: Uint8Array[] = [];
+		let binary = false;
+		let firstPiece = true;
+		try {
+			for await (const piece of this.streamChunksPath(path)) {
+				if (this.aborted) return "proceed";
+				if (firstPiece) {
+					binary = !looksLikeText(piece);
+					firstPiece = false;
+				}
+				pieces.push(piece);
+				children.push(
+					"h:" + (await sha256Hex(concatBytes([textToBytes((enc ? pass : "") + ":"), piece])))
+				);
+			}
+		} catch {
+			return "proceed"; // unreadable — nothing to preserve
+		}
+		if (children.length === 0) return "proceed";
+		const diskHash = cyrb53(children.join("|"));
+		if (diskHash === incomingHash) return "same-as-remote"; // disk already == remote
+		if (diskHash === this.lastHash.get(path)) return "proceed"; // disk == last synced: safe
+		// Un-synced local edit → persist its content + a restorable history version.
+		for (let i = 0; i < pieces.length; i++) {
+			await this.db.putChunkIfAbsent(children[i], enc, enc ? await encryptBytes(pieces[i], pass) : pieces[i]);
+		}
+		await this.recordVersion({
+			path,
+			mtime: existing.stat.mtime,
+			size: existing.stat.size,
+			hash: diskHash,
+			binary,
+			enc,
+			children,
+			deleted: false,
+			note: "local edit auto-saved before a remote update overwrote it",
+		});
+		console.warn(
+			`[couchdb-sync] preserved an un-synced local edit of ${path} to history before applying the remote version`
+		);
+		return "proceed";
+	}
+
+	/**
 	 * Yield a file's content in CHUNK_SIZE byte pieces. On desktop, content is read
 	 * incrementally from disk (constant memory, any size). Otherwise the whole file is
 	 * read via the adapter (works for hidden files too). Never decoded as a string.
@@ -861,6 +946,19 @@ export class SyncEngine {
 			return;
 		}
 
+		// Guard against silently clobbering an un-synced local edit (a change made
+		// inside the onModify debounce window, or after a failed push). If the file
+		// on disk differs from both what we last synced and the incoming version,
+		// its content is preserved to history before we overwrite it.
+		if (existing instanceof TFile) {
+			if ((await this.preserveUnsyncedLocalEdit(path, existing, doc.hash)) === "same-as-remote") {
+				this.lastHash.set(path, doc.hash);
+				this.recordSynced(path, existing.stat.mtime, existing.stat.size, doc.hash);
+				this.healAttempts.delete(path);
+				return;
+			}
+		}
+
 		const desktopFs = Platform.isDesktop && adapter instanceof FileSystemAdapter;
 		this.activeProgress.set(path, { done: 0, total: children.length }); // UI: working on it
 		try {
@@ -881,15 +979,24 @@ export class SyncEngine {
 			if (haveLocal) {
 				const attempts = (this.healAttempts.get(path) ?? 0) + 1;
 				if (attempts > HEAL_MAX_ATTEMPTS) {
-					// Re-uploading is not converging — the local copy likely diverges from
-					// this doc (e.g. a genuine drift the pull can't materialize). Stop the
-					// ping-pong: defer it so a real edit, conflict resolution, or a manual
-					// action can settle it instead of looping forever.
-					console.warn(
-						`[couchdb-sync] giving up healing ${path} after ${HEAL_MAX_ATTEMPTS} attempts; deferring`
-					);
+					// Re-uploading is not converging — a required chunk is missing on
+					// every reachable device. Do NOT re-park in `pending`: that would
+					// re-attempt (and re-warn) on every pull forever. Mark the path
+					// stuck, surface it once, and let a local edit / manual resolve /
+					// a fresh remote revision give it another chance.
 					this.activeProgress.delete(path);
-					this.pending.set(doc._id, doc);
+					this.pending.delete(doc._id);
+					this.healAttempts.delete(path);
+					if (!this.stuck.has(path)) {
+						this.stuck.add(path);
+						console.error(
+							`[couchdb-sync] cannot sync ${path}: a required chunk is missing on every reachable device`
+						);
+						this.setStatus(
+							SYNC_STATE.ERROR,
+							`Cannot sync "${path}" — a required chunk is missing on the server. Edit or resolve the file to retry.`
+						);
+					}
 					return;
 				}
 				this.healAttempts.set(path, attempts);
@@ -912,6 +1019,7 @@ export class SyncEngine {
 		// applied cleanly -> clear pending + reset the heal backoff for this path
 		this.pending.delete(doc._id);
 		this.healAttempts.delete(path);
+		this.stuck.delete(path);
 	}
 
 	/** Force (re)sync of a single path: re-upload if local exists, else re-download. */
@@ -919,6 +1027,7 @@ export class SyncEngine {
 		const adapter = this.app.vault.adapter;
 		const hidden = isHidden(path);
 		this.lastHash.delete(path);
+		this.stuck.delete(path); // manual action gives this path a fresh chance
 		const local = hidden ? null : this.app.vault.getAbstractFileByPath(path);
 		if (hidden && (await adapter.exists(path))) {
 			const st = await adapter.stat(path);
@@ -1116,6 +1225,22 @@ export class SyncEngine {
 			return "remote";
 		}
 		throw new Error("file exists neither locally nor in the database");
+	}
+
+	/**
+	 * Resolve a drifting or conflicting file by the configured conflict strategy —
+	 * never by a blind local upload. "newest" takes the newer mtime (data-safe, so a
+	 * newer remote version is not discarded); "master" keeps the master device's
+	 * copy. A trailing conflict pass cleans up any CouchDB conflict leaves.
+	 */
+	async resolveByStrategy(path: string): Promise<void> {
+		if (this.settings.conflictStrategy === "master") {
+			if (this.settings.isMaster) await this.takeLocal(path);
+			else await this.takeRemote(path);
+		} else {
+			await this.useNewest(path);
+		}
+		await this.resolveConflicts();
 	}
 
 	/** Overwrite the database with this device's copy (force upload). */
@@ -1323,8 +1448,15 @@ export class SyncEngine {
 
 			const winner = pickConflictWinner(cands, this.settings.conflictStrategy, masterId);
 
-			// force the winner's body onto the current winning revision...
-			await this.db.put({ ...winner, _id: doc._id, _rev: doc._rev });
+			// Only rewrite the head when the winner differs from the content already
+			// at the head. Writing a fresh revision every time is NOT idempotent:
+			// two live devices resolving the same conflict would each mint a new
+			// child of the base rev, producing another conflict with identical
+			// content and livelocking. When the head already holds the winning
+			// content we just drop the losing leaves — which converges.
+			if (winner.hash !== doc.hash) {
+				await this.db.put({ ...winner, _id: doc._id, _rev: doc._rev });
+			}
 			// ...then drop every losing leaf so the conflict is gone for good.
 			for (const r of revs) {
 				if (r !== doc._rev) await this.db.removeRev(doc._id, r);
@@ -1362,10 +1494,24 @@ export class SyncEngine {
 	private async publishMasterInfoIfNeeded(): Promise<void> {
 		if (!this.settings.isMaster) return;
 		try {
-			await this.db.putLocalDoc(MASTER_INFO_ID, {
-				type: "masterinfo",
-				masterId: this.settings.deviceId,
-			});
+			// This doc REPLICATES to the server (other devices read it to learn who
+			// the master is), so the device id must not travel in cleartext when
+			// E2EE is on — encrypt it into a `meta` blob exactly like file metadata.
+			if (encActive(this.settings)) {
+				await this.db.putLocalDoc(MASTER_INFO_ID, {
+					type: "masterinfo",
+					enc: true,
+					meta: await encryptString(
+						JSON.stringify({ masterId: this.settings.deviceId }),
+						this.settings.passphrase
+					),
+				});
+			} else {
+				await this.db.putLocalDoc(MASTER_INFO_ID, {
+					type: "masterinfo",
+					masterId: this.settings.deviceId,
+				});
+			}
 		} catch {
 			/* best-effort */
 		}
@@ -1374,8 +1520,16 @@ export class SyncEngine {
 	private async getMasterId(): Promise<string | null> {
 		try {
 			const info = (await this.db.local.get(MASTER_INFO_ID)) as unknown as {
-				masterId: string;
+				masterId?: string;
+				meta?: string;
 			};
+			if (typeof info.meta === "string") {
+				if (!this.settings.passphrase) return null;
+				const m = JSON.parse(await decryptString(info.meta, this.settings.passphrase)) as {
+					masterId?: string;
+				};
+				return m.masterId ?? null;
+			}
 			return info.masterId ?? null;
 		} catch {
 			return null;
