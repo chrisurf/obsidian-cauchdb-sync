@@ -335,9 +335,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			.setName("Forget local cache when plugin is disabled")
 			.setDesc(
 				"Privacy mode. When you disable or uninstall the plugin, the local PouchDB " +
-					"is destroyed. (With E2EE on, the cache holds only encrypted data; with E2EE " +
-					"off it holds plaintext paths, sizes and hashes.) Trade-off: re-enabling forces " +
-					"a full re-download from the server. Off by default."
+					"is destroyed. The local cache always keeps some cleartext metadata on this " +
+					"device — the per-file sync-state index holds vault paths, sizes and hashes " +
+					"even with E2EE on (E2EE protects what reaches the server, not the local " +
+					"cache). Trade-off: re-enabling forces a full re-download from the server. " +
+					"Off by default."
 			)
 			.addToggle((t) =>
 				t.setValue(s.forgetCacheOnDisable).onChange(async (v) => {
@@ -582,6 +584,23 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			return;
 		}
 
+		// The database holds encrypted docs but none decrypted — wrong passphrase.
+		// Do NOT render the file lists/tree (every file would look "local only" and
+		// tempt an "Upload all" that mints divergent duplicates under the wrong key).
+		if (report.passphraseError) {
+			summary.className = "couchdb-sync-warn";
+			summary.setText(
+				"⚠ Encryption passphrase does not match this database — its documents cannot be decrypted. " +
+					"Fix the passphrase in settings to match the other devices. (Do not upload while this warning shows: it would create duplicate, unreadable copies.)"
+			);
+			counts.setText("");
+			driftBox.empty();
+			this.legendEl?.empty();
+			treeBox.empty();
+			this.driftSig = this.treeSig = "";
+			return;
+		}
+
 		// ---- single source of truth: classify every file into exactly one state ----
 		// Each file gets the most severe state that applies (see SEVERITY). The same
 		// map drives the summary, the lists below, and the tree — so they can never
@@ -695,12 +714,12 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			mk("drift", "differs", groups.drift.length, {
 				tooltip: `Resolve all (${strategyLabel})`,
 				busyLabel: "Resolving…",
-				run: runEach((path) => p.forceSyncPath(path)),
+				run: runEach((path) => p.resolveByStrategyPath(path)),
 			});
 			mk("conflict", "conflict", groups.conflict.length, {
 				tooltip: `Resolve all conflicts (${strategyLabel})`,
 				busyLabel: "Resolving…",
-				run: runEach((path) => p.forceSyncPath(path)),
+				run: runEach((path) => p.resolveByStrategyPath(path)),
 			});
 			mk("excluded", "excluded", groups.excluded.length);
 		}
@@ -787,6 +806,13 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		const ul = det.createEl("ul", { cls: "couchdb-sync-section-list" });
 		const actionLabel = state === "local" ? "Upload" : state === "remote" ? "Download" : "Sync";
 		const busyLabel = state === "local" ? "Uploading…" : state === "remote" ? "Downloading…" : "Syncing…";
+		// Drift/conflict rows must resolve by the configured strategy (mtime-aware
+		// or master-wins) — a blind local upload would discard a newer remote
+		// version. The directional states (local→upload, remote→download,
+		// synced→re-sync) keep the plain force path.
+		const isDivergent = state === "drift" || state === "conflict";
+		const rowAction = (q: string) =>
+			isDivergent ? this.plugin.resolveByStrategyPath(q) : this.plugin.forceSyncPath(q);
 		for (const p of paths) {
 			const li = ul.createEl("li", { cls: "couchdb-sync-drift-item" });
 			li.createSpan({ cls: "couchdb-sync-dot" }); // pulses when active
@@ -796,7 +822,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				btn.disabled = true;
 				btn.setText(busyLabel);
 				try {
-					await this.plugin.forceSyncPath(p);
+					await rowAction(p);
 				} finally {
 					this.driftSig = ""; // force the lists to refresh on the next tick
 				}

@@ -13,8 +13,13 @@ export function stringArraysEqual(a: string[], b: string[]): boolean {
  * "master": the master device's revision wins if present; otherwise fall back to
  * newest. "newest" (and every fallback): the largest mtime wins. Pure so it can be
  * unit-tested without a database. `cands` must be non-empty.
+ *
+ * The mtime comparison has a DETERMINISTIC tie-break (by content hash, then device
+ * id): on equal mtimes every device must pick the same winner, otherwise two
+ * devices resolving the same conflict independently choose different sides and the
+ * conflict never converges.
  */
-export function pickConflictWinner<T extends { deviceId?: string; mtime?: number }>(
+export function pickConflictWinner<T extends { deviceId?: string; mtime?: number; hash?: string }>(
 	cands: T[],
 	strategy: ConflictStrategy,
 	masterId: string | null
@@ -23,7 +28,13 @@ export function pickConflictWinner<T extends { deviceId?: string; mtime?: number
 		const m = cands.find((c) => c.deviceId === masterId);
 		if (m) return m;
 	}
-	return cands.slice().sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0))[0];
+	return cands.slice().sort((a, b) => {
+		const byMtime = (b.mtime ?? 0) - (a.mtime ?? 0);
+		if (byMtime !== 0) return byMtime;
+		const byHash = (b.hash ?? "").localeCompare(a.hash ?? "");
+		if (byHash !== 0) return byHash;
+		return (b.deviceId ?? "").localeCompare(a.deviceId ?? "");
+	})[0];
 }
 
 /** Fast, non-cryptographic 53-bit string hash (cyrb53) for echo detection. */
