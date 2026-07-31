@@ -16,7 +16,7 @@ import { CouchDBSyncSettingTab } from "./settings";
 import { SyncStatusView, VIEW_TYPE_SYNC_STATUS } from "./view";
 import { WhatsNewModal } from "./whatsnewmodal";
 import { shouldShowWhatsNew } from "./whatsnew";
-import { generateDeviceId, sha256Hex, textToBytes } from "./util";
+import { generateDeviceId, sha256Hex, textToBytes, toError } from "./util";
 
 /** _local doc id under which we remember which remote this cache belongs to. */
 const ORIGIN_FP_DOC = "_local/couchdb-sync-origin";
@@ -121,25 +121,25 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.addSettingTab(new CouchDBSyncSettingTab(this.app, this));
 
 		this.addCommand({
-			id: "couchdb-sync-open-panel",
+			id: "open-panel",
 			name: "Open sync status panel",
 			callback: () => void this.revealStatusView(),
 		});
 
 		this.addCommand({
-			id: "couchdb-sync-now",
+			id: "force-sync",
 			name: "Force sync",
 			callback: () => this.restartSync(),
 		});
 
 		this.addCommand({
-			id: "couchdb-sync-toggle",
+			id: "toggle-sync",
 			name: "Turn sync on/off",
 			callback: () => this.setSyncEnabled(!this.settings.syncEnabled),
 		});
 
 		this.addCommand({
-			id: "couchdb-sync-wipe-local",
+			id: "wipe-local-cache",
 			name: "Wipe local cache (does not download)",
 			callback: async () => {
 				await this.wipeLocalOnly();
@@ -148,7 +148,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: "couchdb-sync-whats-new",
+			id: "whats-new",
 			name: "Show what's new",
 			callback: () => this.showWhatsNew(),
 		});
@@ -227,7 +227,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.showWhatsNew();
 	}
 
-	async onunload(): Promise<void> {
+	onunload(): void {
+		// Plugin.onunload is declared void and Obsidian does not await it, so returning
+		// a promise here only hid that the teardown races the unload. Kept explicit:
+		// the work still runs, and the fire-and-forget is visible rather than implied.
+		void this.teardown();
+	}
+
+	private async teardown(): Promise<void> {
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
@@ -496,8 +503,9 @@ export default class CouchDBSyncPlugin extends Plugin {
 			if (mode === "download") await engine.startDownloadOnly();
 			else await engine.start();
 		} catch (e) {
-			this.setStatus(SYNC_STATE.ERROR, String(e));
-			new Notice(`CouchDB Sync failed to start: ${e}`);
+			const err = toError(e);
+			this.setStatus(SYNC_STATE.ERROR, err.message);
+			new Notice(`CouchDB Sync failed to start: ${err.message}`);
 		}
 	}
 
@@ -640,7 +648,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.engine?.abort();
 		this.restartLock = this.restartLock
 			.catch(() => undefined)
-			.then(async () => {
+			.then(() => {
 				this.engine?.stop();
 				this.engine = null;
 				// Keep the shared DB handle OPEN — the idle index view still reads it.
@@ -884,9 +892,15 @@ export default class CouchDBSyncPlugin extends Plugin {
 		let dirty = false;
 
 		// One-time settings migration for configs written before CURRENT_SETTINGS_VERSION.
-		const priorVersion = (loaded?.schemaVersion as number | undefined) ?? 0;
+		const priorVersion = loaded?.schemaVersion ?? 0;
 		if (!loaded || priorVersion < CURRENT_SETTINGS_VERSION) {
-			if (migrateSettings(this.settings as CouchDBSyncSettings & Record<string, unknown>, priorVersion)) {
+			if (
+				migrateSettings(
+					this.settings as CouchDBSyncSettings & Record<string, unknown>,
+					priorVersion,
+					this.app.vault.configDir
+				)
+			) {
 				dirty = true;
 			}
 			this.settings.schemaVersion = CURRENT_SETTINGS_VERSION;
@@ -921,7 +935,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 			this.legacyDocCountCache = 0;
 			return 0;
 		}
-		const db = new PouchDB(LEGACY_LOCAL_DB_NAME, { skip_setup: true } as PouchDB.Configuration.LocalDatabaseConfiguration);
+		const db = new PouchDB(LEGACY_LOCAL_DB_NAME, { skip_setup: true });
 		try {
 			const info = await db.info();
 			this.legacyDocCountCache = info.doc_count ?? 0;

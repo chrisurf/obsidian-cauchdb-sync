@@ -17,13 +17,13 @@ import { parseObsidianVersions } from "wdio-obsidian-service";
  *   - installerVersion — the Electron/Chromium base (only replaced on reinstall)
  *
  * We default to the latest stable pair, which obsidian-launcher can download
- * from the public releases without credentials. We deliberately do NOT default
- * to `earliest/earliest`: that resolves to this plugin's manifest.minAppVersion
- * (1.4.0), which obsidian-versions.json flags as a BETA build — and beta builds
- * require an Obsidian Insiders account (OBSIDIAN_EMAIL / OBSIDIAN_PASSWORD) to
- * download, which the credential-free CI does not have. Anyone with Insiders
- * credentials can widen the matrix via the env var, e.g.
+ * from the public releases without credentials. `earliest/earliest` resolves to
+ * this plugin's manifest.minAppVersion (1.7.2, a stable release), so widening the
+ * matrix is a matter of setting the env var:
  *   OBSIDIAN_VERSIONS="earliest/earliest latest/latest"
+ * (The floor used to be 1.4.0, which obsidian-versions.json flags as a BETA build
+ * and which therefore needed Insiders credentials to download — no longer the
+ * case, but CI still runs one version by default to keep the job short.)
  */
 
 const cacheDir = path.resolve(".obsidian-cache");

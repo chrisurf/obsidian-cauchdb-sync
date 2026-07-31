@@ -19,7 +19,7 @@ describe("CouchDB Sync — commands (no server)", function () {
 	});
 
 	it("runs 'Wipe local cache' safely and stays healthy", async function () {
-		await browser.executeObsidianCommand(`${PLUGIN_ID}:couchdb-sync-wipe-local`);
+		await browser.executeObsidianCommand(`${PLUGIN_ID}:wipe-local-cache`);
 		await expect(await pluginIsEnabled()).toBe(true);
 	});
 
@@ -27,19 +27,19 @@ describe("CouchDB Sync — commands (no server)", function () {
 		// starts enabled by default
 		await expect((await pluginSettings<{ syncEnabled: boolean }>()).syncEnabled).toBe(true);
 
-		await browser.executeObsidianCommand(`${PLUGIN_ID}:couchdb-sync-toggle`);
+		await browser.executeObsidianCommand(`${PLUGIN_ID}:toggle-sync`);
 		await browser.pause(500);
 		await expect((await pluginSettings<{ syncEnabled: boolean }>()).syncEnabled).toBe(false);
 		await expect(await pluginIsEnabled()).toBe(true);
 
-		await browser.executeObsidianCommand(`${PLUGIN_ID}:couchdb-sync-toggle`);
+		await browser.executeObsidianCommand(`${PLUGIN_ID}:toggle-sync`);
 		await browser.pause(500);
 		await expect((await pluginSettings<{ syncEnabled: boolean }>()).syncEnabled).toBe(true);
 		await expect(await pluginIsEnabled()).toBe(true);
 	});
 
 	it("runs 'Sync now' unconfigured without crashing", async function () {
-		await browser.executeObsidianCommand(`${PLUGIN_ID}:couchdb-sync-now`);
+		await browser.executeObsidianCommand(`${PLUGIN_ID}:force-sync`);
 		await browser.pause(500);
 		await expect(await pluginIsEnabled()).toBe(true);
 	});

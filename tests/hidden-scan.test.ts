@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { shouldWalkHiddenDir, matchesIgnore, type HiddenScanRules } from "../src/util";
-import { DEFAULT_HIDDEN_EXCLUDE } from "../src/types";
+import { defaultHiddenExclude } from "../src/types";
+
+/** Baseline for a vault using the default configuration folder. */
+const BASELINE = defaultHiddenExclude(".obsidian");
 
 /**
  * The hidden-file scan prunes whole subtrees instead of walking everything and
@@ -21,7 +24,7 @@ const off = (include: string[]): HiddenScanRules => ({
 });
 
 describe("shouldWalkHiddenDir — hidden sync ON (blacklist)", () => {
-	const rules = on(DEFAULT_HIDDEN_EXCLUDE);
+	const rules = on(BASELINE);
 
 	it("skips folders covered by an exclude pattern", () => {
 		expect(shouldWalkHiddenDir(".obsidian", rules)).toBe(false);
@@ -89,7 +92,7 @@ describe("pruning invariant: a pruned folder holds only skipped paths", () => {
 	const dirs = [".obsidian", ".git", ".obsidian/plugins", ".config", ".notes/drafts", ".a/b/node_modules"];
 	const children = ["file.md", "deep/nested/file.bin", "x.json"];
 
-	for (const rules of [on(DEFAULT_HIDDEN_EXCLUDE), on([]), off([]), off([".obsidian/snippets/"])]) {
+	for (const rules of [on(BASELINE), on([]), off([]), off([".obsidian/snippets/"])]) {
 		for (const dir of dirs) {
 			if (shouldWalkHiddenDir(dir, rules)) continue;
 			for (const child of children) {

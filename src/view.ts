@@ -37,15 +37,19 @@ export class SyncStatusView extends ItemView {
 		return "refresh-cw";
 	}
 
-	async onOpen(): Promise<void> {
+	// ItemView declares these as returning a promise, but mounting and unmounting
+	// the panel is synchronous — `async` here only promised an await that never came.
+	onOpen(): Promise<void> {
 		const host = this.contentEl;
 		host.empty();
 		host.addClass("couchdb-sync-view");
 		this.panel.mount(host.createDiv({ cls: "couchdb-sync-panel-host" }));
+		return Promise.resolve();
 	}
 
-	async onClose(): Promise<void> {
+	onClose(): Promise<void> {
 		this.panel.unmount();
 		this.contentEl.empty();
+		return Promise.resolve();
 	}
 }

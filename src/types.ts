@@ -136,17 +136,34 @@ export interface CouchDBSyncSettings {
  * later removal is respected.
  */
 export const DEFAULT_HIDDEN_EXCLUDE: string[] = [
-	".obsidian/",
 	".git/",
 	".trash/",
 	".DS_Store",
 	"node_modules/",
 	".claude/",
 	"tmp/",
-	".obsidian/workspace.json",
-	".obsidian/workspace-mobile.json",
-	".obsidian/cache",
 ];
+
+/**
+ * The full default exclude baseline for one vault, including its configuration
+ * folder.
+ *
+ * That folder is `.obsidian` in most vaults but users can rename it, and
+ * Obsidian exposes the real value as `Vault#configDir`. Hardcoding the usual
+ * name meant a renamed config folder was not on the baseline at all — so
+ * enabling hidden-file sync would have replicated the whole settings directory,
+ * workspace layout and plugin state, which is exactly what the baseline exists
+ * to prevent. The value is therefore injected by the caller.
+ */
+export function defaultHiddenExclude(configDir: string): string[] {
+	return [
+		`${configDir}/`,
+		...DEFAULT_HIDDEN_EXCLUDE,
+		`${configDir}/workspace.json`,
+		`${configDir}/workspace-mobile.json`,
+		`${configDir}/cache`,
+	];
+}
 
 export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	schemaVersion: CURRENT_SETTINGS_VERSION,

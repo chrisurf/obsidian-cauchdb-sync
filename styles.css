@@ -595,7 +595,9 @@
 	padding: 0 0.5em;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
-	border-left: 3px solid transparent;
+	/* The accent is read from the row itself, so .cdl-del/.cdl-add can set it
+	   without having to out-specify this (more specific) selector. */
+	border-left: 3px solid var(--cdl-accent, transparent);
 }
 
 .cdl-eq {
@@ -604,12 +606,12 @@
 
 .cdl-del {
 	background: rgba(var(--color-red-rgb), 0.12);
-	border-left-color: var(--color-red) !important;
+	--cdl-accent: var(--color-red);
 }
 
 .cdl-add {
 	background: rgba(var(--color-green-rgb), 0.12);
-	border-left-color: var(--color-green) !important;
+	--cdl-accent: var(--color-green);
 }
 
 .cdl-pad {
@@ -685,7 +687,8 @@
 /* --- clickable drift/conflict file names (open the diff editor) --- */
 .couchdb-sync-drift-name-link {
 	cursor: pointer;
-	text-decoration: underline dotted;
+	text-decoration-line: underline;
+	text-decoration-style: dotted;
 	text-underline-offset: 2px;
 }
 
@@ -932,6 +935,22 @@
 	height: 48px;
 	width: auto;
 	border-radius: var(--radius-s);
+}
+
+/* Shown instead of the button image when it cannot be fetched, so the support
+   link is never silently missing. */
+.couchdb-sync-bmc-fallback {
+	display: inline-block;
+	padding: 0.55em 1.1em;
+	border-radius: var(--radius-s);
+	background: var(--interactive-normal);
+	color: var(--text-normal);
+	font-weight: 600;
+	text-decoration-line: none;
+}
+
+.couchdb-sync-bmc-fallback:hover {
+	background: var(--interactive-hover);
 }
 
 /* The note is longer than a modal can be, so the body scrolls and the buttons

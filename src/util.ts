@@ -327,3 +327,29 @@ export function mergeResult(blocks: MergeBlock[]): string {
 	}
 	return out.join("\n");
 }
+
+/**
+ * Coerce anything thrown, rejected, or emitted into a real `Error`.
+ *
+ * PouchDB does not reject with `Error` objects: replication failures arrive as
+ * plain objects like `{ status: 401, name: "unauthorized", reason: "Name or
+ * password is incorrect." }`. Passing one of those through `String(e)` yields
+ * "[object Object]", which is what the status card used to show instead of the
+ * actual reason. Preferring `reason`/`message` keeps the sentence a user can act
+ * on, and the JSON fallback keeps *something* identifying rather than nothing.
+ */
+export function toError(e: unknown): Error {
+	if (e instanceof Error) return e;
+	if (typeof e === "object" && e !== null) {
+		const o = e as { message?: unknown; reason?: unknown; error?: unknown };
+		for (const field of [o.reason, o.message, o.error]) {
+			if (typeof field === "string" && field.length > 0) return new Error(field);
+		}
+		try {
+			return new Error(JSON.stringify(e));
+		} catch {
+			// circular or otherwise unserializable — fall through to String()
+		}
+	}
+	return new Error(String(e));
+}

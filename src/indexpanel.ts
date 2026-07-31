@@ -694,8 +694,9 @@ export class IndexPanel {
 				new Setting(toggleBox)
 					.setName(`Show ${report.excluded.length} excluded hidden file(s)`)
 					.setDesc(
-						"Hidden files (dot-folders like .obsidian or .git) that are skipped by your sync rules. " +
-						"Turn on to reveal them in the tree above so you can sync individual files once."
+						`Hidden files (dot-folders like ${this.plugin.app.vault.configDir} or .git) that are ` +
+						"skipped by your sync rules. Turn on to reveal them in the tree above so you " +
+						"can sync individual files once."
 					)
 					.addToggle((t) =>
 						t.setValue(this.plugin.settings.showExcluded).onChange(async (v) => {
@@ -891,8 +892,10 @@ export class IndexPanel {
 			} else if (state === "local") {
 				m.addItem((i) => i.setTitle("Upload to server").setIcon("upload").onClick(() => run("uploaded", () => p.takeLocalPath(path))));
 			}
-			m.addItem((i) => i.setTitle(state === "excluded" ? "Sync once" : "Force sync").setIcon("refresh-cw").onClick(() => run("synced", () => p.forceSyncPath(path))));
-			m.addItem((i) => i.setTitle("Show history…").setIcon("history").onClick(() => new HistoryModal(p, path, refresh).open()));
+			m.addItem((i) => i.setTitle(state === "excluded" ? "Sync once" : "Force sync").setIcon("refresh-cw").onClick(() => void run("synced", () => p.forceSyncPath(path))));
+			// HistoryModal notifies through a plain `() => void`; the refresh it triggers
+			// is a background reload nobody waits on, so ignore the promise explicitly.
+			m.addItem((i) => i.setTitle("Show history…").setIcon("history").onClick(() => new HistoryModal(p, path, () => void refresh()).open()));
 			m.addSeparator();
 			if (state !== "remote") {
 				m.addItem((i) => i.setTitle("Delete on this device").setIcon("trash").onClick(() =>

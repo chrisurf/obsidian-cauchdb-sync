@@ -194,7 +194,7 @@ same buttons. From it you can:
 
 ## 🧩 Requirements
 
-- Obsidian 1.4.0 or later
+- Obsidian 1.7.2 or later
 - A CouchDB server you can reach ([Step 1](#-step-1-get-a-server))
 - Tested and validated on desktop. Mobile is supported by design (the plugin
   uses Obsidian's own networking, so it works without special server tweaks) but

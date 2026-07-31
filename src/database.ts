@@ -43,8 +43,12 @@ async function attachmentToBytes(x: unknown): Promise<Uint8Array> {
  * "works in the browser but not in the app" failures (especially on mobile).
  */
 function obsidianFetch(): typeof fetch {
-	return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-		const url = typeof input === "string" ? input : input.toString();
+	return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+		// Each variant carries its URL in a different place. `toString()` on a Request
+		// yields "[object Object]", which would have been sent as the request URL had
+		// PouchDB ever passed one; read `.url`/`.href` instead of stringifying.
+		const url =
+			typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 
 		const headers: Record<string, string> = {};
 		if (init?.headers) {
@@ -72,9 +76,9 @@ function obsidianFetch(): typeof fetch {
 			res.arrayBuffer && res.arrayBuffer.byteLength > 0 ? res.arrayBuffer : res.text;
 		return new Response(body, {
 			status: res.status,
-			headers: res.headers as Record<string, string>,
+			headers: res.headers,
 		});
-	}) as typeof fetch;
+	};
 }
 
 export class SyncDatabase {
@@ -120,7 +124,7 @@ export class SyncDatabase {
 			auth: { username: this.settings.username, password: this.settings.password },
 			fetch: obsidianFetch(),
 			skip_setup: true,
-		} as PouchDB.Configuration.RemoteDatabaseConfiguration);
+		});
 		return this.remote;
 	}
 
@@ -162,7 +166,7 @@ export class SyncDatabase {
 		let failed = 0;
 		// Rebuilt each scan so docs that disappeared drop out of the cache (bounded).
 		const nextCache = new Map<string, { rev: string; doc: FileDoc }>();
-		const out: (FileDoc | null)[] = new Array(wires.length).fill(null);
+		const out: (FileDoc | null)[] = new Array<FileDoc | null>(wires.length).fill(null);
 
 		// Split into cache hits (free) and misses (each miss is a PBKDF2 derivation).
 		const misses: { i: number; d: Wire }[] = [];

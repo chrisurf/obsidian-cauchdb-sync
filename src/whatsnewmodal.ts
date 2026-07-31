@@ -36,8 +36,12 @@ export class WhatsNewModal extends Modal {
 		});
 		hero.addEventListener("error", () => hero.hide());
 
-		// "Buy me a coffee", right under the hero the same way the README has it.
-		// Remote image again, and the whole row goes away if it cannot be loaded.
+		// "Buy me a coffee", directly under the hero, the same order the README has.
+		// The button is a remote image too, but the LINK does not depend on it: if the
+		// image cannot be fetched (offline, or the asset not yet published on main) the
+		// anchor stays and falls back to a plain text button. Hiding the whole row on a
+		// failed image meant the one place this plugin asks for support disappeared
+		// exactly when the images were not live yet.
 		const support = contentEl.createDiv({ cls: "couchdb-sync-whats-new-support" });
 		const coffeeLink = support.createEl("a", {
 			cls: "couchdb-sync-bmc-link",
@@ -47,7 +51,11 @@ export class WhatsNewModal extends Modal {
 			cls: "couchdb-sync-bmc-button",
 			attr: { alt: "Buy me a coffee", src: BUY_ME_A_COFFEE_IMAGE_URL },
 		});
-		coffeeImg.addEventListener("error", () => support.hide());
+		coffeeImg.addEventListener("error", () => {
+			coffeeImg.remove();
+			coffeeLink.addClass("couchdb-sync-bmc-fallback");
+			coffeeLink.setText("☕ Buy me a coffee");
+		});
 
 		const body = contentEl.createDiv({ cls: "couchdb-sync-whats-new-body" });
 		// The component ties the rendered children to the plugin's lifecycle, so

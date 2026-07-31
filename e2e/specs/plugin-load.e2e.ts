@@ -17,10 +17,11 @@ describe("CouchDB Sync — plugin load", function () {
 		const ids = await commandIds();
 		const mine = ids.filter((c) => c.startsWith(`${PLUGIN_ID}:`)).sort();
 		assert.deepEqual(mine, [
-			`${PLUGIN_ID}:couchdb-sync-now`,
-			`${PLUGIN_ID}:couchdb-sync-open-panel`,
-			`${PLUGIN_ID}:couchdb-sync-toggle`,
-			`${PLUGIN_ID}:couchdb-sync-wipe-local`,
+			`${PLUGIN_ID}:force-sync`,
+			`${PLUGIN_ID}:open-panel`,
+			`${PLUGIN_ID}:toggle-sync`,
+			`${PLUGIN_ID}:whats-new`,
+			`${PLUGIN_ID}:wipe-local-cache`,
 		]);
 	});
 

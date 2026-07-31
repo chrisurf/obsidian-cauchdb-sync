@@ -9,6 +9,7 @@ import {
 	debounce,
 } from "obsidian";
 import { SyncDatabase } from "./database";
+import { nodeFs, nodePath } from "./node";
 import { decryptBytes, decryptString, encryptBytes, encryptString } from "./crypto";
 import { Wire, encActive, hydrateFile } from "./envelope";
 import {
@@ -36,6 +37,7 @@ import {
 	splitBytes,
 	stringArraysEqual,
 	textToBytes,
+	toError,
 } from "./util";
 
 const MASTER_INFO_ID = "couchdb-sync:masterinfo";
@@ -473,7 +475,7 @@ export class SyncEngine {
 			.sync(this.db.remote, { live: true, retry: true, batch_size: 25, batches_limit: 2 })
 			.on("change", (info) => {
 				if (info.direction === "pull") {
-					void this.applyPulledDocs(info.change.docs as FileDoc[]);
+					void this.applyPulledDocs(info.change.docs);
 				}
 				this.markActivity(); // real data moved -> show spinner, then settle
 			})
@@ -514,27 +516,35 @@ export class SyncEngine {
 			return;
 		}
 		console.error(`[couchdb-sync] ${context}:`, e);
-		const msg = e instanceof Error ? e.message : String(e);
-		this.setStatus(SYNC_STATE.ERROR, `${context}: ${msg}`);
+		// toError, not String(e): PouchDB rejects with plain objects, which would
+		// otherwise reach the status card as "[object Object]" instead of the reason.
+		this.setStatus(SYNC_STATE.ERROR, `${context}: ${toError(e).message}`);
 	}
 
 	async replicateOnce(): Promise<void> {
-		if (!this.db.remote) this.db.connectRemote();
+		// Capture the connected handle: `this.db.remote` is nullable, and connectRemote
+		// returns the very database it just assigned, so the local binding is both
+		// null-safe and typed — no non-null assertion needed at the two call sites.
+		const remote = this.db.remote ?? this.db.connectRemote();
 		this.markActivity();
 		const opts = { batch_size: 25, batches_limit: 2 };
 		try {
-			const repTo = this.db.local.replicate.to(this.db.remote!, opts);
+			const repTo = this.db.local.replicate.to(remote, opts);
 			this.oneShot = repTo;
 			await repTo;
 			// event-based pull: the resolved result has no `.docs`; the change events do.
 			await new Promise<void>((resolve, reject) => {
-				const rep = this.db.local.replicate.from(this.db.remote!, opts);
+				const rep = this.db.local.replicate.from(remote, opts);
 				this.oneShot = rep;
-				rep.on("change", (info) => {
-					void this.applyPulledDocs((info.docs ?? []) as FileDoc[]);
-				});
-				rep.on("complete", () => resolve());
-				rep.on("error", (e) => reject(e));
+				// PouchDB's replication handle is itself thenable and `.on()` returns it,
+				// so the chain reads as a floating promise. The one we actually wait on is
+				// this wrapper, settled by the events below.
+				void rep
+					.on("change", (info) => {
+						void this.applyPulledDocs(info.docs ?? []);
+					})
+					.on("complete", () => resolve())
+					.on("error", (e) => reject(toError(e)));
 			});
 			this.oneShot = null;
 			await this.retryPending();
@@ -563,18 +573,20 @@ export class SyncEngine {
 	}
 
 	private async downloadOnce(): Promise<void> {
-		if (!this.db.remote) this.db.connectRemote();
+		const remote = this.db.remote ?? this.db.connectRemote();
 		this.markActivity();
 		const opts = { batch_size: 25, batches_limit: 2 };
 		try {
 			await new Promise<void>((resolve, reject) => {
-				const rep = this.db.local.replicate.from(this.db.remote!, opts);
+				const rep = this.db.local.replicate.from(remote, opts);
 				this.oneShot = rep;
-				rep.on("change", (info) => {
-					void this.applyPulledDocs((info.docs ?? []) as FileDoc[]);
-				});
-				rep.on("complete", () => resolve());
-				rep.on("error", (e) => reject(e));
+				// See replicateOnce: the handle is thenable, the wrapper is what we await.
+				void rep
+					.on("change", (info) => {
+						void this.applyPulledDocs(info.docs ?? []);
+					})
+					.on("complete", () => resolve())
+					.on("error", (e) => reject(toError(e)));
 			});
 			this.oneShot = null;
 			await this.retryPending();
@@ -659,7 +671,7 @@ export class SyncEngine {
 
 	/** Hand control back to the event loop so the UI/replication can make progress. */
 	private yieldToUi(): Promise<void> {
-		return new Promise((resolve) => setTimeout(resolve, 0));
+		return new Promise((resolve) => window.setTimeout(resolve, 0));
 	}
 
 	/** Cheap "did this file change since we last synced it here?" check. */
@@ -906,7 +918,7 @@ export class SyncEngine {
 		const adapter = this.app.vault.adapter;
 		if (Platform.isDesktop && adapter instanceof FileSystemAdapter) {
 			const fullPath = adapter.getFullPath(path);
-			const fs = require("fs") as typeof import("fs");
+			const fs = nodeFs();
 			const fd = await fs.promises.open(fullPath, "r");
 			try {
 				const buf = new Uint8Array(CHUNK_SIZE);
@@ -980,7 +992,7 @@ export class SyncEngine {
 		try {
 			if (doc.binary && desktopFs) {
 				// Stream chunks straight to disk: never hold the whole file in memory.
-				await this.writeBinaryStreaming(path, children, adapter as FileSystemAdapter, doc.hash);
+				await this.writeBinaryStreaming(path, children, adapter, doc.hash);
 			} else {
 				await this.writeAssembled(path, children, doc.binary, hidden, existing, doc.hash);
 			}
@@ -1149,7 +1161,7 @@ export class SyncEngine {
 	 * the side-by-side merge editor can show what the server currently holds.
 	 */
 	async getRemoteText(path: string): Promise<string | null> {
-		const doc = (await this.db.get(FILE_PREFIX + path)) as FileDoc | null;
+		const doc = await this.db.get(FILE_PREFIX + path);
 		if (!doc || doc.deleted || doc.binary) return null;
 		return bytesToText(await this.assembleChildren(doc.children));
 	}
@@ -1233,7 +1245,7 @@ export class SyncEngine {
 			if (f instanceof TFile) localMtime = f.stat.mtime;
 		}
 
-		const doc = await this.db.get(FILE_PREFIX + path) as FileDoc | null;
+		const doc = await this.db.get(FILE_PREFIX + path);
 		const remoteMtime = doc && !doc.deleted ? doc.mtime : null;
 
 		if (localMtime != null && remoteMtime != null) {
@@ -1384,10 +1396,9 @@ export class SyncEngine {
 		adapter: FileSystemAdapter,
 		hash: string
 	): Promise<void> {
-		const fs = require("fs") as typeof import("fs");
-		const nodePath = require("path") as typeof import("path");
+		const fs = nodeFs();
 		const full = adapter.getFullPath(path);
-		await fs.promises.mkdir(nodePath.dirname(full), { recursive: true });
+		await fs.promises.mkdir(nodePath().dirname(full), { recursive: true });
 		const tmp = full + TMP_SUFFIX;
 		const fd = await fs.promises.open(tmp, "w");
 		try {

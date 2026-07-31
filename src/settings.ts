@@ -27,12 +27,15 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 		const s = this.plugin.settings;
+		// The configuration folder is ".obsidian" by default but can be renamed, so
+		// the examples in the hidden-file settings name this vault's actual folder.
+		const cfg = this.app.vault.configDir;
 
 		// The panel owns this host element entirely; the settings follow below it.
 		this.panel.unmount();
 		this.panel.mount(containerEl.createDiv({ cls: "couchdb-sync-panel-host" }));
 
-		containerEl.createEl("h2", { text: "CouchDB connection" });
+		new Setting(containerEl).setName("CouchDB connection").setHeading();
 
 		// Any change to credentials voids the "connection verified" flag — otherwise
 		// flipping the URL would not re-gate the index status view.
@@ -97,7 +100,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				})
 			);
 
-		containerEl.createEl("h2", { text: "Encryption" });
+		new Setting(containerEl).setName("Encryption").setHeading();
 
 		new Setting(containerEl)
 			.setName("End-to-end encryption")
@@ -130,7 +133,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				);
 		}
 
-		containerEl.createEl("h2", { text: "Conflict handling" });
+		new Setting(containerEl).setName("Conflict handling").setHeading();
 
 		new Setting(containerEl)
 			.setName("Conflict strategy")
@@ -159,7 +162,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				);
 		}
 
-		containerEl.createEl("h2", { text: "Sync" });
+		new Setting(containerEl).setName("Sync").setHeading();
 
 		// NOTE: there is deliberately no "start automatically" toggle. The master
 		// switch in the status card is the single source of truth: on means this
@@ -180,7 +183,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Sync hidden files")
 			.setDesc(
-				"Hidden files are things like .obsidian (your settings & plugins) and .git. " +
+				`Hidden files are things like ${cfg} (your settings & plugins) and .git. ` +
 					"Normal notes & attachments are always synced. (Our own plugin's data.json is never synced.)"
 			)
 			.addToggle((t) =>
@@ -207,7 +210,10 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			// OFF: whitelist — nothing hidden syncs except these
 			new Setting(containerEl)
 				.setName("…but still sync these")
-				.setDesc("One path per line. Hidden files are skipped — list any you DO want synced (e.g. .obsidian/snippets/). Leave empty to skip all hidden files.")
+				.setDesc(
+					"One path per line. Hidden files are skipped — list any you DO want synced " +
+						`(e.g. ${cfg}/snippets/). Leave empty to skip all hidden files.`
+				)
 				.addTextArea((t) => {
 					t.setValue(s.hiddenInclude.join("\n")).onChange(async (v) => {
 						s.hiddenInclude = v.split("\n").map((x) => x.trim()).filter((x) => x.length > 0);
@@ -217,7 +223,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				});
 		}
 
-		containerEl.createEl("h2", { text: "Actions" });
+		new Setting(containerEl).setName("Actions").setHeading();
 
 		// NOTE: "Force sync" is deliberately NOT repeated here — it lives
 		// in the status card, next to the state they act on. Only actions that are
