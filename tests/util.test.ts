@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stringArraysEqual } from "../src/util";
+import { stringArraysEqual, toError } from "../src/util";
 import {
 	cyrb53,
 	arrayBufferToBase64,
@@ -263,5 +263,39 @@ describe("stringArraysEqual", () => {
 	});
 	it("order matters → false", () => {
 		expect(stringArraysEqual(["h:a", "h:b"], ["h:b", "h:a"])).toBe(false);
+	});
+});
+
+describe("toError — coercing PouchDB's non-Error rejections", () => {
+	it("passes a real Error through untouched", () => {
+		const e = new Error("boom");
+		expect(toError(e)).toBe(e);
+	});
+
+	it("prefers CouchDB's `reason`, the sentence a user can act on", () => {
+		// The exact shape PouchDB rejects with on a bad password.
+		const rejected = { status: 401, name: "unauthorized", reason: "Name or password is incorrect." };
+		expect(toError(rejected).message).toBe("Name or password is incorrect.");
+	});
+
+	it("falls back to message, then error", () => {
+		expect(toError({ message: "no such database" }).message).toBe("no such database");
+		expect(toError({ error: "not_found" }).message).toBe("not_found");
+	});
+
+	it("never yields '[object Object]' for an object without those fields", () => {
+		expect(toError({ status: 500 }).message).not.toBe("[object Object]");
+		expect(toError({ status: 500 }).message).toBe('{"status":500}');
+	});
+
+	it("survives a circular object", () => {
+		const circular: Record<string, unknown> = { status: 500 };
+		circular.self = circular;
+		expect(() => toError(circular)).not.toThrow();
+	});
+
+	it("handles primitives", () => {
+		expect(toError("plain string").message).toBe("plain string");
+		expect(toError(undefined).message).toBe("undefined");
 	});
 });

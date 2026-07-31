@@ -36,9 +36,9 @@
 		"@wdio/local-runner": "^9.28.0",
 		"@wdio/mocha-framework": "^9.28.0",
 		"@wdio/spec-reporter": "^9.28.0",
-		"builtin-modules": "^3.3.0",
 		"esbuild": "^0.20.0",
 		"eslint": "^10.6.0",
+		"eslint-plugin-obsidianmd": "^0.4.1",
 		"happy-dom": "^20.10.6",
 		"mocha": "^10.8.2",
 		"obsidian": "latest",
@@ -46,11 +46,15 @@
 		"pouchdb-adapter-memory": "^9.0.0",
 		"tsx": "^4.22.4",
 		"typescript": "^5.4.0",
+		"typescript-eslint": "^8.65.0",
 		"vitest": "^4.1.9",
 		"wdio-obsidian-reporter": "^3.1.1",
 		"wdio-obsidian-service": "^3.1.1"
 	},
 	"dependencies": {
 		"pouchdb-browser": "^9.0.0"
+	},
+	"overrides": {
+		"uuid": "^11.1.1"
 	}
 }

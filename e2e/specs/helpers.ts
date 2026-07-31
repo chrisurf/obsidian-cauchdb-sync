@@ -19,7 +19,7 @@ export function pluginIsEnabled(): Promise<boolean> {
 	}, PLUGIN_ID);
 }
 
-/** All registered command ids (e.g. "couchdb-sync:couchdb-sync-now"). */
+/** All registered command ids (e.g. "couchdb-sync:force-sync"). */
 export function commandIds(): Promise<string[]> {
 	return browser.executeObsidian(({ app }) => {
 		const commands = (app as unknown as { commands: { commands: Record<string, unknown> } }).commands;
@@ -61,14 +61,20 @@ export function renderSettingsSnapshot(): Promise<SettingsSnapshot> {
 		if (!tab) throw new Error(`settings tab '${id}' not found`);
 		a.setting.open?.();
 		a.setting.openTab?.(tab);
+		// Section headings are Setting(...).setHeading() rows, which Obsidian renders
+		// as .setting-item.setting-item-heading — NOT as <h2>. Reading h2 here is what
+		// the plugin review asked us to stop emitting, so the probe follows the markup.
+		const HEADING_SEL = ".setting-item-heading .setting-item-name";
 		// Ensure a render even if opening the modal was a no-op headless.
-		if (!tab.containerEl || tab.containerEl.querySelectorAll("h2").length === 0) {
+		if (!tab.containerEl || tab.containerEl.querySelectorAll(HEADING_SEL).length === 0) {
 			tab.display();
 		}
 		const ce = tab.containerEl;
 		return {
-			headings: Array.from(ce.querySelectorAll("h2")).map((h) => h.textContent ?? ""),
-			settingNames: Array.from(ce.querySelectorAll(".setting-item-name")).map((e) => e.textContent ?? ""),
+			headings: Array.from(ce.querySelectorAll(HEADING_SEL)).map((h) => h.textContent ?? ""),
+			settingNames: Array.from(
+				ce.querySelectorAll(".setting-item:not(.setting-item-heading) .setting-item-name")
+			).map((e) => e.textContent ?? ""),
 			hasTree: !!ce.querySelector(".couchdb-sync-tree"),
 			text: ce.textContent ?? "",
 		};

@@ -13,7 +13,10 @@ import { migrateSettings } from "./migrate";
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
-import { generateDeviceId, sha256Hex, textToBytes } from "./util";
+import { SyncStatusView, VIEW_TYPE_SYNC_STATUS } from "./view";
+import { WhatsNewModal } from "./whatsnewmodal";
+import { shouldShowWhatsNew } from "./whatsnew";
+import { generateDeviceId, sha256Hex, textToBytes, toError } from "./util";
 
 /** _local doc id under which we remember which remote this cache belongs to. */
 const ORIGIN_FP_DOC = "_local/couchdb-sync-origin";
@@ -42,14 +45,18 @@ function localDbName(settings: CouchDBSyncSettings): string {
 	return `${LOCAL_DB_PREFIX}-${settings.localDbId}`;
 }
 
-// Lucide icon name per state for the status bar.
+/**
+ * Lucide icon per state for the status bar. The icon doubles as the on/off
+ * switch, so the not-running states use "play": a pause glyph on a control whose
+ * click turns syncing ON reads backwards.
+ */
 const STATUS_ICON: Record<SyncState, string> = {
-	[SYNC_STATE.IDLE]: "pause",
+	[SYNC_STATE.IDLE]: "play",
 	[SYNC_STATE.CONNECTING]: "plug",
 	[SYNC_STATE.SYNCING]: "refresh-cw",
 	[SYNC_STATE.SYNCED]: "check",
 	[SYNC_STATE.OFFLINE]: "cloud-off",
-	[SYNC_STATE.PAUSED]: "pause",
+	[SYNC_STATE.PAUSED]: "play",
 	[SYNC_STATE.ERROR]: "alert-triangle",
 };
 
@@ -57,8 +64,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 	settings!: CouchDBSyncSettings;
 	private db: SyncDatabase | null = null;
 	private engine: SyncEngine | null = null;
-	/** de-dupes concurrent idle index reports (the 3s settings + 5s drift timers) */
-	private idleReportInFlight: Promise<IndexReport | null> | null = null;
+	/**
+	 * De-dupes concurrent index reports. The settings view (3 s) and the status-bar
+	 * drift summary (5 s) both ask for one, and a report is expensive (a hidden-file
+	 * walk plus a decrypt of every file doc). Sharing ONE in-flight promise across
+	 * every caller — running session or idle — means overlapping timers can never
+	 * stack full scans on top of each other.
+	 */
+	private reportInFlight: Promise<IndexReport | null> | null = null;
 	/** guards the idle auto-resolver so overlapping refresh ticks don't stack it */
 	private resolvingIdle = false;
 	/** cached legacy-cache doc count (probed at most once per session) */
@@ -84,66 +97,96 @@ export default class CouchDBSyncPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
+		// Status bar: two controls, not one label. The icon is the on/off switch —
+		// the same one the status card shows — and the text opens the full status
+		// panel. Both are reachable without going through settings, which is where
+		// they are needed most.
 		this.statusEl = this.addStatusBarItem();
 		this.statusEl.addClass("couchdb-sync-status");
-		this.statusIconEl = this.statusEl.createSpan({ cls: "couchdb-sync-status-icon" });
-		this.statusTextEl = this.statusEl.createSpan({ cls: "couchdb-sync-status-text" });
-		this.setStatus(SYNC_STATE.IDLE);
+		this.statusIconEl = this.statusEl.createSpan({
+			cls: "couchdb-sync-status-icon couchdb-sync-status-btn",
+		});
+		this.statusTextEl = this.statusEl.createSpan({
+			cls: "couchdb-sync-status-text couchdb-sync-status-btn",
+		});
+		this.statusIconEl.onclick = () => void this.toggleSyncFromStatusBar();
+		this.statusTextEl.onclick = () => void this.revealStatusView();
+		// Paint directly rather than via setStatus: the status already IS the initial
+		// idle state, and setStatus short-circuits on an unchanged status — which
+		// would leave the bar blank until something else happened to change it.
+		this.renderStatusBar();
+
+		this.registerView(VIEW_TYPE_SYNC_STATUS, (leaf) => new SyncStatusView(leaf, this));
 
 		this.addSettingTab(new CouchDBSyncSettingTab(this.app, this));
 
 		this.addCommand({
-			id: "couchdb-sync-now",
-			name: "Sync now",
+			id: "open-panel",
+			name: "Open sync status panel",
+			callback: () => void this.revealStatusView(),
+		});
+
+		this.addCommand({
+			id: "force-sync",
+			name: "Force sync",
 			callback: () => this.restartSync(),
 		});
 
 		this.addCommand({
-			id: "couchdb-sync-stop",
-			name: "Stop sync",
-			callback: () => this.stopSync(),
-		});
-
-		this.addCommand({
-			id: "couchdb-sync-toggle",
+			id: "toggle-sync",
 			name: "Turn sync on/off",
 			callback: () => this.setSyncEnabled(!this.settings.syncEnabled),
 		});
 
 		this.addCommand({
-			id: "couchdb-sync-wipe-local",
+			id: "wipe-local-cache",
 			name: "Wipe local cache (does not download)",
 			callback: async () => {
 				await this.wipeLocalOnly();
-				new Notice("CouchDB Sync: local cache wiped. Use 'Sync now' to re-download.");
+				new Notice("CouchDB Sync: local cache wiped. Use 'Force sync' to re-download.");
 			},
 		});
 
+		this.addCommand({
+			id: "whats-new",
+			name: "Show what's new",
+			callback: () => this.showWhatsNew(),
+		});
+
 		// Crash guard: if the previous session never reached a safe state, it left
-		// unsafeShutdown=true. In that case turn auto-start OFF and KEEP it off across
-		// restarts, so the plugin can never get stuck in an auto-start crash loop. The
-		// user re-enables "Start sync automatically" once the problem is fixed.
-		if (this.settings.unsafeShutdown) {
+		// unsafeShutdown=true. Switch sync OFF so the plugin can never get stuck in a
+		// start-crash loop — and do it on the VISIBLE master switch, so the state the
+		// user sees ("SYNC OFF", with the reason next to it) is the state the plugin
+		// is actually in. Turning it back on is one click once the problem is fixed.
+		const crashed = this.settings.unsafeShutdown;
+		if (crashed) {
 			this.settings.unsafeShutdown = false;
-			this.settings.autoStart = false;
+			this.settings.syncEnabled = false;
 			await this.saveSettings();
 			new Notice(
-				"CouchDB Sync: the previous sync did not finish cleanly, so auto-start has been " +
-					"turned OFF. Fix the issue (or Reset), then re-enable 'Start sync automatically'.",
+				"CouchDB Sync: the previous sync did not finish cleanly, so sync has been " +
+					"switched OFF. Fix the issue (or wipe the local cache), then switch sync back on.",
 				12000
 			);
 		}
 
 		if (!this.settings.syncEnabled) {
-			// Master switch is off — stay fully idle, no network, until the user
-			// flips the toggle back on. (Auto-start is deliberately ignored here.)
-			this.setStatus(SYNC_STATE.IDLE, "sync off");
-		} else if (this.settings.autoStart) {
-			// Start after the layout is ready so the initial scan sees a settled vault.
-			this.app.workspace.onLayoutReady(() => void this.restartSync());
+			// Master switch off — stay fully idle, no network, until it is switched on.
+			// Only the crash case carries a detail; for a plain "off" the status card
+			// derives the wording from the live state.
+			this.setStatus(
+				SYNC_STATE.IDLE,
+				crashed ? "Stopped after an unclean shutdown — switch sync on to resume." : undefined
+			);
 		} else {
-			this.setStatus(SYNC_STATE.IDLE, "auto-start off");
+			// Sync is on, so it runs: start once the layout is ready, so the initial
+			// scan sees a settled vault.
+			this.app.workspace.onLayoutReady(() => void this.restartSync());
 		}
+
+		// Once the workspace is up, surface the "what's new" note — a modal during
+		// layout restore would fight with Obsidian for the screen.
+		this.app.workspace.onLayoutReady(() => this.maybeShowWhatsNew());
 
 		// Keep the status bar honest: the engine reports SYNCED as soon as
 		// replication is idle, but disk and DB can still be out of sync. The
@@ -163,12 +206,40 @@ export default class CouchDBSyncPlugin extends Plugin {
 		window.setTimeout(() => void this.refreshDriftSummary(), 1500);
 	}
 
-	async onunload(): Promise<void> {
+	/** Opens the "what's new" note for the installed version. */
+	private showWhatsNew(): void {
+		new WhatsNewModal(this.app, this.manifest.version, this, () =>
+			void this.revealStatusView()
+		).open();
+	}
+
+	/**
+	 * Shows the note once per install or update, then records the version so the
+	 * same one is never shown twice. The version is stamped BEFORE the modal
+	 * opens: a vault that is closed without acknowledging it should not be
+	 * greeted by the same note on every launch.
+	 */
+	private maybeShowWhatsNew(): void {
+		const current = this.manifest.version;
+		if (!shouldShowWhatsNew(current, this.settings.lastWhatsNewVersion)) return;
+		this.settings.lastWhatsNewVersion = current;
+		void this.saveSettings();
+		this.showWhatsNew();
+	}
+
+	onunload(): void {
+		// Plugin.onunload is declared void and Obsidian does not await it, so returning
+		// a promise here only hid that the teardown races the unload. Kept explicit:
+		// the work still runs, and the fire-and-forget is visible rather than implied.
+		void this.teardown();
+	}
+
+	private async teardown(): Promise<void> {
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
-		// Drain any in-flight idle index report before touching the shared handle.
-		if (this.idleReportInFlight) await this.idleReportInFlight.catch(() => undefined);
+		// Drain any in-flight index report before touching the shared handle.
+		if (this.reportInFlight) await this.reportInFlight.catch(() => undefined);
 		// Privacy mode: destroy the local PouchDB before closing so the cached
 		// metadata is not left behind when the plugin is disabled. Must run
 		// BEFORE close() (destroy on a closed handle is a no-op in PouchDB).
@@ -188,13 +259,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 		await this.saveSettings().catch(() => undefined);
 	}
 
-	private setStatus(
-		state: SyncState,
-		detail?: string,
-		progress?: { done: number; total: number }
-	): void {
+	private setStatus(state: SyncState, detail?: string): void {
+		// Idempotent: the engine signals activity once per indexed file, so a large
+		// vault would otherwise re-render the status bar and every listener thousands
+		// of times for a status that never changed.
+		if (this.status.state === state && this.status.detail === detail) return;
+
 		const wasSyncing = this.status.state === SYNC_STATE.SYNCING;
-		this.status = { state, detail, done: progress?.done, total: progress?.total };
+		this.status = { state, detail };
 
 		if (state === SYNC_STATE.ERROR && detail) console.error("[couchdb-sync]", detail);
 
@@ -222,10 +294,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 		// syncing spinner or drift % — nothing is being synced, so any progress-style
 		// readout would be misleading (the drift summary still ticks for the index view).
 		if (!this.settings.syncEnabled) {
-			setIcon(this.statusIconEl, "pause");
+			setIcon(this.statusIconEl, "play");
 			this.statusIconEl.removeClass("couchdb-sync-spin");
 			this.statusTextEl.setText("CouchDB off");
 			this.statusEl.setAttr("aria-label", "CouchDB sync: off");
+			this.statusIconEl.setAttr("aria-label", "Turn sync on");
+			this.statusTextEl.setAttr("aria-label", "Open the sync status panel");
 			return;
 		}
 
@@ -233,23 +307,18 @@ export default class CouchDBSyncPlugin extends Plugin {
 		let label = "CouchDB";
 		let ariaSuffix = raw.detail ?? raw.state;
 
-		const engineSyncingWithProgress =
-			raw.state === SYNC_STATE.SYNCING && raw.total !== undefined && raw.total > 0;
-
 		if (raw.state === SYNC_STATE.ERROR || raw.state === SYNC_STATE.OFFLINE || raw.state === SYNC_STATE.CONNECTING) {
 			// these states win unconditionally — drift % would be misleading here
 			displayed = raw.state;
-		} else if (engineSyncingWithProgress) {
-			// initial index pass etc. — engine knows the exact progress
-			displayed = SYNC_STATE.SYNCING;
-			const pct = Math.round((raw.done! / raw.total!) * 100);
-			label = `CouchDB ${pct}%`;
-			ariaSuffix = `syncing ${pct}% — ${raw.detail ?? "indexing"}`;
 		} else if (drift && drift.drift > 0) {
-			// engine settled but disk and DB still diverge -> not "in sync"
-			displayed = SYNC_STATE.SYNCING;
+			// Disk and DB still diverge -> not "in sync". Only call it *syncing* (and
+			// spin the icon) when a session is actually running; with nothing running
+			// a spinner would claim progress that is not happening.
+			displayed = this.engine ? SYNC_STATE.SYNCING : SYNC_STATE.PAUSED;
 			label = `CouchDB ${drift.pct}%`;
-			ariaSuffix = `syncing ${drift.pct}% — ${drift.drift} pending`;
+			ariaSuffix = this.engine
+				? `syncing ${drift.pct}% — ${drift.drift} pending`
+				: `not running — ${drift.pct}% in sync, ${drift.drift} pending`;
 		} else if (
 			drift &&
 			drift.drift === 0 &&
@@ -269,6 +338,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.statusIconEl.toggleClass("couchdb-sync-spin", displayed === SYNC_STATE.SYNCING);
 		this.statusTextEl.setText(label);
 		this.statusEl.setAttr("aria-label", `CouchDB sync: ${ariaSuffix}`);
+		// Per-control tooltips: the two halves do different things, so one shared
+		// label on the container would be wrong for at least one of them.
+		this.statusIconEl.setAttr("aria-label", "Turn sync off");
+		this.statusTextEl.setAttr("aria-label", "Open the sync status panel");
 	}
 
 	/** Recompute the cached drift summary from the current index report. */
@@ -285,7 +358,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 				// Idle auto-resolve: when no session is running but the DB still holds
 				// unresolved conflicts, clear them by the configured strategy so they
-				// don't sit red forever waiting for the next full "Sync now". Guarded so
+				// don't sit red forever waiting for the next full "Force sync". Guarded so
 				// overlapping 5s/3s ticks never stack it.
 				if (!this.engine && report.conflicts.length > 0 && !this.resolvingIdle) {
 					this.resolvingIdle = true;
@@ -304,6 +377,38 @@ export default class CouchDBSyncPlugin extends Plugin {
 			return;
 		}
 		this.renderStatusBar();
+	}
+
+	/**
+	 * Status-bar icon click: the on/off switch, in the status bar.
+	 *
+	 * Deliberately the same thing the toggle in the status card does — not a third
+	 * behaviour. The plugin has exactly two controls: a switch for WHETHER this
+	 * vault syncs, and a "Force sync" button for DOING it once. The status-bar icon is
+	 * the switch (it already shows that state), and the panel holds the action.
+	 */
+	private async toggleSyncFromStatusBar(): Promise<void> {
+		const turningOn = !this.settings.syncEnabled;
+		try {
+			await this.setSyncEnabled(turningOn);
+			new Notice(turningOn ? "CouchDB Sync: sync turned on." : "CouchDB Sync: sync turned off.");
+		} catch (e) {
+			new Notice(`CouchDB Sync: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	/** Open (or focus) the sync status panel in the right sidebar. */
+	async revealStatusView(): Promise<void> {
+		const { workspace } = this.app;
+		const existing = workspace.getLeavesOfType(VIEW_TYPE_SYNC_STATUS);
+		if (existing.length > 0) {
+			await workspace.revealLeaf(existing[0]);
+			return;
+		}
+		const leaf = workspace.getRightLeaf(false);
+		if (!leaf) return;
+		await leaf.setViewState({ type: VIEW_TYPE_SYNC_STATUS, active: true });
+		await workspace.revealLeaf(leaf);
 	}
 
 	/** Subscribe to status updates (used by the settings view). Returns an unsubscribe. */
@@ -341,7 +446,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 		if (!this.settings.syncEnabled) {
 			this.engine?.stop();
 			this.engine = null;
-			this.setStatus(SYNC_STATE.IDLE, "sync off");
+			// No detail: the status card derives the reason from the live state.
+			this.setStatus(SYNC_STATE.IDLE);
 			return;
 		}
 		this.engine?.stop();
@@ -397,8 +503,9 @@ export default class CouchDBSyncPlugin extends Plugin {
 			if (mode === "download") await engine.startDownloadOnly();
 			else await engine.start();
 		} catch (e) {
-			this.setStatus(SYNC_STATE.ERROR, String(e));
-			new Notice(`CouchDB Sync failed to start: ${e}`);
+			const err = toError(e);
+			this.setStatus(SYNC_STATE.ERROR, err.message);
+			new Notice(`CouchDB Sync failed to start: ${err.message}`);
 		}
 	}
 
@@ -468,7 +575,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 	/**
 	 * Wipe the LOCAL replica only (fast). Does NOT download — the user starts that
-	 * separately with "Sync now". The server data is untouched.
+	 * separately with "Force sync". The server data is untouched.
 	 */
 	wipeLocalOnly(): Promise<void> {
 		this.engine?.abort();
@@ -477,34 +584,38 @@ export default class CouchDBSyncPlugin extends Plugin {
 			.then(async () => {
 				this.engine?.stop();
 				this.engine = null;
-				// Drain any in-flight idle report so we don't destroy the DB out from
+				// Drain any in-flight report so we don't destroy the DB out from
 				// under a pending read, then destroy and drop the handle. getSharedDb()
 				// re-opens a fresh empty replica on the next read.
-				if (this.idleReportInFlight) await this.idleReportInFlight.catch(() => undefined);
+				if (this.reportInFlight) await this.reportInFlight.catch(() => undefined);
 				await this.getSharedDb().destroyLocal().catch(() => undefined);
 				this.db = null;
-				this.idleReportInFlight = null;
-				this.setStatus(SYNC_STATE.IDLE, "local cache wiped — press Sync now to re-download");
+				this.reportInFlight = null;
+				this.setStatus(SYNC_STATE.IDLE, "local cache wiped — press Force sync to re-download");
 			});
 		return this.restartLock;
 	}
 
 	/**
-	 * Stop syncing and go idle. Also turns OFF live sync and auto-start so the state
-	 * is consistent — otherwise the toggles would fight this and sync could resume.
+	 * Stop the CURRENT session and go idle, without touching the master switch.
+	 *
+	 * No longer exposed as a control of its own: a second element that also means
+	 * "off" competed with the master switch. It survives as internal plumbing —
+	 * turning live sync off stops the continuous session here — and the user-facing
+	 * way to stop is the switch, which is honest about being persistent.
+	 *
+	 * The resulting idle state carries a reason, so the status card can say why
+	 * nothing is running instead of showing a bare "Not syncing".
 	 */
 	stopSync(): Promise<void> {
 		this.engine?.abort();
 		this.restartLock = this.restartLock
 			.catch(() => undefined)
-			.then(async () => {
+			.then(() => {
 				this.engine?.stop();
 				this.engine = null;
 				// keep the shared DB handle open so the idle index view still works
-				this.settings.liveSync = false;
-				this.settings.autoStart = false;
-				await this.saveSettings();
-				this.setStatus(SYNC_STATE.IDLE, "stopped");
+				this.setStatus(SYNC_STATE.IDLE, "stopped — press Force sync to resume");
 			});
 		return this.restartLock;
 	}
@@ -537,11 +648,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.engine?.abort();
 		this.restartLock = this.restartLock
 			.catch(() => undefined)
-			.then(async () => {
+			.then(() => {
 				this.engine?.stop();
 				this.engine = null;
 				// Keep the shared DB handle OPEN — the idle index view still reads it.
-				this.setStatus(SYNC_STATE.IDLE, "sync off");
+				// No detail: the status card derives the reason from the live state.
+				this.setStatus(SYNC_STATE.IDLE);
 			});
 		await this.restartLock;
 	}
@@ -576,32 +688,35 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * full picture (counts, percentage, file tree — including hidden files).
 	 */
 	async getIndexReport(): Promise<IndexReport | null> {
+		// One shared in-flight promise for every caller (see reportInFlight). On top
+		// of the single always-open DB handle from getSharedDb, this guarantees there
+		// is never a second PouchDB opened/closed on the same name — no IDBDatabase
+		// race — and no duplicated hidden-file walk.
+		if (this.reportInFlight) return this.reportInFlight;
+		const p = this.computeIndexReport();
+		this.reportInFlight = p;
+		try {
+			return await p;
+		} finally {
+			if (this.reportInFlight === p) this.reportInFlight = null;
+		}
+	}
+
+	/** Build a fresh index report. Always go through getIndexReport (de-duped). */
+	private async computeIndexReport(): Promise<IndexReport | null> {
 		if (this.engine) return this.engine.getIndexReport();
 		if (!this.settings.serverUrl) return null; // not configured yet
 		// Don't expose cached doc paths/names to the user until they have proven
 		// they own the configured remote — otherwise typing random text into the
 		// URL field is enough to inspect anything the local cache happens to hold.
 		if (!this.settings.connectionVerified) return null;
-		// De-dupe overlapping idle reports: the 3s settings timer and the 5s drift
-		// timer can fire together. Sharing one in-flight promise (on top of the one
-		// shared, always-open DB handle from getSharedDb) means there is never a
-		// second PouchDB opened/closed on the same name — no IDBDatabase race.
-		if (this.idleReportInFlight) return this.idleReportInFlight;
-		const p = (async (): Promise<IndexReport | null> => {
-			const db = this.getSharedDb();
-			const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
-			if (stored && stored.fp) {
-				const current = await originFingerprint(this.settings);
-				if (stored.fp !== current) return null; // mismatch -> hide
-			}
-			return await buildIndexReport(this.app, this.settings, db);
-		})();
-		this.idleReportInFlight = p;
-		try {
-			return await p;
-		} finally {
-			if (this.idleReportInFlight === p) this.idleReportInFlight = null;
+		const db = this.getSharedDb();
+		const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
+		if (stored && stored.fp) {
+			const current = await originFingerprint(this.settings);
+			if (stored.fp !== current) return null; // mismatch -> hide
 		}
+		return buildIndexReport(this.app, this.settings, db);
 	}
 
 	/** UI helper: state of the origin fingerprint for the current settings. */
@@ -777,9 +892,15 @@ export default class CouchDBSyncPlugin extends Plugin {
 		let dirty = false;
 
 		// One-time settings migration for configs written before CURRENT_SETTINGS_VERSION.
-		const priorVersion = (loaded?.schemaVersion as number | undefined) ?? 0;
+		const priorVersion = loaded?.schemaVersion ?? 0;
 		if (!loaded || priorVersion < CURRENT_SETTINGS_VERSION) {
-			if (migrateSettings(this.settings as CouchDBSyncSettings & Record<string, unknown>, priorVersion)) {
+			if (
+				migrateSettings(
+					this.settings as CouchDBSyncSettings & Record<string, unknown>,
+					priorVersion,
+					this.app.vault.configDir
+				)
+			) {
 				dirty = true;
 			}
 			this.settings.schemaVersion = CURRENT_SETTINGS_VERSION;
@@ -814,7 +935,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 			this.legacyDocCountCache = 0;
 			return 0;
 		}
-		const db = new PouchDB(LEGACY_LOCAL_DB_NAME, { skip_setup: true } as PouchDB.Configuration.LocalDatabaseConfiguration);
+		const db = new PouchDB(LEGACY_LOCAL_DB_NAME, { skip_setup: true });
 		try {
 			const info = await db.info();
 			this.legacyDocCountCache = info.doc_count ?? 0;

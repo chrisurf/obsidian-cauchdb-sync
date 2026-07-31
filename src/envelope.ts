@@ -140,7 +140,7 @@ export async function hydrateFile(wire: Wire, settings: CouchDBSyncSettings): Pr
 	}
 	const pass = settings.passphrase;
 	if (!pass) throw new Error("Encrypted document, but no passphrase is set.");
-	const m: FileMeta = JSON.parse(await decryptString(wire.meta, pass));
+	const m = JSON.parse(await decryptString(wire.meta, pass)) as FileMeta;
 	const doc: FileDoc = {
 		_id: FILE_PREFIX + m.path,
 		type: "file",
@@ -167,7 +167,7 @@ export async function dehydrateVersion(
 	doc: VersionDoc,
 	settings: CouchDBSyncSettings
 ): Promise<Wire> {
-	if (!encActive(settings)) return { ...doc } as unknown as Wire;
+	if (!encActive(settings)) return { ...doc };
 	const pass = settings.passphrase;
 	const meta: VersionMeta = {
 		path: doc.path,
@@ -199,7 +199,7 @@ export async function hydrateVersion(
 	if (typeof wire.meta !== "string") return wire as unknown as VersionDoc;
 	const pass = settings.passphrase;
 	if (!pass) throw new Error("Encrypted version doc, but no passphrase is set.");
-	const m: VersionMeta = JSON.parse(await decryptString(wire.meta, pass));
+	const m = JSON.parse(await decryptString(wire.meta, pass)) as VersionMeta;
 	// Rebuild the plaintext id by swapping the hashed path back for the real path,
 	// preserving the "\n<ts>\n<hash>" tail exactly as stored.
 	const rest = wire._id.slice(HISTORY_PREFIX.length);

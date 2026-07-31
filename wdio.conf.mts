@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { env } from "node:process";
 import { parseObsidianVersions } from "wdio-obsidian-service";
@@ -16,16 +17,37 @@ import { parseObsidianVersions } from "wdio-obsidian-service";
  *   - installerVersion — the Electron/Chromium base (only replaced on reinstall)
  *
  * We default to the latest stable pair, which obsidian-launcher can download
- * from the public releases without credentials. We deliberately do NOT default
- * to `earliest/earliest`: that resolves to this plugin's manifest.minAppVersion
- * (1.4.0), which obsidian-versions.json flags as a BETA build — and beta builds
- * require an Obsidian Insiders account (OBSIDIAN_EMAIL / OBSIDIAN_PASSWORD) to
- * download, which the credential-free CI does not have. Anyone with Insiders
- * credentials can widen the matrix via the env var, e.g.
+ * from the public releases without credentials. `earliest/earliest` resolves to
+ * this plugin's manifest.minAppVersion (1.7.2, a stable release), so widening the
+ * matrix is a matter of setting the env var:
  *   OBSIDIAN_VERSIONS="earliest/earliest latest/latest"
+ * (The floor used to be 1.4.0, which obsidian-versions.json flags as a BETA build
+ * and which therefore needed Insiders credentials to download — no longer the
+ * case, but CI still runs one version by default to keep the job short.)
  */
 
 const cacheDir = path.resolve(".obsidian-cache");
+
+/**
+ * Stage a CLEAN copy of the plugin for the sandbox vault.
+ *
+ * The service copies the whole plugin directory it is pointed at. Pointing it at
+ * the repo root would drag a developer's local `data.json` — real server URL,
+ * password and E2EE passphrase — into every run: the privacy-gate spec then sees
+ * an already-configured, already-verified plugin and fails, and a spec that runs
+ * "Sync now" would replicate the fixture vault into a REAL database. `data.json`
+ * is gitignored, so this only ever bites locally, never in CI — the worst kind of
+ * flake. Copy just the three release artifacts instead.
+ */
+const pluginDir = path.resolve(".e2e-plugin");
+const artifacts = ["manifest.json", "main.js", "styles.css"];
+const missing = artifacts.filter((f) => !fs.existsSync(path.resolve(f)));
+if (missing.length > 0) {
+	throw new Error(`Missing build artifact(s): ${missing.join(", ")}. Run "npm run build" first.`);
+}
+fs.rmSync(pluginDir, { recursive: true, force: true });
+fs.mkdirSync(pluginDir, { recursive: true });
+for (const f of artifacts) fs.copyFileSync(path.resolve(f), path.join(pluginDir, f));
 
 const defaultVersions = "latest/latest";
 const versions = await parseObsidianVersions(env.OBSIDIAN_VERSIONS ?? defaultVersions, { cacheDir });
@@ -49,8 +71,8 @@ export const config: WebdriverIO.Config = {
 		"wdio:obsidianOptions": {
 			appVersion,
 			installerVersion,
-			// The plugin under test: the repo root holds the built main.js + manifest.json.
-			plugins: ["."],
+			// The plugin under test: a clean staging copy, never the repo root (see above).
+			plugins: [pluginDir],
 			// Starting vault fixture; specs reset it per-test via obsidianPage.resetVault().
 			vault: "e2e/vaults/simple",
 		},

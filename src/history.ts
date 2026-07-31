@@ -216,7 +216,7 @@ export class HistoryModal extends Modal {
 	}
 
 	private renderInline(el: HTMLElement, hunks: ReturnType<typeof diffLines>): void {
-		const pre = el.createEl("div", { cls: "couchdb-sync-diff-inline" });
+		const pre = el.createDiv({ cls: "couchdb-sync-diff-inline" });
 		for (const h of hunks) {
 			if (h.type === "equal") {
 				for (const l of h.lines) pre.createDiv({ text: " " + l, cls: "cdl-eq" });
