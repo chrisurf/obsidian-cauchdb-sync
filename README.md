@@ -45,6 +45,10 @@ plain-language UX.
   Folders roll up to the most urgent state inside them (green only when the whole subtree is clean),
   and the summary/lists/tree all derive from one classification so they never disagree. Updates
   **in place** every few seconds — no flicker.
+- 🎛️ **Reachable from the status bar** — the status-bar item is two controls: the icon starts and
+  pauses syncing, and the label (`CouchDB 63%`) opens the full status panel in the right sidebar.
+  That panel is the *same* component the settings tab embeds — same tree, same per-file actions, not
+  a read-only copy — so you can manage sync without opening settings at all.
 - ✨ **Live per-file feedback** — files being transferred pulse with a left-to-right "scan" shimmer
   and show **chunk progress** (`12 / 40 chunks · 30%`).
 - 🩹 **Self-healing** — if a download references a chunk that went missing (e.g. an interrupted

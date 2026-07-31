@@ -153,7 +153,7 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 					// A stamped render signature must always describe what is really on
 					// screen — a stale run stamping it for a tree it drew into an orphan
 					// is what made the empty view permanent.
-					sigMatchesDom: !!(tab as unknown as { treeSig?: string }).treeSig === hasTree,
+					sigMatchesDom: !!(tab as unknown as { panel: { treeSig?: string } }).panel.treeSig === hasTree,
 				};
 			} finally {
 				releaseRest(); // let the pending run finish; leave no gate behind
@@ -194,16 +194,15 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 					pluginTabs?: {
 						id: string;
 						containerEl: HTMLElement;
-						loadIndex(force: boolean): Promise<void>;
-						treeSig?: string;
+						panel: { loadIndex(force: boolean): Promise<void>; treeSig?: string };
 					}[];
 				};
 			};
 			const tab = (a.setting.pluginTabs ?? []).find((t) => t.id === id)!;
-			await tab.loadIndex(false); // what the 3 s auto-refresh timer does
+			await tab.panel.loadIndex(false); // what the 3 s auto-refresh timer does
 			await new Promise((r) => setTimeout(r, 300));
 			const hasTree = !!tab.containerEl.querySelector(".couchdb-sync-tree");
-			return { hasTree, sigMatchesDom: !!tab.treeSig === hasTree };
+			return { hasTree, sigMatchesDom: !!tab.panel.treeSig === hasTree };
 		}, PLUGIN_ID);
 
 		assert.equal(state.hasTree, true, "the periodic refresh must not lose the file tree");

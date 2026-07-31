@@ -338,6 +338,24 @@
 	height: 0.9em;
 }
 
+/*
+ * Both halves of the status bar item are controls: the icon starts/pauses the
+ * session, the text opens the status panel. They must therefore look and behave
+ * like controls — a hover surface makes the split legible (you can see which
+ * half you are about to hit) without adding any chrome in the resting state.
+ */
+.couchdb-sync-status-btn {
+	cursor: pointer;
+	border-radius: 4px;
+	padding: 0 0.25em;
+	transition: background-color 120ms ease, color 120ms ease;
+}
+
+.couchdb-sync-status-btn:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
 @keyframes couchdb-sync-rot {
 	from { transform: rotate(0deg); }
 	to { transform: rotate(360deg); }
@@ -840,4 +858,48 @@
 
 .couchdb-sync-merge-footer {
 	align-items: center;
+}
+
+/* --- sync status panel in the right sidebar --------------------------------
+ *
+ * The panel is shared with the settings tab, which is roughly three times as
+ * wide. Nothing here changes its structure — only the breathing room, so the
+ * same markup stays readable in a narrow leaf: the status row is allowed to wrap
+ * instead of squeezing the toggle off the edge, and the file tree may scroll
+ * sideways rather than forcing the whole leaf to.
+ */
+
+.couchdb-sync-view .couchdb-sync-panel-host {
+	padding: 0.2em 0.1em;
+}
+
+.couchdb-sync-view .couchdb-sync-card {
+	padding: 0.7em 0.8em;
+}
+
+.couchdb-sync-view .couchdb-sync-livestatus-row {
+	flex-wrap: wrap;
+	row-gap: 0.4em;
+}
+
+/* In a narrow leaf the toggle wraps to its own line instead of being pushed out. */
+.couchdb-sync-view .couchdb-sync-power {
+	margin-left: auto;
+}
+
+.couchdb-sync-view .couchdb-sync-legend {
+	gap: 0.35em 0.5em;
+}
+
+.couchdb-sync-view .couchdb-sync-tree {
+	overflow-x: auto;
+}
+
+.couchdb-sync-view .couchdb-sync-section-list {
+	padding-left: 1.4em;
+}
+
+/* Long paths must not widen the leaf; they wrap or scroll inside their row. */
+.couchdb-sync-view .couchdb-sync-drift-name {
+	overflow-wrap: anywhere;
 }

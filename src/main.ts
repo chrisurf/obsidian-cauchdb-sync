@@ -13,6 +13,7 @@ import { migrateSettings } from "./migrate";
 import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
+import { SyncStatusView, VIEW_TYPE_SYNC_STATUS } from "./view";
 import { generateDeviceId, sha256Hex, textToBytes } from "./util";
 
 /** _local doc id under which we remember which remote this cache belongs to. */
@@ -42,14 +43,18 @@ function localDbName(settings: CouchDBSyncSettings): string {
 	return `${LOCAL_DB_PREFIX}-${settings.localDbId}`;
 }
 
-// Lucide icon name per state for the status bar.
+/**
+ * Lucide icon per state for the status bar. The icon is also the button that
+ * starts and pauses syncing, so the not-running states use "play": a pause glyph
+ * on a control that resumes reads backwards once it is clickable.
+ */
 const STATUS_ICON: Record<SyncState, string> = {
-	[SYNC_STATE.IDLE]: "pause",
+	[SYNC_STATE.IDLE]: "play",
 	[SYNC_STATE.CONNECTING]: "plug",
 	[SYNC_STATE.SYNCING]: "refresh-cw",
 	[SYNC_STATE.SYNCED]: "check",
 	[SYNC_STATE.OFFLINE]: "cloud-off",
-	[SYNC_STATE.PAUSED]: "pause",
+	[SYNC_STATE.PAUSED]: "play",
 	[SYNC_STATE.ERROR]: "alert-triangle",
 };
 
@@ -90,13 +95,33 @@ export default class CouchDBSyncPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
+		// Status bar: two controls, not one label. The icon drives the session
+		// (start / pause), the text opens the full status panel. Both are reachable
+		// without going through settings, which is where they are needed most.
 		this.statusEl = this.addStatusBarItem();
 		this.statusEl.addClass("couchdb-sync-status");
-		this.statusIconEl = this.statusEl.createSpan({ cls: "couchdb-sync-status-icon" });
-		this.statusTextEl = this.statusEl.createSpan({ cls: "couchdb-sync-status-text" });
-		this.setStatus(SYNC_STATE.IDLE);
+		this.statusIconEl = this.statusEl.createSpan({
+			cls: "couchdb-sync-status-icon couchdb-sync-status-btn",
+		});
+		this.statusTextEl = this.statusEl.createSpan({
+			cls: "couchdb-sync-status-text couchdb-sync-status-btn",
+		});
+		this.statusIconEl.onclick = () => void this.toggleSessionFromStatusBar();
+		this.statusTextEl.onclick = () => void this.revealStatusView();
+		// Paint directly rather than via setStatus: the status already IS the initial
+		// idle state, and setStatus short-circuits on an unchanged status — which
+		// would leave the bar blank until something else happened to change it.
+		this.renderStatusBar();
+
+		this.registerView(VIEW_TYPE_SYNC_STATUS, (leaf) => new SyncStatusView(leaf, this));
 
 		this.addSettingTab(new CouchDBSyncSettingTab(this.app, this));
+
+		this.addCommand({
+			id: "couchdb-sync-open-panel",
+			name: "Open sync status panel",
+			callback: () => void this.revealStatusView(),
+		});
 
 		this.addCommand({
 			id: "couchdb-sync-now",
@@ -234,10 +259,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 		// syncing spinner or drift % — nothing is being synced, so any progress-style
 		// readout would be misleading (the drift summary still ticks for the index view).
 		if (!this.settings.syncEnabled) {
-			setIcon(this.statusIconEl, "pause");
+			setIcon(this.statusIconEl, "play");
 			this.statusIconEl.removeClass("couchdb-sync-spin");
 			this.statusTextEl.setText("CouchDB off");
 			this.statusEl.setAttr("aria-label", "CouchDB sync: off");
+			this.statusIconEl.setAttr("aria-label", "Turn sync on");
+			this.statusTextEl.setAttr("aria-label", "Open the sync status panel");
 			return;
 		}
 
@@ -276,6 +303,13 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.statusIconEl.toggleClass("couchdb-sync-spin", displayed === SYNC_STATE.SYNCING);
 		this.statusTextEl.setText(label);
 		this.statusEl.setAttr("aria-label", `CouchDB sync: ${ariaSuffix}`);
+		// Per-control tooltips: the two halves do different things, so one shared
+		// label on the container would be wrong for at least one of them.
+		this.statusIconEl.setAttr(
+			"aria-label",
+			this.engine ? "Pause syncing" : "Sync now"
+		);
+		this.statusTextEl.setAttr("aria-label", "Open the sync status panel");
 	}
 
 	/** Recompute the cached drift summary from the current index report. */
@@ -311,6 +345,47 @@ export default class CouchDBSyncPlugin extends Plugin {
 			return;
 		}
 		this.renderStatusBar();
+	}
+
+	/**
+	 * Status-bar icon click: drive the current session.
+	 *
+	 * Same three cases the status card's primary action covers, so the two controls
+	 * can never mean different things:
+	 *   sync off      -> switch it on (and start)
+	 *   running       -> pause this session (the master switch stays on)
+	 *   on, but idle  -> start a session
+	 * Sync being off is the only case that changes the persisted switch, and only
+	 * because it is the sole way to say "go" from the status bar.
+	 */
+	private async toggleSessionFromStatusBar(): Promise<void> {
+		try {
+			if (!this.settings.syncEnabled) {
+				await this.setSyncEnabled(true);
+				new Notice("CouchDB Sync: sync turned on.");
+			} else if (this.engine) {
+				await this.stopSync();
+				new Notice("CouchDB Sync: paused. Click again to resume.");
+			} else {
+				await this.restartSync();
+			}
+		} catch (e) {
+			new Notice(`CouchDB Sync: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	/** Open (or focus) the sync status panel in the right sidebar. */
+	async revealStatusView(): Promise<void> {
+		const { workspace } = this.app;
+		const existing = workspace.getLeavesOfType(VIEW_TYPE_SYNC_STATUS);
+		if (existing.length > 0) {
+			await workspace.revealLeaf(existing[0]);
+			return;
+		}
+		const leaf = workspace.getRightLeaf(false);
+		if (!leaf) return;
+		await leaf.setViewState({ type: VIEW_TYPE_SYNC_STATUS, active: true });
+		await workspace.revealLeaf(leaf);
 	}
 
 	/** Subscribe to status updates (used by the settings view). Returns an unsubscribe. */

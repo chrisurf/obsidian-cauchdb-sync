@@ -13,7 +13,9 @@ Plugin ID: `couchdb-sync`
 ```
 src/
   main.ts        Plugin entry point (extends Obsidian Plugin class)
-  settings.ts    Settings tab UI, sync state tree, per-file/folder action menus
+  settings.ts    Settings tab: embeds the panel, then the settings themselves
+  indexpanel.ts  Shared status panel: status card, state lists, file tree, actions
+  view.ts        Right-sidebar view (ItemView) hosting the same panel
   engine.ts      Core sync engine (indexing, upload, download, conflict resolution)
   database.ts    PouchDB/CouchDB abstraction, CORS-free fetch via Obsidian requestUrl
   crypto.ts      AES-256-GCM end-to-end encryption (PBKDF2 key derivation)
@@ -38,7 +40,8 @@ src/
 - **`types.ts`** is the shared contract — all interfaces (`FileDoc`, `ChunkDoc`, `VersionDoc`, `SyncRecord`) and constants live here. Import types from here, not from other modules.
 - **`util.ts`** contains only pure functions with zero Obsidian API dependencies — these are the primary unit test targets.
 - **`crypto.ts`** uses only WebCrypto (no Obsidian API) — also fully testable.
-- **`main.ts`** and **`settings.ts`** depend on the Obsidian API and are excluded from unit test coverage. Test them via integration/manual testing.
+- **`indexpanel.ts`** is the single implementation of the sync status UI. It is mounted twice — by the settings tab and by the sidebar view — so never fork it: a change must land in one place, or the two views drift apart. Multiple instances may be mounted at once; each owns its host element and its own timers, and index reports are de-duplicated in `main.ts`.
+- **`main.ts`**, **`settings.ts`**, **`indexpanel.ts`** and **`view.ts`** depend on the Obsidian API and are excluded from unit test coverage. Test them via the e2e suite.
 - **`engine.ts`** orchestrates everything. It depends on Obsidian's `App`, `Vault`, and `TFile` APIs. Testing requires mocking the Obsidian API.
 
 ## Code Quality
