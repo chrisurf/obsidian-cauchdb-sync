@@ -1,6 +1,6 @@
 import { browser, expect } from "@wdio/globals";
 import { describe, it } from "mocha";
-import { PLUGIN_ID, pluginIsEnabled, callPlugin } from "./helpers.js";
+import { PLUGIN_ID, pluginIsEnabled, callPlugin, pluginSettings } from "./helpers.js";
 
 /**
  * Command layer: the registered commands run without a configured/verified
@@ -25,6 +25,21 @@ describe("CouchDB Sync — commands (no server)", function () {
 
 	it("runs 'Stop sync' when nothing is running without crashing", async function () {
 		await browser.executeObsidianCommand(`${PLUGIN_ID}:couchdb-sync-stop`);
+		await expect(await pluginIsEnabled()).toBe(true);
+	});
+
+	it("toggles the master sync switch off and back on, persisting the state", async function () {
+		// starts enabled by default
+		await expect((await pluginSettings<{ syncEnabled: boolean }>()).syncEnabled).toBe(true);
+
+		await browser.executeObsidianCommand(`${PLUGIN_ID}:couchdb-sync-toggle`);
+		await browser.pause(500);
+		await expect((await pluginSettings<{ syncEnabled: boolean }>()).syncEnabled).toBe(false);
+		await expect(await pluginIsEnabled()).toBe(true);
+
+		await browser.executeObsidianCommand(`${PLUGIN_ID}:couchdb-sync-toggle`);
+		await browser.pause(500);
+		await expect((await pluginSettings<{ syncEnabled: boolean }>()).syncEnabled).toBe(true);
 		await expect(await pluginIsEnabled()).toBe(true);
 	});
 
