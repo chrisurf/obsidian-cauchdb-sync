@@ -14,6 +14,8 @@ import { SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
 import { SyncStatusView, VIEW_TYPE_SYNC_STATUS } from "./view";
+import { WhatsNewModal } from "./whatsnewmodal";
+import { shouldShowWhatsNew } from "./whatsnew";
 import { generateDeviceId, sha256Hex, textToBytes } from "./util";
 
 /** _local doc id under which we remember which remote this cache belongs to. */
@@ -145,6 +147,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "couchdb-sync-whats-new",
+			name: "Show what's new",
+			callback: () => this.showWhatsNew(),
+		});
+
 		// Crash guard: if the previous session never reached a safe state, it left
 		// unsafeShutdown=true. Switch sync OFF so the plugin can never get stuck in a
 		// start-crash loop — and do it on the VISIBLE master switch, so the state the
@@ -176,6 +184,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 			this.app.workspace.onLayoutReady(() => void this.restartSync());
 		}
 
+		// Once the workspace is up, surface the "what's new" note — a modal during
+		// layout restore would fight with Obsidian for the screen.
+		this.app.workspace.onLayoutReady(() => this.maybeShowWhatsNew());
+
 		// Keep the status bar honest: the engine reports SYNCED as soon as
 		// replication is idle, but disk and DB can still be out of sync. The
 		// status bar should only show the checkmark when drift is truly zero,
@@ -192,6 +204,27 @@ export default class CouchDBSyncPlugin extends Plugin {
 		});
 		// First read once the layout has had a moment to settle (don't block onload).
 		window.setTimeout(() => void this.refreshDriftSummary(), 1500);
+	}
+
+	/** Opens the "what's new" note for the installed version. */
+	private showWhatsNew(): void {
+		new WhatsNewModal(this.app, this.manifest.version, this, () =>
+			void this.revealStatusView()
+		).open();
+	}
+
+	/**
+	 * Shows the note once per install or update, then records the version so the
+	 * same one is never shown twice. The version is stamped BEFORE the modal
+	 * opens: a vault that is closed without acknowledging it should not be
+	 * greeted by the same note on every launch.
+	 */
+	private maybeShowWhatsNew(): void {
+		const current = this.manifest.version;
+		if (!shouldShowWhatsNew(current, this.settings.lastWhatsNewVersion)) return;
+		this.settings.lastWhatsNewVersion = current;
+		void this.saveSettings();
+		this.showWhatsNew();
 	}
 
 	async onunload(): Promise<void> {

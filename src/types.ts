@@ -115,6 +115,15 @@ export interface CouchDBSyncSettings {
 	 * the server (no warm cache). Off by default.
 	 */
 	forgetCacheOnDisable: boolean;
+
+	/**
+	 * Plugin version whose "what's new" note the user has already seen. Empty on
+	 * a fresh install, so the note shows once; it is stamped with the running
+	 * version the moment the note is due, which also covers every later update
+	 * (installed version !== stamped version). Not a preference — there is
+	 * nothing to configure, only something to remember.
+	 */
+	lastWhatsNewVersion: string;
 }
 
 /**
@@ -163,6 +172,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	unsafeShutdown: false,
 	connectionVerified: false,
 	forgetCacheOnDisable: false,
+	lastWhatsNewVersion: "",
 };
 
 /**

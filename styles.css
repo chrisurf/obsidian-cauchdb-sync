@@ -903,3 +903,48 @@
 .couchdb-sync-view .couchdb-sync-drift-name {
 	overflow-wrap: anywhere;
 }
+
+/* ================================================================
+   WHAT'S NEW MODAL
+   ================================================================ */
+
+.couchdb-sync-whats-new-modal {
+	max-width: 640px;
+}
+
+/* Hero and coffee button are fetched from GitHub, so both are laid out to
+   survive the image never arriving — the elements hide themselves on error. */
+.couchdb-sync-whats-new-hero {
+	display: block;
+	width: 100%;
+	height: auto;
+	border-radius: var(--radius-m);
+	margin-bottom: 12px;
+}
+
+.couchdb-sync-whats-new-support {
+	display: flex;
+	justify-content: center;
+	margin-bottom: 12px;
+}
+
+.couchdb-sync-bmc-button {
+	height: 48px;
+	width: auto;
+	border-radius: var(--radius-s);
+}
+
+/* The note is longer than a modal can be, so the body scrolls and the buttons
+   below it stay reachable. */
+.couchdb-sync-whats-new-body {
+	max-height: 50vh;
+	overflow-y: auto;
+}
+
+.couchdb-sync-whats-new-body h2 {
+	margin-top: 1em;
+}
+
+.couchdb-sync-whats-new-body h2:first-child {
+	margin-top: 0;
+}
