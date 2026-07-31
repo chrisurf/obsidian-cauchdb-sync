@@ -1126,6 +1126,18 @@ export class SyncEngine {
 		return bytesToText(bytes);
 	}
 
+	/**
+	 * Current decoded text of the DATABASE copy of a path (null when the DB has no
+	 * copy, it is a tombstone, or it is binary). Assembled from the file doc's
+	 * content-addressed chunks (local cache first, falling back to the remote), so
+	 * the side-by-side merge editor can show what the server currently holds.
+	 */
+	async getRemoteText(path: string): Promise<string | null> {
+		const doc = (await this.db.get(FILE_PREFIX + path)) as FileDoc | null;
+		if (!doc || doc.deleted || doc.binary) return null;
+		return bytesToText(await this.assembleChildren(doc.children));
+	}
+
 	/** Restore an earlier version: make it the current content everywhere. */
 	async restoreVersion(path: string, v: VersionDoc): Promise<void> {
 		if (v.deleted) {
@@ -1257,6 +1269,33 @@ export class SyncEngine {
 			if (!(f instanceof TFile)) throw new Error("not on this device");
 			await this.pushPath(path, f.stat.mtime, f.stat.ctime, f.stat.size);
 		}
+		await this.dropLosingRevs(path);
+	}
+
+	/**
+	 * Write a reconciled text (produced by the side-by-side merge editor) as the new
+	 * content of a path on BOTH sides: overwrite the local file, then upload it so the
+	 * database copy matches. After this the file is fully in sync on the merged text.
+	 * Text-only by design — binary drift is resolved with takeLocal / takeRemote.
+	 */
+	async applyMergedText(path: string, text: string): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const hidden = isHidden(path);
+		// Suppress the self-inflicted modify event; the upload is done explicitly below.
+		this.suppress.add(path);
+		this.lastHash.delete(path);
+		if (hidden) {
+			if (!(await adapter.exists(path))) throw new Error("not on this device");
+			await adapter.write(path, text);
+		} else {
+			const f = this.app.vault.getAbstractFileByPath(path);
+			if (!(f instanceof TFile)) throw new Error("not on this device");
+			await this.app.vault.modify(f, text);
+		}
+		// Re-stat after the write so size/mtime match exactly what landed on disk.
+		const st = await adapter.stat(path);
+		if (!st) throw new Error("could not stat the merged file");
+		await this.pushPath(path, st.mtime, st.ctime, st.size);
 		await this.dropLosingRevs(path);
 	}
 

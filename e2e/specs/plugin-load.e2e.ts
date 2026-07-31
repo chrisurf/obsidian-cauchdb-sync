@@ -13,12 +13,13 @@ describe("CouchDB Sync — plugin load", function () {
 		await expect(await pluginIsEnabled()).toBe(true);
 	});
 
-	it("registers its three commands", async function () {
+	it("registers its commands", async function () {
 		const ids = await commandIds();
 		const mine = ids.filter((c) => c.startsWith(`${PLUGIN_ID}:`)).sort();
 		assert.deepEqual(mine, [
 			`${PLUGIN_ID}:couchdb-sync-now`,
 			`${PLUGIN_ID}:couchdb-sync-stop`,
+			`${PLUGIN_ID}:couchdb-sync-toggle`,
 			`${PLUGIN_ID}:couchdb-sync-wipe-local`,
 		]);
 	});

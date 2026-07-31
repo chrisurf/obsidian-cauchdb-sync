@@ -67,8 +67,6 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private statusIconEl!: HTMLElement;
 	private statusTextEl!: HTMLElement;
 	private restartLock: Promise<void> = Promise.resolve();
-	private emergencyStopUntil = 0;
-	private emergencyTimer?: ReturnType<typeof setTimeout>;
 
 	/** Latest status, shared with the settings view via listeners. */
 	status: SyncStatus = { state: SYNC_STATE.IDLE };
@@ -107,6 +105,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "couchdb-sync-toggle",
+			name: "Turn sync on/off",
+			callback: () => this.setSyncEnabled(!this.settings.syncEnabled),
+		});
+
+		this.addCommand({
 			id: "couchdb-sync-wipe-local",
 			name: "Wipe local cache (does not download)",
 			callback: async () => {
@@ -130,7 +134,11 @@ export default class CouchDBSyncPlugin extends Plugin {
 			);
 		}
 
-		if (this.settings.autoStart) {
+		if (!this.settings.syncEnabled) {
+			// Master switch is off — stay fully idle, no network, until the user
+			// flips the toggle back on. (Auto-start is deliberately ignored here.)
+			this.setStatus(SYNC_STATE.IDLE, "sync off");
+		} else if (this.settings.autoStart) {
 			// Start after the layout is ready so the initial scan sees a settled vault.
 			this.app.workspace.onLayoutReady(() => void this.restartSync());
 		} else {
@@ -156,7 +164,6 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	async onunload(): Promise<void> {
-		if (this.emergencyTimer) clearTimeout(this.emergencyTimer);
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
@@ -210,6 +217,17 @@ export default class CouchDBSyncPlugin extends Plugin {
 	private renderStatusBar(): void {
 		const raw = this.status;
 		const drift = this.effectiveDrift;
+
+		// Master switch off: show a single, unambiguous "off" indicator and never a
+		// syncing spinner or drift % — nothing is being synced, so any progress-style
+		// readout would be misleading (the drift summary still ticks for the index view).
+		if (!this.settings.syncEnabled) {
+			setIcon(this.statusIconEl, "pause");
+			this.statusIconEl.removeClass("couchdb-sync-spin");
+			this.statusTextEl.setText("CouchDB off");
+			this.statusEl.setAttr("aria-label", "CouchDB sync: off");
+			return;
+		}
 
 		let displayed: SyncState = raw.state;
 		let label = "CouchDB";
@@ -318,7 +336,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	private async doRestart(mode: "sync" | "download" = "sync"): Promise<void> {
-		if (this.getEmergencyRemaining() > 0) return;
+		// Master kill switch: the single choke point every start path funnels through.
+		// While off, no session may start — keep the engine torn down and stay idle.
+		if (!this.settings.syncEnabled) {
+			this.engine?.stop();
+			this.engine = null;
+			this.setStatus(SYNC_STATE.IDLE, "sync off");
+			return;
+		}
 		this.engine?.stop();
 		this.engine = null;
 		// Keep the shared local DB handle OPEN across restarts (see getSharedDb): the
@@ -485,37 +510,45 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	/**
-	 * Emergency stop: halt sync immediately for a cooldown period without
-	 * changing any settings. After the cooldown, sync resumes automatically
-	 * if auto-start / live sync are enabled.
+	 * Master on/off switch for the entire sync mechanism.
+	 *
+	 * OFF is a hard, persisted stop: abort and tear down the running session, then
+	 * hold everything down. Because `syncEnabled` gates the single restart choke
+	 * point (`doRestart`), auto-start, the idle conflict resolver and every per-file
+	 * action, nothing can spin sync back up on its own — the switch is authoritative,
+	 * not advisory. The shared local DB handle is deliberately kept open so the index
+	 * status view keeps working (local reads only; no network).
+	 *
+	 * ON is a clean start: persist the flag, then run the normal restart path, which
+	 * honours the existing `liveSync` preference (continuous vs. one-shot). Flipping
+	 * the switch is serialized through `restartLock`, so it can never race a start.
 	 */
-	emergencyStop(seconds = 30): void {
-		if (this.emergencyTimer) clearTimeout(this.emergencyTimer);
-		this.emergencyStopUntil = Date.now() + seconds * 1000;
+	async setSyncEnabled(enabled: boolean): Promise<void> {
+		if (this.settings.syncEnabled === enabled) return;
+		this.settings.syncEnabled = enabled;
+		await this.saveSettings();
+
+		if (enabled) {
+			await this.restartSync();
+			return;
+		}
+
+		// Turning OFF: abort fast, then quiesce on the serialized lock.
 		this.engine?.abort();
 		this.restartLock = this.restartLock
 			.catch(() => undefined)
 			.then(async () => {
 				this.engine?.stop();
 				this.engine = null;
-				// keep the shared DB handle open (idle reads); only the engine pauses
-				this.setStatus(SYNC_STATE.PAUSED, `emergency stop (${seconds}s)`);
+				// Keep the shared DB handle OPEN — the idle index view still reads it.
+				this.setStatus(SYNC_STATE.IDLE, "sync off");
 			});
-		this.emergencyTimer = setTimeout(() => {
-			this.emergencyStopUntil = 0;
-			this.emergencyTimer = undefined;
-			if (this.settings.autoStart || this.settings.liveSync) {
-				void this.restartSync();
-			} else {
-				this.setStatus(SYNC_STATE.IDLE, "emergency stop ended");
-			}
-		}, seconds * 1000);
+		await this.restartLock;
 	}
 
-	/** Seconds remaining on the emergency stop cooldown, or 0. */
-	getEmergencyRemaining(): number {
-		if (this.emergencyStopUntil === 0) return 0;
-		return Math.max(0, Math.ceil((this.emergencyStopUntil - Date.now()) / 1000));
+	/** Whether the master sync switch is on. */
+	isSyncEnabled(): boolean {
+		return this.settings.syncEnabled;
 	}
 
 	/** Whether a sync session is currently active. */
@@ -587,6 +620,11 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * chunking/encryption/IO), so they require a live session.
 	 */
 	private async ensureEngine(): Promise<SyncEngine> {
+		// Respect the master switch: per-file sync actions must not silently power the
+		// engine back on while sync is turned off.
+		if (!this.settings.syncEnabled) {
+			throw new Error("Sync is turned off. Switch it on to run this action.");
+		}
 		if (!this.engine) await this.restartSync();
 		if (!this.engine) throw new Error("Sync is not configured. Set up the connection first.");
 		return this.engine;
@@ -663,6 +701,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * handle. Returns how many conflicts were resolved.
 	 */
 	async resolveConflictsIdle(): Promise<number> {
+		if (!this.settings.syncEnabled) return 0; // master switch off -> no network work
 		if (this.engine) return 0; // a live session resolves conflicts on its own
 		if (!this.settings.serverUrl) return 0;
 		if (this.settings.e2eeEnabled && !this.settings.passphrase) return 0; // can't read chunks
@@ -695,6 +734,22 @@ export default class CouchDBSyncPlugin extends Plugin {
 	/** Current on-disk text of a file (null if missing or binary). */
 	getLocalText(path: string): Promise<string | null> {
 		return this.withReader((e) => e.getLocalText(path));
+	}
+
+	/** Current text of the DATABASE copy of a file (null if missing or binary). */
+	getRemoteText(path: string): Promise<string | null> {
+		return this.withReader((e) => e.getRemoteText(path));
+	}
+
+	/**
+	 * Apply a reconciled text from the side-by-side merge editor: overwrite the local
+	 * file and upload it so the database matches, leaving the file fully in sync.
+	 * Requires a live session (single mutating code path), so it honours the master
+	 * switch via ensureEngine.
+	 */
+	async applyMergedTextPath(path: string, text: string): Promise<void> {
+		const engine = await this.ensureEngine();
+		await engine.applyMergedText(path, text);
 	}
 
 	/** Restore an earlier version as the current content everywhere (mutating). */

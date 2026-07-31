@@ -1,17 +1,25 @@
 name: Auto Release
 
-# Release bot: whenever main gets a new manifest.json version (i.e. a version
-# bump is merged), build the plugin and publish a GitHub Release with the three
-# required assets. No manual tag push needed — bump the version in a PR, merge,
-# and the release is cut automatically. Re-running for an already-released
-# version is a safe no-op.
+# Automatic SemVer release on every merge to main.
+#
+# On each push to main we look at the commit(s) merged since the last release
+# tag and decide the next version from Conventional Commits:
+#   feat:            -> minor
+#   fix:/chore:/…    -> patch
+#   type!: / BREAKING -> major
+# (see scripts/release-version.mjs). The three version files are bumped via the
+# existing `npm version` lifecycle, committed back as `chore(release): x.y.z`,
+# tagged (bare tag, no "v" prefix — Obsidian requires this), built, and published
+# as a GitHub Release with the three required assets.
+#
+# The commit we push back is itself skipped by the loop guard, so this never
+# recurses. Pushing with GITHUB_TOKEN also does not re-trigger workflows; the
+# guard additionally covers the PAT (RELEASE_TOKEN) case.
 
 on:
   push:
     branches: [main]
-    paths:
-      - "manifest.json"
-  workflow_dispatch: {} # allow manual trigger from the Actions tab
+  workflow_dispatch: {} # allow a manual run from the Actions tab
 
 concurrency:
   group: auto-release
@@ -25,45 +33,98 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags so we can find the range since the last release,
+          # and a token that is allowed to push the release commit back to main.
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Loop guard — skip our own release commits
+        id: guard
+        run: |
+          subject="$(git log -1 --pretty=%s)"
+          echo "HEAD subject: $subject"
+          if printf '%s' "$subject" | grep -qiE '^chore\(release\):'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "This is a release commit — nothing to do."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Use Node.js
+        if: steps.guard.outputs.skip == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: "npm"
 
-      - name: Read manifest version
-        id: version
-        run: echo "value=$(node -p "require('./manifest.json').version")" >> "$GITHUB_OUTPUT"
-
-      - name: Check whether this version is already released
-        id: check
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Determine commit range since the last release tag
+        id: range
+        if: steps.guard.outputs.skip == 'false'
         run: |
-          if gh release view "${{ steps.version.outputs.value }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Release ${{ steps.version.outputs.value }} already exists — nothing to do."
+          last="$(git tag --sort=-v:refname | head -n1)"
+          if [ -n "$last" ]; then
+            echo "Last release tag: $last"
+            echo "range=$last..HEAD" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No prior release tag — considering full history."
+            echo "range=HEAD" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build plugin
-        if: steps.check.outputs.exists == 'false'
+      - name: Compute next version from Conventional Commits
+        id: version
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          # NUL-separate each commit's full message so multi-line bodies (and
+          # BREAKING CHANGE footers) reach the classifier intact.
+          git log ${{ steps.range.outputs.range }} --pretty=format:'%B%x00' \
+            | node scripts/release-version.mjs
+          echo # newline after the script's bare-value stdout
+
+      - name: Report decision
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          echo "release=${{ steps.version.outputs.release }}"
+          echo "level=${{ steps.version.outputs.level }}"
+          echo "version=${{ steps.version.outputs.version }}"
+
+      - name: Apply version bump (package.json + manifest.json + versions.json)
+        if: steps.guard.outputs.skip == 'false' && steps.version.outputs.release == 'true'
         run: |
           npm ci
-          npm run build
+          # `npm version` runs the repo's `version` lifecycle (version-bump.mjs),
+          # which syncs manifest.json + versions.json. --no-git-tag-version keeps
+          # git untouched; we commit and tag explicitly below.
+          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
 
-      - name: Create release
-        if: steps.check.outputs.exists == 'false'
+      - name: Build plugin
+        if: steps.guard.outputs.skip == 'false' && steps.version.outputs.release == 'true'
+        run: npm run build
+
+      - name: Commit and push the release
+        if: steps.guard.outputs.skip == 'false' && steps.version.outputs.release == 'true'
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json manifest.json versions.json
+          git commit -m "chore(release): ${v}"
+          git push origin HEAD:main
+
+      - name: Create GitHub Release
+        if: steps.guard.outputs.skip == 'false' && steps.version.outputs.release == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          version="${{ steps.version.outputs.value }}"
-          # Bare version tag (no "v" prefix) — Obsidian requires this. gh creates
-          # the tag on `main` if it does not already exist.
-          gh release create "$version" \
-            --title="$version" \
-            --target="${{ github.sha }}" \
-            --generate-notes \
-            main.js manifest.json styles.css
+          v="${{ steps.version.outputs.version }}"
+          # Bare version tag (no "v" prefix). gh creates the tag at the release
+          # commit we just pushed. Re-running for an existing version is a no-op.
+          if gh release view "$v" >/dev/null 2>&1; then
+            echo "Release $v already exists — skipping."
+          else
+            gh release create "$v" \
+              --title="$v" \
+              --target="$(git rev-parse HEAD)" \
+              --generate-notes \
+              main.js manifest.json styles.css
+          fi

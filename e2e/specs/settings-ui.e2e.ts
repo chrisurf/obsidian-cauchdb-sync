@@ -39,4 +39,11 @@ describe("CouchDB Sync — settings UI", function () {
 		// sync tree must NOT be rendered — that is the privacy gate.
 		await expect(snap.hasTree).toBe(false);
 	});
+
+	it("renders the master sync on/off toggle (not the old timed stop button)", async function () {
+		// The status card carries the hard on/off switch; the removed emergency-stop
+		// button used the word "Stopped <n>s" and must no longer appear.
+		assert.ok(/Sync o(n|ff)/.test(snap.text), `expected a sync on/off toggle; text was: ${snap.text.slice(0, 300)}`);
+		assert.ok(!/Stopped \d+s/.test(snap.text), "the old timed emergency-stop button should be gone");
+	});
 });

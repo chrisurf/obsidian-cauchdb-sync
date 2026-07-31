@@ -258,3 +258,38 @@ export function diffLines(aText: string, bText: string): DiffHunk[] {
 	if (j < m) pushChange([], b.slice(j));
 	return hunks;
 }
+
+/** Which side of a change block wins in the side-by-side merge editor. */
+export type MergeChoice = "local" | "remote";
+
+/**
+ * A merge block: `equal` context shared by both sides, or a `change` block whose
+ * `choice` records which side the user kept (local = left, remote = right). This is
+ * the pure state model behind the diff/merge modal, kept here so it is unit-testable.
+ */
+export type MergeBlock =
+	| { type: "equal"; lines: string[] }
+	| { type: "change"; local: string[]; remote: string[]; choice: MergeChoice };
+
+/**
+ * Build the initial merge blocks for two texts. Every change block defaults to
+ * `local` — the safe choice, since local is the user's current working copy — so an
+ * immediate apply can never silently drop on-disk work.
+ */
+export function buildMergeBlocks(localText: string, remoteText: string): MergeBlock[] {
+	return diffLines(localText, remoteText).map((h) =>
+		h.type === "equal"
+			? { type: "equal", lines: h.lines }
+			: { type: "change", local: h.local, remote: h.remote, choice: "local" }
+	);
+}
+
+/** Concatenate each block's winning lines into the reconciled document text. */
+export function mergeResult(blocks: MergeBlock[]): string {
+	const out: string[] = [];
+	for (const b of blocks) {
+		if (b.type === "equal") out.push(...b.lines);
+		else out.push(...(b.choice === "local" ? b.local : b.remote));
+	}
+	return out.join("\n");
+}
