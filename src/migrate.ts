@@ -10,6 +10,12 @@ import { CouchDBSyncSettings, DEFAULT_HIDDEN_EXCLUDE } from "./types";
  * …) so a config that predates a given entry stops syncing a whole git repo / the
  * entire .obsidian folder; (b) strip the dead `excludePatterns` / `ignorePatterns`
  * keys left over from the pre-hidden ignore model.
+ *
+ * v2: fold the removed `autoStart` flag into `syncEnabled`. The two meant almost
+ * the same thing, which is how a config could claim "sync is on" while nothing ever
+ * ran. A config that had auto-start OFF keeps that intent — sync is switched off,
+ * visibly, rather than silently starting to replicate after an update. Everything
+ * else is untouched, so the common case (auto-start on) simply keeps syncing.
  */
 export function migrateSettings(
 	settings: CouchDBSyncSettings & Record<string, unknown>,
@@ -33,6 +39,21 @@ export function migrateSettings(
 				delete settings[deadKey];
 				changed = true;
 			}
+		}
+	}
+
+	if (priorVersion < 2) {
+		// Never start replicating on this vault's behalf just because an update
+		// removed a flag: an explicit "do not start on launch" becomes an explicit
+		// "sync is off", which the status card states plainly and the user can undo
+		// with one click.
+		if (settings.autoStart === false) {
+			settings.syncEnabled = false;
+			changed = true;
+		}
+		if ("autoStart" in settings) {
+			delete settings.autoStart;
+			changed = true;
 		}
 	}
 

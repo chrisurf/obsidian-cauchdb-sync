@@ -5,7 +5,7 @@ export type ConflictStrategy = "master" | "newest";
  * that needs a one-time migration (see `migrateSettings` in main.ts). Fresh
  * installs are stamped with the current version and skip migration.
  */
-export const CURRENT_SETTINGS_VERSION = 1;
+export const CURRENT_SETTINGS_VERSION = 2;
 
 export interface CouchDBSyncSettings {
 	/** persisted settings schema version; drives one-time migrations */
@@ -42,22 +42,27 @@ export interface CouchDBSyncSettings {
 	localDbId: string;
 
 	/**
-	 * Master on/off switch for the whole sync mechanism. When false, NOTHING
-	 * touches the network: no session starts, auto-start is ignored, live sync
-	 * cannot resume, per-file sync actions refuse, and the idle conflict resolver
-	 * stands down. The local index view still reads the cache (local-only, no
-	 * network) so the user can inspect state while sync is off. This is the hard
-	 * kill switch surfaced as the on/off toggle in the status card — distinct from
-	 * `liveSync`/`autoStart`, which are preferences that only take effect while the
-	 * master switch is on. Persisted, so "off" survives restarts. On by default.
+	 * Master on/off switch for the whole sync mechanism, and the ONLY thing that
+	 * decides whether this vault syncs.
+	 *
+	 * ON means "sync this vault": a session starts automatically when Obsidian
+	 * launches. OFF is a hard kill switch — NOTHING touches the network: no session
+	 * starts, live sync cannot resume, per-file sync actions refuse, and the idle
+	 * conflict resolver stands down. The local index view still reads the cache
+	 * (local-only, no network) so state stays inspectable while sync is off.
+	 *
+	 * There is deliberately no separate "start automatically" preference: two flags
+	 * for one intent produced the contradictory "SYNC ON … Idle" state, where the
+	 * switch said yes and nothing ran. Stopping the *current* session without
+	 * changing this switch is still possible (the status card's Stop button); that
+	 * state is explicitly labelled, unlike the silent one it replaces.
+	 *
+	 * Persisted, so "off" survives restarts. On by default.
 	 */
 	syncEnabled: boolean;
 
 	/** whether live (continuous) sync is enabled */
 	liveSync: boolean;
-
-	/** start synchronizing automatically when Obsidian launches */
-	autoStart: boolean;
 
 	/**
 	 * Sync hidden files (dotfiles and dot-folders like .obsidian, .git). Normal files
@@ -148,7 +153,6 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	localDbId: "",
 	syncEnabled: true,
 	liveSync: true,
-	autoStart: true,
 	syncHidden: false,
 	// when hidden sync is ON, keep these volatile/risky hidden paths out
 	hiddenExclude: [...DEFAULT_HIDDEN_EXCLUDE],

@@ -58,7 +58,6 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 				plugin.settings.username = "e2e";
 				plugin.settings.connectionVerified = true;
 				plugin.settings.syncEnabled = false;
-				plugin.settings.autoStart = false;
 				plugin.settings.e2eeEnabled = false;
 				await plugin.saveSettings();
 				// Silence the plugin's own 5 s drift timer so it cannot consume our

@@ -307,6 +307,52 @@
 }
 
 /* --- master on/off sync toggle (right-aligned in the live-status row) --- */
+/*
+ * Primary action in the status card, sitting directly next to the state it acts
+ * on ("Not syncing  [Sync now]"). Styled like the legend buttons below it so the
+ * card reads as one control surface.
+ */
+.couchdb-sync-primary-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4em;
+	margin-left: 0.8em;
+	padding: 0.25em 0.7em;
+	border: 1px solid var(--text-faint);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	line-height: 1.4;
+	cursor: pointer;
+	box-shadow: none;
+}
+.couchdb-sync-primary-action:hover:not(:disabled) {
+	background: var(--background-modifier-hover);
+	border-color: var(--interactive-accent);
+}
+.couchdb-sync-primary-action:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+.couchdb-sync-primary-icon {
+	display: inline-flex;
+	align-items: center;
+}
+.couchdb-sync-primary-icon .svg-icon {
+	width: 0.95em;
+	height: 0.95em;
+}
+
+/* Why nothing is happening — shown for every non-error state that has a reason. */
+.couchdb-sync-statusdetail {
+	margin: 0.35em 0 0 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: 400;
+}
+
 .couchdb-sync-power {
 	margin-left: auto;
 	display: inline-flex;

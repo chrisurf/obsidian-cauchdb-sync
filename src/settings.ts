@@ -234,15 +234,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h2", { text: "Sync" });
 
-		new Setting(containerEl)
-			.setName("Start automatically on launch")
-			.setDesc("When Obsidian opens, begin syncing on its own. Off = stay idle until you press “Sync now”.")
-			.addToggle((t) =>
-				t.setValue(s.autoStart).onChange(async (v) => {
-					s.autoStart = v;
-					await this.plugin.saveSettings();
-				})
-			);
+		// NOTE: there is deliberately no "start automatically" toggle. The master
+		// switch in the status card is the single source of truth: on means this
+		// vault syncs (including on launch). See CouchDBSyncSettings.syncEnabled.
 
 		new Setting(containerEl)
 			.setName("Live sync (real-time)")
@@ -298,22 +292,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h2", { text: "Actions" });
 
-		new Setting(containerEl)
-			.setName("Sync now")
-			.setDesc(
-				"Connect and synchronize both ways — upload local changes AND pull server changes. " +
-					"Also writes any cached-but-missing files from the local index to disk " +
-					"(heals 'Only in database' entries). With Live sync on, this also (re)starts continuous sync."
-			)
-			.addButton((b) =>
-				b
-					.setCta()
-					.setButtonText("Sync now")
-					.onClick(async () => {
-						new Notice("Syncing…");
-						await this.plugin.restartSync();
-					})
-			);
+		// NOTE: "Sync now" and "Stop" are deliberately NOT repeated here — they live
+		// in the status card, next to the state they act on. Only actions that are
+		// not part of the everyday loop remain in this section.
 
 		new Setting(containerEl)
 			.setName("Download from server")
@@ -326,17 +307,6 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				b.setButtonText("Download only").onClick(async () => {
 					new Notice("Downloading from server…");
 					await this.plugin.downloadFromServer();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Stop sync")
-			.setDesc("Stop syncing and go idle. Also turns off Live sync and auto-start so nothing resumes on its own.")
-			.addButton((b) =>
-				b.setButtonText("Stop").onClick(async () => {
-					await this.plugin.stopSync();
-					new Notice("Sync stopped. Live sync and auto-start turned off.");
-					this.display(); // reflect the toggles being switched off
 				})
 			);
 
@@ -477,7 +447,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		icon.toggleClass("couchdb-sync-spin", syncing);
 
 		const labelMap: Record<string, string> = {
-			[SYNC_STATE.IDLE]: "Idle",
+			[SYNC_STATE.IDLE]: "Not syncing",
 			[SYNC_STATE.CONNECTING]: "Connecting…",
 			[SYNC_STATE.SYNCING]: "Syncing…",
 			[SYNC_STATE.SYNCED]: "In sync",
@@ -490,8 +460,13 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			cls: "couchdb-sync-livestatus-label",
 		});
 
+		// Primary action, right next to the state it acts on: start a sync, or stop
+		// the running one. Everything a user reaches for in the common case lives in
+		// this card — no scrolling down to a separate Actions section.
+		this.renderPrimaryAction(row, st, on);
+
 		// Master on/off toggle (right-aligned): the hard kill switch for ALL sync.
-		// On -> clean start honouring the live/one-shot preference; off -> everything
+		// On -> sync this vault (starts now and on every launch); off -> everything
 		// stops immediately and stays stopped across restarts.
 		const toggleWrap = row.createDiv({ cls: "couchdb-sync-power" });
 		toggleWrap.createSpan({ text: on ? "Sync on" : "Sync off", cls: "couchdb-sync-power-caption" });
@@ -518,9 +493,87 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			bar.max = st.total;
 			bar.value = st.done ?? 0;
 			bar.addClass("couchdb-sync-progress");
-		} else if (st.detail && st.state === SYNC_STATE.ERROR) {
-			el.createEl("p", { text: st.detail, cls: "couchdb-sync-warn" });
+		} else {
+			// Always say WHY, not just WHAT. A bare "Not syncing" leaves the user
+			// guessing whether something is broken, finished, or simply never started.
+			const reason = this.statusReason(st, on);
+			if (reason) {
+				el.createEl("p", {
+					text: reason,
+					cls: st.state === SYNC_STATE.ERROR ? "couchdb-sync-warn" : "couchdb-sync-statusdetail",
+				});
+			}
 		}
+	}
+
+	/**
+	 * Why the plugin is in its current state, in one sentence.
+	 *
+	 * Derived from the CURRENT state rather than read out of the last status event:
+	 * a status detail is a moment in time, but the card can be opened long after
+	 * that moment, and "Not syncing" with no explanation is what made the previous
+	 * UI feel broken. Anything the plugin knows and the user can act on — not
+	 * configured, missing passphrase, nothing running — is stated here explicitly;
+	 * `st.detail` is used when it carries something more specific.
+	 */
+	private statusReason(st: SyncStatus, on: boolean): string {
+		if (st.state === SYNC_STATE.ERROR) {
+			return st.detail ?? "Something went wrong — see the developer console for details.";
+		}
+		if (!on) return st.detail ?? "Sync is switched off for this vault.";
+
+		const s = this.plugin.settings;
+		if (!s.serverUrl || !s.username) {
+			return "Not configured yet — fill in the CouchDB connection below.";
+		}
+		if (s.e2eeEnabled && !s.passphrase) {
+			return "Encryption is on, but no passphrase is set.";
+		}
+		if (!this.plugin.isRunning()) {
+			return st.detail ?? "Nothing is running right now — press Sync now to start.";
+		}
+		return st.detail ?? ""; // running and healthy: the state label says it all
+	}
+
+	/**
+	 * The status card's single primary action.
+	 *
+	 * Exactly one button, whose meaning follows the state it sits next to: stop the
+	 * session that is running, or start one. It deliberately does NOT touch the
+	 * master switch — that is the toggle's job — so the two controls never compete:
+	 * the toggle decides whether this vault syncs at all, the button drives the
+	 * current session.
+	 */
+	private renderPrimaryAction(row: HTMLElement, st: SyncStatus, on: boolean): void {
+		if (!on) return; // sync is off: the toggle is the only meaningful action
+
+		const running = this.plugin.isRunning();
+		const btn = row.createEl("button", { cls: "couchdb-sync-primary-action" });
+		setIcon(btn.createSpan({ cls: "couchdb-sync-primary-icon" }), running ? "square" : "refresh-cw");
+		btn.createSpan({ text: running ? "Stop" : "Sync now" });
+		btn.ariaLabel = running
+			? "Stop the running sync session"
+			: "Start a full sync now — upload local changes and pull server changes";
+
+		btn.onclick = async () => {
+			btn.disabled = true;
+			try {
+				if (running) await this.plugin.stopSync();
+				else await this.plugin.restartSync();
+			} catch (e) {
+				new Notice(`CouchDB Sync: ${e instanceof Error ? e.message : String(e)}`);
+			} finally {
+				// Re-render from the authoritative state; the status listener also
+				// fires, but this covers the case where the state did not change.
+				this.renderLiveStatus(this.plugin.status);
+				this.driftSig = "";
+				this.treeSig = "";
+				void this.loadIndex(true);
+			}
+		};
+
+		// A sync that is starting up should not invite a second click.
+		if (st.state === SYNC_STATE.CONNECTING) btn.disabled = true;
 	}
 
 	/**
@@ -746,22 +799,26 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			type LegendAction = { tooltip: string; busyLabel: string; run: (paths: string[]) => Promise<void> };
 			const mk = (state: FileState, label: string, count: number, action?: LegendAction) => {
 				if (count === 0 && state === "excluded") return;
-				const isBtn = action !== undefined;
+				// An empty group has nothing to act on, so it must not LOOK actionable:
+				// no button styling, no pointer cursor, no tooltip promising work. A
+				// control that invites a click and then does nothing reads as a broken
+				// plugin — which is exactly how the "0 synced / Sync all now" entry read.
+				const act = count > 0 ? action : undefined;
 				const item = legendBox.createSpan({
-					cls: `couchdb-sync-legend-item couchdb-sync-state-${state}` + (isBtn ? " couchdb-sync-legend-btn" : ""),
+					cls: `couchdb-sync-legend-item couchdb-sync-state-${state}` + (act ? " couchdb-sync-legend-btn" : ""),
 				});
-				if (isBtn) item.ariaLabel = action.tooltip;
+				if (act) item.ariaLabel = act.tooltip;
 				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
 				item.createSpan({ text: `${count}`, cls: "couchdb-sync-legend-count" });
 				const labelEl = item.createSpan({ text: label, cls: "couchdb-sync-legend-label" });
-				if (isBtn && count > 0) {
+				if (act) {
 					item.onclick = async () => {
 						item.classList.add("couchdb-sync-legend-busy");
 						const origLabel = labelEl.getText();
-						labelEl.setText(action.busyLabel);
+						labelEl.setText(act.busyLabel);
 						try {
-							await action.run(groups[state]);
-							new Notice(`CouchDB Sync: ${action.busyLabel.replace("…", "")} ${count} file(s).`);
+							await act.run(groups[state]);
+							new Notice(`CouchDB Sync: ${act.busyLabel.replace("…", "")} ${count} file(s).`);
 						} catch (e) {
 							new Notice(`CouchDB Sync: error — ${e instanceof Error ? e.message : String(e)}`);
 						} finally {

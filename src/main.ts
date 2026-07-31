@@ -126,29 +126,34 @@ export default class CouchDBSyncPlugin extends Plugin {
 		});
 
 		// Crash guard: if the previous session never reached a safe state, it left
-		// unsafeShutdown=true. In that case turn auto-start OFF and KEEP it off across
-		// restarts, so the plugin can never get stuck in an auto-start crash loop. The
-		// user re-enables "Start sync automatically" once the problem is fixed.
-		if (this.settings.unsafeShutdown) {
+		// unsafeShutdown=true. Switch sync OFF so the plugin can never get stuck in a
+		// start-crash loop — and do it on the VISIBLE master switch, so the state the
+		// user sees ("SYNC OFF", with the reason next to it) is the state the plugin
+		// is actually in. Turning it back on is one click once the problem is fixed.
+		const crashed = this.settings.unsafeShutdown;
+		if (crashed) {
 			this.settings.unsafeShutdown = false;
-			this.settings.autoStart = false;
+			this.settings.syncEnabled = false;
 			await this.saveSettings();
 			new Notice(
-				"CouchDB Sync: the previous sync did not finish cleanly, so auto-start has been " +
-					"turned OFF. Fix the issue (or Reset), then re-enable 'Start sync automatically'.",
+				"CouchDB Sync: the previous sync did not finish cleanly, so sync has been " +
+					"switched OFF. Fix the issue (or wipe the local cache), then switch sync back on.",
 				12000
 			);
 		}
 
 		if (!this.settings.syncEnabled) {
-			// Master switch is off — stay fully idle, no network, until the user
-			// flips the toggle back on. (Auto-start is deliberately ignored here.)
-			this.setStatus(SYNC_STATE.IDLE, "sync off");
-		} else if (this.settings.autoStart) {
-			// Start after the layout is ready so the initial scan sees a settled vault.
-			this.app.workspace.onLayoutReady(() => void this.restartSync());
+			// Master switch off — stay fully idle, no network, until it is switched on.
+			// Only the crash case carries a detail; for a plain "off" the status card
+			// derives the wording from the live state.
+			this.setStatus(
+				SYNC_STATE.IDLE,
+				crashed ? "Stopped after an unclean shutdown — switch sync on to resume." : undefined
+			);
 		} else {
-			this.setStatus(SYNC_STATE.IDLE, "auto-start off");
+			// Sync is on, so it runs: start once the layout is ready, so the initial
+			// scan sees a settled vault.
+			this.app.workspace.onLayoutReady(() => void this.restartSync());
 		}
 
 		// Keep the status bar honest: the engine reports SYNCED as soon as
@@ -252,10 +257,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 			label = `CouchDB ${pct}%`;
 			ariaSuffix = `syncing ${pct}% — ${raw.detail ?? "indexing"}`;
 		} else if (drift && drift.drift > 0) {
-			// engine settled but disk and DB still diverge -> not "in sync"
-			displayed = SYNC_STATE.SYNCING;
+			// Disk and DB still diverge -> not "in sync". Only call it *syncing* (and
+			// spin the icon) when a session is actually running; with nothing running
+			// a spinner would claim progress that is not happening.
+			displayed = this.engine ? SYNC_STATE.SYNCING : SYNC_STATE.PAUSED;
 			label = `CouchDB ${drift.pct}%`;
-			ariaSuffix = `syncing ${drift.pct}% — ${drift.drift} pending`;
+			ariaSuffix = this.engine
+				? `syncing ${drift.pct}% — ${drift.drift} pending`
+				: `not running — ${drift.pct}% in sync, ${drift.drift} pending`;
 		} else if (
 			drift &&
 			drift.drift === 0 &&
@@ -347,7 +356,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 		if (!this.settings.syncEnabled) {
 			this.engine?.stop();
 			this.engine = null;
-			this.setStatus(SYNC_STATE.IDLE, "sync off");
+			// No detail: the status card derives the reason from the live state.
+			this.setStatus(SYNC_STATE.IDLE);
 			return;
 		}
 		this.engine?.stop();
@@ -496,21 +506,22 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	/**
-	 * Stop syncing and go idle. Also turns OFF live sync and auto-start so the state
-	 * is consistent — otherwise the toggles would fight this and sync could resume.
+	 * Stop the CURRENT session and go idle, without touching the master switch: a
+	 * session-level action, so "Sync now" starts it again and the next launch still
+	 * syncs. Turning sync off for good is the master switch (setSyncEnabled).
+	 *
+	 * The resulting idle state carries a reason, so the status card can say why
+	 * nothing is running instead of showing a bare "Idle".
 	 */
 	stopSync(): Promise<void> {
 		this.engine?.abort();
 		this.restartLock = this.restartLock
 			.catch(() => undefined)
-			.then(async () => {
+			.then(() => {
 				this.engine?.stop();
 				this.engine = null;
 				// keep the shared DB handle open so the idle index view still works
-				this.settings.liveSync = false;
-				this.settings.autoStart = false;
-				await this.saveSettings();
-				this.setStatus(SYNC_STATE.IDLE, "stopped");
+				this.setStatus(SYNC_STATE.IDLE, "stopped — press Sync now to resume");
 			});
 		return this.restartLock;
 	}
@@ -547,7 +558,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 				this.engine?.stop();
 				this.engine = null;
 				// Keep the shared DB handle OPEN — the idle index view still reads it.
-				this.setStatus(SYNC_STATE.IDLE, "sync off");
+				// No detail: the status card derives the reason from the live state.
+				this.setStatus(SYNC_STATE.IDLE);
 			});
 		await this.restartLock;
 	}

@@ -56,3 +56,65 @@ describe("migrateSettings (v1)", () => {
 		expect(secondChanged).toBe(false);
 	});
 });
+
+describe("migrateSettings (v2) — autoStart folded into syncEnabled", () => {
+	it("switches sync OFF when auto-start was off, preserving the user's intent", () => {
+		// The reported state: master switch on, auto-start off (e.g. turned off by the
+		// crash guard) — the combination that produced "SYNC ON … Idle". After the
+		// merge it must NOT silently start replicating; it becomes a visible "off".
+		const s = merged({ syncEnabled: true, autoStart: false });
+		const changed = migrateSettings(s, 1);
+		expect(changed).toBe(true);
+		expect(s.syncEnabled).toBe(false);
+		expect("autoStart" in s).toBe(false);
+	});
+
+	it("keeps sync ON when auto-start was on", () => {
+		const s = merged({ syncEnabled: true, autoStart: true });
+		const changed = migrateSettings(s, 1);
+		expect(changed).toBe(true);
+		expect(s.syncEnabled).toBe(true);
+		expect("autoStart" in s).toBe(false);
+	});
+
+	it("leaves an already-off master switch off", () => {
+		const s = merged({ syncEnabled: false, autoStart: true });
+		migrateSettings(s, 1);
+		expect(s.syncEnabled).toBe(false);
+	});
+
+	it("is a no-op for a config that never had autoStart", () => {
+		const s = merged({ syncEnabled: true });
+		expect(migrateSettings(s, 1)).toBe(false);
+		expect(s.syncEnabled).toBe(true);
+	});
+
+	it("does not re-run for configs already at v2 (respects later user edits)", () => {
+		// Someone who switched sync back ON after migrating must keep it on, even if
+		// a stale autoStart key is still lying around.
+		const s = merged({ syncEnabled: true, autoStart: false });
+		expect(migrateSettings(s, 2)).toBe(false);
+		expect(s.syncEnabled).toBe(true);
+	});
+
+	it("is idempotent", () => {
+		const s = merged({ syncEnabled: true, autoStart: false });
+		migrateSettings(s, 0);
+		expect(migrateSettings(s, 0)).toBe(false);
+		expect(s.syncEnabled).toBe(false);
+	});
+
+	it("applies both v1 and v2 for a config coming from version 0", () => {
+		const s = merged({
+			syncHidden: true,
+			hiddenExclude: [".DS_Store"],
+			autoStart: false,
+			excludePatterns: ["dead"],
+		});
+		expect(migrateSettings(s, 0)).toBe(true);
+		expect(s.hiddenExclude).toContain(".git/");
+		expect("excludePatterns" in s).toBe(false);
+		expect(s.syncEnabled).toBe(false);
+		expect("autoStart" in s).toBe(false);
+	});
+});

@@ -66,7 +66,7 @@ async function configureAndStart(): Promise<void> {
 			e2eeEnabled: true,
 			passphrase: PASSPHRASE,
 			liveSync: true,
-			autoStart: true,
+			syncEnabled: true,
 			connectionVerified: true,
 			// Master mode publishes a master-info doc — assert it does not leak the
 			// device id in cleartext to the server (regression guard for B4).

@@ -63,9 +63,9 @@ plain-language UX.
   so you can inspect or sync one once, for full transparency over *all* data.
 - 📁 **Hidden files (optional)** — sync `.obsidian` (settings, plugins), `.git`, etc. with a simple
   toggle and an exclude/include list. Off by default.
-- 🛟 **Safe by design** — no destructive "rebuild" ritual; a **crash guard** disables auto-start
-  after an unclean shutdown so you can never get stuck in a crash loop; **Wipe local cache** only
-  touches this device.
+- 🛟 **Safe by design** — no destructive "rebuild" ritual; a **crash guard** switches sync off
+  (visibly, on the master switch) after an unclean shutdown so you can never get stuck in a crash
+  loop; **Wipe local cache** only touches this device.
 - 📵 **CORS-free** networking via Obsidian's `requestUrl` (works on mobile too).
 
 ## Design decisions (why it feels simple)
@@ -79,13 +79,18 @@ are deliberate:
 - **Transparency over configuration.** Instead of asking you to understand the internals, the
   **Index status** shows the truth: counts, %, drift, the file tree, and what's being worked on
   right now — even when sync is idle.
-- **Controls map to plain verbs.** *Sync now* (both ways), *Download only* (pull, for followers),
-  *Stop*, *Wipe local cache*. Toggles take effect immediately and stay consistent (e.g. *Stop* also
-  switches off live sync and auto-start so nothing fights it).
+- **One switch, one meaning.** The master switch in the status card is the single source of truth:
+  **on = this vault syncs**, including on launch. There is no second "start automatically" setting to
+  contradict it. The card always shows the state, *why* it is that way, and the one action that
+  changes it — **Sync now** while idle, **Stop** while running (which ends the session without
+  touching the switch).
+- **Controls map to plain verbs.** *Sync now* / *Stop* (in the status card), *Download only* (pull,
+  for followers), *Wipe local cache*. Toggles take effect immediately.
 - **Memory- and mobile-safe pipeline.** Small files first; large files stream and trickle in the
   background; replication batches are bounded — so the app stays responsive and never OOMs.
-- **Crash-safe, not crash-prone.** Errors disable auto-start rather than retrying a failing
-  operation forever. Recovery is always reachable.
+- **Crash-safe, not crash-prone.** After an unclean shutdown sync is switched off rather than
+  retrying a failing operation forever — and you can see that it is off, and why. Recovery is always
+  reachable.
 - **Single clean version.** No migration/back-compat cruft while in active development.
 
 ## Security model
@@ -139,7 +144,8 @@ With **encryption enabled** (the default), the server stores no readable content
 2. Keep **encryption on** and set a **Passphrase** (the same on every device).
 3. Choose a **conflict strategy**. For *master device wins*, enable *This device is the master* on
    exactly one device (e.g. your desktop).
-4. Press **Sync now** (or turn on **Live sync**).
+4. Make sure the master switch in the status card says **Sync on** — it starts syncing right away
+   and on every launch. Press **Sync now** any time to (re)trigger a full pass.
 
 ### CouchDB server (one-time)
 
