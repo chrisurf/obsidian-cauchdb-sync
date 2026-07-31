@@ -189,6 +189,40 @@ export function matchesIgnore(path: string, patterns: string[]): boolean {
 	});
 }
 
+/** The subset of settings that decides which hidden paths are in scope. */
+export interface HiddenScanRules {
+	syncHidden: boolean;
+	hiddenExclude: string[];
+	hiddenInclude: string[];
+}
+
+/**
+ * Should the hidden-file scan descend into this directory?
+ *
+ * The scan used to walk every hidden folder and let the caller filter the result
+ * afterwards, which meant a vault with a large `.obsidian` tree (plugin
+ * node_modules, caches) cost thousands of serial directory listings per index
+ * report — for paths that were discarded milliseconds later. This prunes the walk
+ * at the folder level instead.
+ *
+ * Pruning is only sound when EVERY path under the folder is guaranteed to be
+ * skipped, which holds because both ignore forms are prefix-based: if a pattern
+ * matches "<dir>/", it matches "<dir>/<anything>" too.
+ *
+ * - hidden sync ON (blacklist): skip the subtree when the folder itself is excluded.
+ * - hidden sync OFF (whitelist): only descend when some include pattern points at
+ *   this folder or below it — everything else is skipped anyway.
+ */
+export function shouldWalkHiddenDir(dir: string, rules: HiddenScanRules): boolean {
+	const withSlash = dir.endsWith("/") ? dir : dir + "/";
+	if (rules.syncHidden) {
+		return !matchesIgnore(withSlash, rules.hiddenExclude);
+	}
+	return rules.hiddenInclude.some(
+		(p) => !!p && (p.startsWith(withSlash) || matchesIgnore(withSlash, [p]))
+	);
+}
+
 /** One block of a line-by-line diff: unchanged context, or a changed region. */
 export type DiffHunk =
 	| { type: "equal"; lines: string[] }

@@ -32,6 +32,7 @@ import {
 	matchesIgnore,
 	pickConflictWinner,
 	sha256Hex,
+	shouldWalkHiddenDir,
 	splitBytes,
 	stringArraysEqual,
 	textToBytes,
@@ -86,8 +87,22 @@ function isSkipped(path: string, app: App, settings: CouchDBSyncSettings): boole
 	return false; // normal files are always synced
 }
 
-/** Recursively list hidden files (dotfiles and files under dot-folders). */
-async function listHidden(app: App, isAborted: () => boolean = () => false): Promise<string[]> {
+/**
+ * Recursively list hidden files (dotfiles and files under dot-folders) that are
+ * actually in scope for syncing.
+ *
+ * The walk is PRUNED by the same skip rules the caller applies to the result
+ * (see shouldWalkHiddenDir): an excluded folder is never entered at all. Without
+ * that, a vault whose `.obsidian` holds plugin `node_modules` costs thousands of
+ * serial `adapter.list()` calls on every index report — the dominant cost behind
+ * an index view stuck on "Loading…". Files are still filtered by `isSkipped`
+ * afterwards, so pruning only removes work, never changes the outcome.
+ */
+async function listHidden(
+	app: App,
+	settings: CouchDBSyncSettings,
+	isAborted: () => boolean = () => false
+): Promise<string[]> {
 	const adapter = app.vault.adapter;
 	const out: string[] = [];
 	const walk = async (dir: string, insideHidden: boolean): Promise<void> => {
@@ -104,7 +119,9 @@ async function listHidden(app: App, isAborted: () => boolean = () => false): Pro
 		}
 		for (const sub of listing.folders) {
 			const base = sub.split("/").pop() ?? "";
-			if (insideHidden || base.startsWith(".")) await walk(sub, true);
+			if (!insideHidden && !base.startsWith(".")) continue; // not hidden — out of scope
+			if (!shouldWalkHiddenDir(sub, settings)) continue; // whole subtree is skipped
+			await walk(sub, true);
 		}
 	};
 	await walk("/", false);
@@ -145,7 +162,7 @@ export async function buildIndexReport(
 	const records = syncState ?? (await readSyncStateRecords(db));
 
 	const normal = app.vault.getFiles().map((f) => f.path);
-	const hidden = settings.syncHidden ? await listHidden(app) : [];
+	const hidden = settings.syncHidden ? await listHidden(app, settings) : [];
 	const vaultPaths = [...normal, ...hidden].filter((p) => !isSkipped(p, app, settings));
 	const vaultSet = new Set(vaultPaths);
 
@@ -355,7 +372,9 @@ export class SyncEngine {
 	private async scanHidden(): Promise<void> {
 		if (!this.settings.syncHidden || this.aborted) return;
 		const adapter = this.app.vault.adapter;
-		const paths = (await listHidden(this.app, () => this.aborted)).filter((p) => !this.skip(p));
+		const paths = (await listHidden(this.app, this.settings, () => this.aborted)).filter(
+			(p) => !this.skip(p)
+		);
 		const present = new Set(paths);
 
 		for (const path of paths) {

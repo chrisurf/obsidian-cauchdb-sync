@@ -57,8 +57,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 	settings!: CouchDBSyncSettings;
 	private db: SyncDatabase | null = null;
 	private engine: SyncEngine | null = null;
-	/** de-dupes concurrent idle index reports (the 3s settings + 5s drift timers) */
-	private idleReportInFlight: Promise<IndexReport | null> | null = null;
+	/**
+	 * De-dupes concurrent index reports. The settings view (3 s) and the status-bar
+	 * drift summary (5 s) both ask for one, and a report is expensive (a hidden-file
+	 * walk plus a decrypt of every file doc). Sharing ONE in-flight promise across
+	 * every caller — running session or idle — means overlapping timers can never
+	 * stack full scans on top of each other.
+	 */
+	private reportInFlight: Promise<IndexReport | null> | null = null;
 	/** guards the idle auto-resolver so overlapping refresh ticks don't stack it */
 	private resolvingIdle = false;
 	/** cached legacy-cache doc count (probed at most once per session) */
@@ -167,8 +173,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
-		// Drain any in-flight idle index report before touching the shared handle.
-		if (this.idleReportInFlight) await this.idleReportInFlight.catch(() => undefined);
+		// Drain any in-flight index report before touching the shared handle.
+		if (this.reportInFlight) await this.reportInFlight.catch(() => undefined);
 		// Privacy mode: destroy the local PouchDB before closing so the cached
 		// metadata is not left behind when the plugin is disabled. Must run
 		// BEFORE close() (destroy on a closed handle is a no-op in PouchDB).
@@ -477,13 +483,13 @@ export default class CouchDBSyncPlugin extends Plugin {
 			.then(async () => {
 				this.engine?.stop();
 				this.engine = null;
-				// Drain any in-flight idle report so we don't destroy the DB out from
+				// Drain any in-flight report so we don't destroy the DB out from
 				// under a pending read, then destroy and drop the handle. getSharedDb()
 				// re-opens a fresh empty replica on the next read.
-				if (this.idleReportInFlight) await this.idleReportInFlight.catch(() => undefined);
+				if (this.reportInFlight) await this.reportInFlight.catch(() => undefined);
 				await this.getSharedDb().destroyLocal().catch(() => undefined);
 				this.db = null;
-				this.idleReportInFlight = null;
+				this.reportInFlight = null;
 				this.setStatus(SYNC_STATE.IDLE, "local cache wiped — press Sync now to re-download");
 			});
 		return this.restartLock;
@@ -576,32 +582,35 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * full picture (counts, percentage, file tree — including hidden files).
 	 */
 	async getIndexReport(): Promise<IndexReport | null> {
+		// One shared in-flight promise for every caller (see reportInFlight). On top
+		// of the single always-open DB handle from getSharedDb, this guarantees there
+		// is never a second PouchDB opened/closed on the same name — no IDBDatabase
+		// race — and no duplicated hidden-file walk.
+		if (this.reportInFlight) return this.reportInFlight;
+		const p = this.computeIndexReport();
+		this.reportInFlight = p;
+		try {
+			return await p;
+		} finally {
+			if (this.reportInFlight === p) this.reportInFlight = null;
+		}
+	}
+
+	/** Build a fresh index report. Always go through getIndexReport (de-duped). */
+	private async computeIndexReport(): Promise<IndexReport | null> {
 		if (this.engine) return this.engine.getIndexReport();
 		if (!this.settings.serverUrl) return null; // not configured yet
 		// Don't expose cached doc paths/names to the user until they have proven
 		// they own the configured remote — otherwise typing random text into the
 		// URL field is enough to inspect anything the local cache happens to hold.
 		if (!this.settings.connectionVerified) return null;
-		// De-dupe overlapping idle reports: the 3s settings timer and the 5s drift
-		// timer can fire together. Sharing one in-flight promise (on top of the one
-		// shared, always-open DB handle from getSharedDb) means there is never a
-		// second PouchDB opened/closed on the same name — no IDBDatabase race.
-		if (this.idleReportInFlight) return this.idleReportInFlight;
-		const p = (async (): Promise<IndexReport | null> => {
-			const db = this.getSharedDb();
-			const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
-			if (stored && stored.fp) {
-				const current = await originFingerprint(this.settings);
-				if (stored.fp !== current) return null; // mismatch -> hide
-			}
-			return await buildIndexReport(this.app, this.settings, db);
-		})();
-		this.idleReportInFlight = p;
-		try {
-			return await p;
-		} finally {
-			if (this.idleReportInFlight === p) this.idleReportInFlight = null;
+		const db = this.getSharedDb();
+		const stored = await db.getLocalDoc<{ fp?: string }>(ORIGIN_FP_DOC).catch(() => null);
+		if (stored && stored.fp) {
+			const current = await originFingerprint(this.settings);
+			if (stored.fp !== current) return null; // mismatch -> hide
 		}
+		return buildIndexReport(this.app, this.settings, db);
 	}
 
 	/** UI helper: state of the origin fingerprint for the current settings. */

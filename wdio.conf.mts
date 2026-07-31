@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { env } from "node:process";
 import { parseObsidianVersions } from "wdio-obsidian-service";
@@ -27,6 +28,27 @@ import { parseObsidianVersions } from "wdio-obsidian-service";
 
 const cacheDir = path.resolve(".obsidian-cache");
 
+/**
+ * Stage a CLEAN copy of the plugin for the sandbox vault.
+ *
+ * The service copies the whole plugin directory it is pointed at. Pointing it at
+ * the repo root would drag a developer's local `data.json` — real server URL,
+ * password and E2EE passphrase — into every run: the privacy-gate spec then sees
+ * an already-configured, already-verified plugin and fails, and a spec that runs
+ * "Sync now" would replicate the fixture vault into a REAL database. `data.json`
+ * is gitignored, so this only ever bites locally, never in CI — the worst kind of
+ * flake. Copy just the three release artifacts instead.
+ */
+const pluginDir = path.resolve(".e2e-plugin");
+const artifacts = ["manifest.json", "main.js", "styles.css"];
+const missing = artifacts.filter((f) => !fs.existsSync(path.resolve(f)));
+if (missing.length > 0) {
+	throw new Error(`Missing build artifact(s): ${missing.join(", ")}. Run "npm run build" first.`);
+}
+fs.rmSync(pluginDir, { recursive: true, force: true });
+fs.mkdirSync(pluginDir, { recursive: true });
+for (const f of artifacts) fs.copyFileSync(path.resolve(f), path.join(pluginDir, f));
+
 const defaultVersions = "latest/latest";
 const versions = await parseObsidianVersions(env.OBSIDIAN_VERSIONS ?? defaultVersions, { cacheDir });
 
@@ -49,8 +71,8 @@ export const config: WebdriverIO.Config = {
 		"wdio:obsidianOptions": {
 			appVersion,
 			installerVersion,
-			// The plugin under test: the repo root holds the built main.js + manifest.json.
-			plugins: ["."],
+			// The plugin under test: a clean staging copy, never the repo root (see above).
+			plugins: [pluginDir],
 			// Starting vault fixture; specs reset it per-test via obsidianPage.resetVault().
 			vault: "e2e/vaults/simple",
 		},

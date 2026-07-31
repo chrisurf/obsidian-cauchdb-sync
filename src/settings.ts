@@ -4,6 +4,7 @@ import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
 import { HistoryModal, confirm } from "./history";
 import { DiffMergeModal } from "./diffmerge";
+import type { IndexReport } from "./engine";
 import { SYNC_STATE, SyncStatus } from "./types";
 
 const AUTO_REFRESH_MS = 3_000;
@@ -53,7 +54,26 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	private driftSig = "";
 	private treeSig = "";
 	private openSections = new Set<string>();
-	private indexLoading = false; // prevent overlapping loadIndex() runs (PouchDB connection races)
+	/**
+	 * Bumped whenever the index-status elements are rebuilt (`display()`) or the tab
+	 * is hidden. A load that started against an older generation holds references to
+	 * elements that are now detached from the document — it must neither write to
+	 * them nor stamp `driftSig`/`treeSig`, because a stamped signature would make
+	 * every later refresh believe the (empty) view is already up to date. That
+	 * combination is exactly what left the status card showing a legend, no file
+	 * tree and a permanent "Loading…". See {@link loadIndex}.
+	 */
+	private renderGen = 0;
+	/** Bumped per load; only the newest load of the current generation may render. */
+	private loadSeq = 0;
+	/** In-flight load, shared by non-forced callers instead of being dropped. */
+	private indexLoad: Promise<void> | null = null;
+	/**
+	 * The last report that was actually rendered. Re-painted immediately when the tab
+	 * is rebuilt, so re-opening settings never blanks the counts and the file tree
+	 * while a fresh report is still on its way.
+	 */
+	private lastReport: IndexReport | null = null;
 
 	constructor(app: App, plugin: CouchDBSyncPlugin) {
 		super(app, plugin);
@@ -63,6 +83,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	hide(): void {
 		if (this.driftEl) this.saveOpenState(this.driftEl);
 		if (this.treeEl) this.saveOpenState(this.treeEl);
+		// Stand down any in-flight load: the elements it targets are going away.
+		this.renderGen++;
 		this.statusUnsub?.();
 		this.statusUnsub = undefined;
 		if (this.autoRefresh !== undefined) {
@@ -380,6 +402,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	// --- index status view -------------------------------------------------
 
 	private renderIndexStatus(root: HTMLElement): void {
+		// A fresh element set invalidates every load still running against the old one.
+		this.renderGen++;
+
 		// --- status card: live status + summary + legend in one visual block ---
 		const card = root.createDiv({ cls: "couchdb-sync-card" });
 
@@ -391,8 +416,6 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		this.countsEl = card.createDiv({ cls: "couchdb-sync-counts" });
 		this.legendEl = card.createDiv({ cls: "couchdb-sync-legend" });
 
-		this.summaryEl.setText("Loading…");
-
 		// --- index content (drift lists + tree + excluded toggle) ---
 		const box = root.createDiv({ cls: "couchdb-sync-index" });
 		this.driftEl = box.createDiv();
@@ -400,6 +423,13 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		this.excludedToggleEl = box.createDiv();
 		this.driftSig = "";
 		this.treeSig = "";
+
+		// Paint the last known state straight away, so the details (counts, lists,
+		// tree) are on screen immediately and the pending report merely refreshes
+		// them. Without this, a slow report leaves the whole view empty for as long
+		// as it takes — which is what made the transparency disappear.
+		if (this.lastReport) this.renderReport(this.lastReport, true);
+		else this.summaryEl.setText("Reading index…");
 
 		void this.loadIndex(true);
 
@@ -494,101 +524,148 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	}
 
 	/**
-	 * Update the index status. Summary + counts are updated in place every time
-	 * (cheap, no flicker). The drift lists and the file tree are only rebuilt when
-	 * their contents actually change (or when force=true via the Refresh button),
-	 * so the page doesn't flicker and an expanded tree stays expanded.
+	 * Refresh the index status.
+	 *
+	 * Concurrency contract — the whole reason this is not a plain async method:
+	 *  - At most one load runs at a time. A non-forced caller (the auto-refresh tick)
+	 *    JOINS the running load instead of being dropped on the floor; a forced
+	 *    caller supersedes it.
+	 *  - Only the newest load of the current render generation may write. Anything
+	 *    older returns silently after its await, so a slow report can never write
+	 *    into elements that `display()` has meanwhile detached, and can never stamp
+	 *    `driftSig`/`treeSig` on behalf of a view it no longer owns.
+	 *
+	 * Rendering itself is synchronous (see {@link renderReport}), so once a load is
+	 * cleared to write, nothing can invalidate it half-way through.
 	 */
-	private async loadIndex(force: boolean): Promise<void> {
-		// Re-entrancy guard. The auto-refresh interval fires every AUTO_REFRESH_MS,
-		// but the previous call may still be in flight (slow IDB, big vault). Two
-		// concurrent runs would open the same PouchDB twice and the second close()
-		// can race with the first's pending IDB transactions ("connection is closing").
-		if (this.indexLoading && !force) return;
-		this.indexLoading = true;
-		try {
-			await this.loadIndexInner(force);
-		} finally {
-			this.indexLoading = false;
-		}
+	private loadIndex(force: boolean): Promise<void> {
+		if (this.indexLoad && !force) return this.indexLoad;
+		const gen = this.renderGen;
+		const seq = ++this.loadSeq;
+		const isCurrent = () => gen === this.renderGen && seq === this.loadSeq;
+		const run = this.loadIndexInner(force, isCurrent).finally(() => {
+			if (this.indexLoad === run) this.indexLoad = null;
+		});
+		this.indexLoad = run;
+		return run;
 	}
 
-	private async loadIndexInner(force: boolean): Promise<void> {
+	/** Fetch a report and hand it to the (synchronous) renderers, if still current. */
+	private async loadIndexInner(force: boolean, isCurrent: () => boolean): Promise<void> {
+		let report: IndexReport | null;
+		try {
+			report = await this.plugin.getIndexReport();
+		} catch (e) {
+			if (!isCurrent()) return;
+			const summary = this.summaryEl;
+			if (!summary) return;
+			summary.className = "couchdb-sync-warn";
+			summary.setText(`Could not read index: ${e instanceof Error ? e.message : String(e)}`);
+			return;
+		}
+		if (!isCurrent()) return;
+		if (!report) {
+			await this.renderUnavailable(isCurrent);
+			return;
+		}
+		this.renderReport(report, force);
+	}
+
+	/**
+	 * Render the "no index to show" states: unconfigured, not yet verified, or a
+	 * cache that belongs to a different remote. The one asynchronous lookup happens
+	 * up front so the DOM work below stays synchronous and race-free.
+	 */
+	private async renderUnavailable(isCurrent: () => boolean): Promise<void> {
+		const s = this.plugin.settings;
+		const origin =
+			s.serverUrl && s.connectionVerified
+				? await this.plugin.getOriginState().catch(() => "unset" as const)
+				: ("unset" as const);
+		if (!isCurrent()) return;
+
 		const summary = this.summaryEl;
 		const counts = this.countsEl;
 		const driftBox = this.driftEl;
 		const treeBox = this.treeEl;
 		if (!summary || !counts || !driftBox || !treeBox) return;
 
-		let report;
-		try {
-			report = await this.plugin.getIndexReport();
-		} catch (e) {
+		// There is nothing to show any more — drop the cached report too, so a later
+		// rebuild does not re-paint a stale tree for a remote we can no longer read.
+		this.lastReport = null;
+		summary.className = "";
+		driftBox.empty();
+
+		if (!s.serverUrl) {
+			summary.setText("Sync is not running. Configure the connection (and passphrase) and restart sync.");
+		} else if (!s.connectionVerified) {
+			summary.setText(
+				"Index status is hidden until the server connection is verified. Press 'Test connection' above — on success the index unlocks."
+			);
+		} else if (origin === "mismatch") {
+			// Verified, but the cache was stamped by a different remote. Tell the user
+			// and expose the two recovery actions: wipe (safe default) or re-stamp
+			// (adopt the cache for this remote, if they know it is theirs).
 			summary.className = "couchdb-sync-warn";
-			summary.setText(`Could not read index: ${e instanceof Error ? e.message : String(e)}`);
-			return;
+			summary.setText(
+				"⚠ Local cache belongs to a different remote (server URL / database / username changed since it was filled). " +
+					"Its contents are hidden to avoid showing files from the previous remote."
+			);
+			const actions = driftBox.createDiv({ cls: "couchdb-sync-drift" });
+			const wipeBtn = actions.createEl("button", {
+				text: "Wipe local cache",
+				cls: "couchdb-sync-rowbtn",
+			});
+			wipeBtn.onclick = async () => {
+				await this.plugin.wipeLocalOnly();
+				new Notice("Local cache wiped. Press 'Sync now' to rebuild from the new remote.");
+				this.display();
+			};
+			const adoptBtn = actions.createEl("button", {
+				text: "Adopt cache for this remote",
+				cls: "couchdb-sync-rowbtn",
+			});
+			adoptBtn.onclick = async () => {
+				await this.plugin.stampOriginFingerprint();
+				new Notice("Cache adopted for the current remote.");
+				this.driftSig = "";
+				this.treeSig = "";
+				await this.loadIndex(true);
+			};
+		} else {
+			summary.setText("Sync is not running. Press 'Sync now' or 'Download only' to start.");
 		}
-		if (!report) {
-			summary.className = "";
-			const s = this.plugin.settings;
-			if (!s.serverUrl) {
-				summary.setText("Sync is not running. Configure the connection (and passphrase) and restart sync.");
-				driftBox.empty();
-			} else if (!s.connectionVerified) {
-				summary.setText(
-					"Index status is hidden until the server connection is verified. Press 'Test connection' above — on success the index unlocks."
-				);
-				driftBox.empty();
-			} else {
-				// Verified, but the report still came back null — most likely an origin
-				// mismatch (cache was stamped by a different remote). Tell the user and
-				// expose the two recovery actions: wipe (safe default) or re-stamp
-				// (adopt the cache for this remote, if they know it is theirs).
-				const origin = await this.plugin.getOriginState().catch(() => "unset" as const);
-				if (origin === "mismatch") {
-					summary.className = "couchdb-sync-warn";
-					summary.setText(
-						"⚠ Local cache belongs to a different remote (server URL / database / username changed since it was filled). " +
-							"Its contents are hidden to avoid showing files from the previous remote."
-					);
-					driftBox.empty();
-					const actions = driftBox.createDiv({ cls: "couchdb-sync-drift" });
-					const wipeBtn = actions.createEl("button", {
-						text: "Wipe local cache",
-						cls: "couchdb-sync-rowbtn",
-					});
-					wipeBtn.onclick = async () => {
-						await this.plugin.wipeLocalOnly();
-						new Notice("Local cache wiped. Press 'Sync now' to rebuild from the new remote.");
-						this.display();
-					};
-					const adoptBtn = actions.createEl("button", {
-						text: "Adopt cache for this remote",
-						cls: "couchdb-sync-rowbtn",
-					});
-					adoptBtn.onclick = async () => {
-						await this.plugin.stampOriginFingerprint();
-						new Notice("Cache adopted for the current remote.");
-						this.driftSig = "";
-						this.treeSig = "";
-						await this.loadIndex(true);
-					};
-				} else {
-					summary.setText("Sync is not running. Press 'Sync now' or 'Download only' to start.");
-					driftBox.empty();
-				}
-			}
-			counts.setText("");
-			this.legendEl?.empty();
-			treeBox.empty();
-			this.driftSig = this.treeSig = "";
-			return;
-		}
+
+		counts.setText("");
+		this.legendEl?.empty();
+		treeBox.empty();
+		this.excludedToggleEl?.empty();
+		this.driftSig = this.treeSig = "";
+	}
+
+	/**
+	 * Render a report into the current element set. Fully synchronous by design: it
+	 * reads every target element from `this` at the top and never awaits, so the
+	 * elements cannot be swapped out underneath it and the signatures it stamps
+	 * always describe what is really on screen.
+	 *
+	 * Summary + counts are updated in place every time (cheap, no flicker). The drift
+	 * lists and the file tree are only rebuilt when their contents actually change
+	 * (or when force=true), so the page doesn't flicker and an expanded tree stays
+	 * expanded.
+	 */
+	private renderReport(report: IndexReport, force: boolean): void {
+		const summary = this.summaryEl;
+		const counts = this.countsEl;
+		const driftBox = this.driftEl;
+		const treeBox = this.treeEl;
+		if (!summary || !counts || !driftBox || !treeBox) return;
 
 		// The database holds encrypted docs but none decrypted — wrong passphrase.
 		// Do NOT render the file lists/tree (every file would look "local only" and
 		// tempt an "Upload all" that mints divergent duplicates under the wrong key).
 		if (report.passphraseError) {
+			this.lastReport = null; // nothing renderable to re-paint on a rebuild
 			summary.className = "couchdb-sync-warn";
 			summary.setText(
 				"⚠ Encryption passphrase does not match this database — its documents cannot be decrypted. " +
@@ -598,9 +675,13 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			driftBox.empty();
 			this.legendEl?.empty();
 			treeBox.empty();
+			this.excludedToggleEl?.empty();
 			this.driftSig = this.treeSig = "";
 			return;
 		}
+
+		// Renderable from here on — remember it so a tab rebuild can re-paint at once.
+		this.lastReport = report;
 
 		// ---- single source of truth: classify every file into exactly one state ----
 		// Each file gets the most severe state that applies (see SEVERITY). The same

@@ -17,7 +17,10 @@ src/
   engine.ts      Core sync engine (indexing, upload, download, conflict resolution)
   database.ts    PouchDB/CouchDB abstraction, CORS-free fetch via Obsidian requestUrl
   crypto.ts      AES-256-GCM end-to-end encryption (PBKDF2 key derivation)
+  envelope.ts    Engine <-> wire form: metadata-private document envelope
   history.ts     File version history UI (diff viewer, restore modal)
+  diffmerge.ts   Side-by-side diff & merge editor for divergent files
+  migrate.ts     One-time settings migrations (pure, gated by schemaVersion)
   types.ts       Shared types, constants, default settings
   util.ts        Pure utility functions (hashing, base64, binary detection, diff)
 ```
@@ -75,6 +78,8 @@ npm run test:coverage # with coverage report
 ```
 
 Test files follow the pattern `tests/<module>.test.ts`. Focus unit tests on pure modules (`util.ts`, `crypto.ts`). Modules that depend on the Obsidian API (`main.ts`, `settings.ts`) are excluded from coverage.
+
+End-to-end tests drive the built plugin inside a real Obsidian (`npm run test:e2e`, see `e2e/README.md`). `wdio.conf.mts` stages a clean plugin copy in `.e2e-plugin/` — never point the harness at the repo root, which would copy a developer's local `data.json` (real credentials and passphrase) into the sandbox vault.
 
 ### Build
 

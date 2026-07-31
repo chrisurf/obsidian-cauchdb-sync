@@ -8,6 +8,8 @@ coverage/
 
 # E2E (wdio-obsidian-service)
 .obsidian-cache/
+# clean plugin copy staged for the sandbox vault (see wdio.conf.mts)
+.e2e-plugin/
 logs/
 obsidian-versions-lock.txt
 # ...but keep the committed test-vault config the harness copies from
