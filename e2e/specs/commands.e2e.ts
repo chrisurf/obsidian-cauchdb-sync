@@ -23,11 +23,6 @@ describe("CouchDB Sync — commands (no server)", function () {
 		await expect(await pluginIsEnabled()).toBe(true);
 	});
 
-	it("runs 'Stop sync' when nothing is running without crashing", async function () {
-		await browser.executeObsidianCommand(`${PLUGIN_ID}:couchdb-sync-stop`);
-		await expect(await pluginIsEnabled()).toBe(true);
-	});
-
 	it("toggles the master sync switch off and back on, persisting the state", async function () {
 		// starts enabled by default
 		await expect((await pluginSettings<{ syncEnabled: boolean }>()).syncEnabled).toBe(true);

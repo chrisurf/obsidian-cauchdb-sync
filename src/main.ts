@@ -44,9 +44,9 @@ function localDbName(settings: CouchDBSyncSettings): string {
 }
 
 /**
- * Lucide icon per state for the status bar. The icon is also the button that
- * starts and pauses syncing, so the not-running states use "play": a pause glyph
- * on a control that resumes reads backwards once it is clickable.
+ * Lucide icon per state for the status bar. The icon doubles as the on/off
+ * switch, so the not-running states use "play": a pause glyph on a control whose
+ * click turns syncing ON reads backwards.
  */
 const STATUS_ICON: Record<SyncState, string> = {
 	[SYNC_STATE.IDLE]: "play",
@@ -95,9 +95,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
-		// Status bar: two controls, not one label. The icon drives the session
-		// (start / pause), the text opens the full status panel. Both are reachable
-		// without going through settings, which is where they are needed most.
+		// Status bar: two controls, not one label. The icon is the on/off switch —
+		// the same one the status card shows — and the text opens the full status
+		// panel. Both are reachable without going through settings, which is where
+		// they are needed most.
 		this.statusEl = this.addStatusBarItem();
 		this.statusEl.addClass("couchdb-sync-status");
 		this.statusIconEl = this.statusEl.createSpan({
@@ -106,7 +107,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.statusTextEl = this.statusEl.createSpan({
 			cls: "couchdb-sync-status-text couchdb-sync-status-btn",
 		});
-		this.statusIconEl.onclick = () => void this.toggleSessionFromStatusBar();
+		this.statusIconEl.onclick = () => void this.toggleSyncFromStatusBar();
 		this.statusTextEl.onclick = () => void this.revealStatusView();
 		// Paint directly rather than via setStatus: the status already IS the initial
 		// idle state, and setStatus short-circuits on an unchanged status — which
@@ -127,12 +128,6 @@ export default class CouchDBSyncPlugin extends Plugin {
 			id: "couchdb-sync-now",
 			name: "Sync now",
 			callback: () => this.restartSync(),
-		});
-
-		this.addCommand({
-			id: "couchdb-sync-stop",
-			name: "Stop sync",
-			callback: () => this.stopSync(),
 		});
 
 		this.addCommand({
@@ -305,10 +300,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.statusEl.setAttr("aria-label", `CouchDB sync: ${ariaSuffix}`);
 		// Per-control tooltips: the two halves do different things, so one shared
 		// label on the container would be wrong for at least one of them.
-		this.statusIconEl.setAttr(
-			"aria-label",
-			this.engine ? "Pause syncing" : "Sync now"
-		);
+		this.statusIconEl.setAttr("aria-label", "Turn sync off");
 		this.statusTextEl.setAttr("aria-label", "Open the sync status panel");
 	}
 
@@ -348,27 +340,18 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	/**
-	 * Status-bar icon click: drive the current session.
+	 * Status-bar icon click: the on/off switch, in the status bar.
 	 *
-	 * Same three cases the status card's primary action covers, so the two controls
-	 * can never mean different things:
-	 *   sync off      -> switch it on (and start)
-	 *   running       -> pause this session (the master switch stays on)
-	 *   on, but idle  -> start a session
-	 * Sync being off is the only case that changes the persisted switch, and only
-	 * because it is the sole way to say "go" from the status bar.
+	 * Deliberately the same thing the toggle in the status card does — not a third
+	 * behaviour. The plugin has exactly two controls: a switch for WHETHER this
+	 * vault syncs, and a "Sync now" button for DOING it once. The status-bar icon is
+	 * the switch (it already shows that state), and the panel holds the action.
 	 */
-	private async toggleSessionFromStatusBar(): Promise<void> {
+	private async toggleSyncFromStatusBar(): Promise<void> {
+		const turningOn = !this.settings.syncEnabled;
 		try {
-			if (!this.settings.syncEnabled) {
-				await this.setSyncEnabled(true);
-				new Notice("CouchDB Sync: sync turned on.");
-			} else if (this.engine) {
-				await this.stopSync();
-				new Notice("CouchDB Sync: paused. Click again to resume.");
-			} else {
-				await this.restartSync();
-			}
+			await this.setSyncEnabled(turningOn);
+			new Notice(turningOn ? "CouchDB Sync: sync turned on." : "CouchDB Sync: sync turned off.");
 		} catch (e) {
 			new Notice(`CouchDB Sync: ${e instanceof Error ? e.message : String(e)}`);
 		}
@@ -573,12 +556,15 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	/**
-	 * Stop the CURRENT session and go idle, without touching the master switch: a
-	 * session-level action, so "Sync now" starts it again and the next launch still
-	 * syncs. Turning sync off for good is the master switch (setSyncEnabled).
+	 * Stop the CURRENT session and go idle, without touching the master switch.
+	 *
+	 * No longer exposed as a control of its own: a second element that also means
+	 * "off" competed with the master switch. It survives as internal plumbing —
+	 * turning live sync off stops the continuous session here — and the user-facing
+	 * way to stop is the switch, which is honest about being persistent.
 	 *
 	 * The resulting idle state carries a reason, so the status card can say why
-	 * nothing is running instead of showing a bare "Idle".
+	 * nothing is running instead of showing a bare "Not syncing".
 	 */
 	stopSync(): Promise<void> {
 		this.engine?.abort();

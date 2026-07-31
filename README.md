@@ -45,8 +45,8 @@ plain-language UX.
   Folders roll up to the most urgent state inside them (green only when the whole subtree is clean),
   and the summary/lists/tree all derive from one classification so they never disagree. Updates
   **in place** every few seconds — no flicker.
-- 🎛️ **Reachable from the status bar** — the status-bar item is two controls: the icon starts and
-  pauses syncing, and the label (`CouchDB 63%`) opens the full status panel in the right sidebar.
+- 🎛️ **Reachable from the status bar** — the status-bar item is two controls: the icon switches sync
+  on and off, and the label (`CouchDB 63%`) opens the full status panel in the right sidebar.
   That panel is the *same* component the settings tab embeds — same tree, same per-file actions, not
   a read-only copy — so you can manage sync without opening settings at all.
 - ✨ **Live per-file feedback** — files being transferred pulse with a left-to-right "scan" shimmer
@@ -83,13 +83,13 @@ are deliberate:
 - **Transparency over configuration.** Instead of asking you to understand the internals, the
   **Index status** shows the truth: counts, %, drift, the file tree, and what's being worked on
   right now — even when sync is idle.
-- **One switch, one meaning.** The master switch in the status card is the single source of truth:
-  **on = this vault syncs**, including on launch. There is no second "start automatically" setting to
-  contradict it. The card always shows the state, *why* it is that way, and the one action that
-  changes it — **Sync now** while idle, **Stop** while running (which ends the session without
-  touching the switch).
-- **Controls map to plain verbs.** *Sync now* / *Stop* (in the status card), *Download only* (pull,
-  for followers), *Wipe local cache*. Toggles take effect immediately.
+- **One switch, one action.** Two controls, two clearly separated roles: the **switch** decides
+  *whether* this vault syncs (a state — persisted, and also the way to stop), and **Sync now** just
+  *does it once* (an action — it changes no setting). Turning the switch on starts syncing straight
+  away; there is no second "start automatically" setting to contradict it, and no button that
+  doubles as a second off switch.
+- **Controls map to plain verbs.** *Sync now* (in the status card), *Download only* (pull, for
+  followers), *Wipe local cache*. Toggles take effect immediately.
 - **Memory- and mobile-safe pipeline.** Small files first; large files stream and trickle in the
   background; replication batches are bounded — so the app stays responsive and never OOMs.
 - **Crash-safe, not crash-prone.** After an unclean shutdown sync is switched off rather than

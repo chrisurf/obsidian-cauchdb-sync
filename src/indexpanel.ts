@@ -318,39 +318,42 @@ export class IndexPanel {
 	}
 
 	/**
-	 * The status card's single primary action.
+	 * The status card's single primary action: run a sync now.
 	 *
-	 * Exactly one button, whose meaning follows the state it sits next to: stop the
-	 * session that is running, or start one. It deliberately does NOT touch the
-	 * master switch — that is the toggle's job — so the two controls never compete:
-	 * the toggle decides whether this vault syncs at all, the button drives the
-	 * current session.
+	 * One control, one meaning, in every state — a verb, never a state change. That
+	 * separation is the whole point of having two controls here at all:
+	 *
+	 *   toggle -> WHETHER this vault syncs   (a state; persisted; also the way to stop)
+	 *   button -> DO IT NOW                  (an action; one-off; changes nothing)
+	 *
+	 * It used to turn into "Stop" while a session ran, which made it look like a
+	 * second on/off switch competing with the toggle — two controls that both appear
+	 * to mean "off". Stopping now belongs to the toggle alone.
+	 *
+	 * The button stays available while a session is running: there it means "run a
+	 * full pass again", which is exactly what is wanted after a wipe, when a file is
+	 * stuck, or simply to be sure everything is up before closing the laptop. It is
+	 * also the only way to sync at all when live sync is off.
 	 */
 	private renderPrimaryAction(row: HTMLElement, st: SyncStatus, on: boolean): void {
 		if (!on) return; // sync is off: the toggle is the only meaningful action
 
-		const running = this.plugin.isRunning();
 		const btn = row.createEl("button", { cls: "couchdb-sync-primary-action" });
-		setIcon(btn.createSpan({ cls: "couchdb-sync-primary-icon" }), running ? "square" : "refresh-cw");
-		btn.createSpan({ text: running ? "Stop" : "Sync now" });
-		btn.ariaLabel = running
-			? "Stop the running sync session"
-			: "Start a full sync now — upload local changes and pull server changes";
+		setIcon(btn.createSpan({ cls: "couchdb-sync-primary-icon" }), "refresh-cw");
+		btn.createSpan({ text: "Sync now" });
+		btn.ariaLabel = "Run a full sync now — upload local changes and pull server changes";
 
 		btn.onclick = async () => {
 			btn.disabled = true;
 			try {
-				if (running) await this.plugin.stopSync();
-				else await this.plugin.restartSync();
+				await this.plugin.restartSync();
 			} catch (e) {
 				new Notice(`CouchDB Sync: ${e instanceof Error ? e.message : String(e)}`);
 			} finally {
 				// Re-render from the authoritative state; the status listener also
 				// fires, but this covers the case where the state did not change.
 				this.renderLiveStatus(this.plugin.status);
-				this.driftSig = "";
-				this.treeSig = "";
-				void this.loadIndex(true);
+				this.refresh();
 			}
 		};
 

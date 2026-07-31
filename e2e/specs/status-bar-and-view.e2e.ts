@@ -6,9 +6,8 @@ import { PLUGIN_ID } from "./helpers.js";
 const VIEW_TYPE = "couchdb-sync-status";
 
 /**
- * The status bar is a control surface, not just a read-out: its icon starts and
- * pauses the session, and its label opens the full status panel in the right
- * sidebar. The panel is the SAME component the settings tab embeds, so the two
+ * The status bar is a control surface, not just a read-out: its icon is the
+ * on/off switch and its label opens the full status panel in the right sidebar. The panel is the SAME component the settings tab embeds, so the two
  * cannot drift apart — these tests check that both mount a working panel with the
  * per-file lists and actions, not a read-only copy.
  */
@@ -85,17 +84,21 @@ describe("CouchDB Sync — status bar controls and sidebar view", function () {
 			};
 		});
 
-		assert.equal(bar.iconClickable, true, "the icon must drive the session");
+		assert.equal(bar.iconClickable, true, "the icon must switch sync on and off");
 		assert.equal(bar.textClickable, true, "the label must open the panel");
 		assert.equal(bar.iconIsBtn, true, "the icon must be styled as a control");
 		assert.equal(bar.textIsBtn, true, "the label must be styled as a control");
 		// Every control states what it does — the two halves do different things.
-		assert.notEqual(bar.iconTip, "", "the icon needs its own tooltip");
+		assert.match(bar.iconTip, /turn sync (on|off)/i, `icon tooltip was: ${bar.iconTip}`);
 		assert.match(bar.textTip, /panel/i, `label tooltip was: ${bar.textTip}`);
 		assert.notEqual(bar.iconTip, bar.textTip, "the two halves must not share one label");
 	});
 
-	it("starts and pauses the session from the status-bar icon", async function () {
+	it("switches sync on and off from the status-bar icon", async function () {
+		// The icon is the on/off switch, not a third behaviour: the plugin has exactly
+		// two controls — a switch for WHETHER this vault syncs, and "Sync now" for
+		// doing it once. Turning the switch on must start a session by itself; no
+		// second click on "Sync now" should be required.
 		const res = await browser.executeObsidian(async ({ app }, id) => {
 			const plugin = (
 				app as unknown as {
@@ -111,26 +114,24 @@ describe("CouchDB Sync — status bar controls and sidebar view", function () {
 			const settle = () => new Promise((r) => setTimeout(r, 400));
 
 			const before = { enabled: plugin.isSyncEnabled(), running: plugin.isRunning() };
-			icon.click(); // sync is off -> turn it on and start
+			icon.click(); // off -> on, and a session starts on its own
 			await settle();
-			const afterFirst = { enabled: plugin.isSyncEnabled(), running: plugin.isRunning() };
-			icon.click(); // running -> pause the session
+			const afterOn = { enabled: plugin.isSyncEnabled(), running: plugin.isRunning() };
+			icon.click(); // on -> off, session torn down
 			await settle();
-			const afterSecond = { enabled: plugin.isSyncEnabled(), running: plugin.isRunning() };
-			icon.click(); // idle but enabled -> start again
-			await settle();
-			const afterThird = { enabled: plugin.isSyncEnabled(), running: plugin.isRunning() };
+			const afterOff = { enabled: plugin.isSyncEnabled(), running: plugin.isRunning() };
 
 			await plugin.setSyncEnabled(false);
-			return { before, afterFirst, afterSecond, afterThird };
+			return { before, afterOn, afterOff };
 		}, PLUGIN_ID);
 
 		assert.deepEqual(res.before, { enabled: false, running: false }, "precondition");
-		assert.deepEqual(res.afterFirst, { enabled: true, running: true }, "first click must start syncing");
-		// Pausing is a session action: the master switch stays ON, so the next launch
-		// still syncs and the state is not silently changed behind the user's back.
-		assert.deepEqual(res.afterSecond, { enabled: true, running: false }, "second click must pause");
-		assert.deepEqual(res.afterThird, { enabled: true, running: true }, "third click must resume");
+		assert.deepEqual(
+			res.afterOn,
+			{ enabled: true, running: true },
+			"turning the switch on must start syncing without a further click",
+		);
+		assert.deepEqual(res.afterOff, { enabled: false, running: false }, "turning it off must stop everything");
 	});
 
 	it("opens the status panel in the right sidebar from the status-bar label", async function () {

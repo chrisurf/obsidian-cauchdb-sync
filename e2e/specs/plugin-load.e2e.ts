@@ -19,7 +19,6 @@ describe("CouchDB Sync — plugin load", function () {
 		assert.deepEqual(mine, [
 			`${PLUGIN_ID}:couchdb-sync-now`,
 			`${PLUGIN_ID}:couchdb-sync-open-panel`,
-			`${PLUGIN_ID}:couchdb-sync-stop`,
 			`${PLUGIN_ID}:couchdb-sync-toggle`,
 			`${PLUGIN_ID}:couchdb-sync-wipe-local`,
 		]);

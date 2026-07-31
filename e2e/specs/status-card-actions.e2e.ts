@@ -162,15 +162,43 @@ describe("CouchDB Sync — status card actions", function () {
 			const card = await readCard();
 			assert.equal(card.isSyncEnabled, true);
 			assert.equal(card.hasAction, true, "the status card must offer the primary action");
-			// Not running (the bogus server never connects) -> the action starts one.
-			if (!card.isRunning) {
-				assert.equal(card.actionLabel, "Sync now", `action label was: ${card.actionLabel}`);
-			} else {
-				assert.equal(card.actionLabel, "Stop", `action label was: ${card.actionLabel}`);
-			}
+			// One control, one meaning: the button is a verb in every state. It used to
+			// turn into "Stop", which read as a second on/off switch beside the toggle.
+			assert.equal(card.actionLabel, "Sync now", `action label was: ${card.actionLabel}`);
 		} finally {
 			await setEnabled(false);
 		}
+	});
+
+	it("keeps 'Sync now' available while a session is running", async function () {
+		// The button is a re-trigger, not a start-only control: running a full pass
+		// again is exactly what is wanted after a wipe or when a file is stuck — and
+		// with live sync off it is the ONLY way to sync at all.
+		const res = await browser.executeObsidian(async ({ app }, id) => {
+			const a = app as unknown as {
+				setting: { pluginTabs?: { id: string; containerEl: HTMLElement; display(): void }[] };
+				plugins: {
+					plugins: Record<string, { setSyncEnabled(v: boolean): Promise<void>; isRunning(): boolean }>;
+				};
+			};
+			const plugin = a.plugins.plugins[id];
+			const tab = (a.setting.pluginTabs ?? []).find((t) => t.id === id)!;
+			await plugin.setSyncEnabled(true); // starts a session
+			tab.display();
+			await new Promise((r) => setTimeout(r, 400));
+			const btn = tab.containerEl.querySelector<HTMLButtonElement>(".couchdb-sync-primary-action");
+			const out = {
+				running: plugin.isRunning(),
+				label: (btn?.textContent ?? "").trim(),
+				enabled: btn ? !btn.disabled : false,
+			};
+			await plugin.setSyncEnabled(false);
+			return out;
+		}, PLUGIN_ID);
+
+		assert.equal(res.running, true, "a session should be running");
+		assert.equal(res.label, "Sync now", `the running state must not relabel the button: ${res.label}`);
+		assert.equal(res.enabled, true, "the button must stay clickable as a re-trigger");
 	});
 
 	it("places the action between the state label and the on/off toggle", async function () {
