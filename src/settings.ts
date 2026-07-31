@@ -486,24 +486,36 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			}
 		});
 
-		if (syncing && st.total && st.total > 0) {
-			const pct = Math.round((st.done! / st.total) * 100);
-			row.createSpan({ text: ` ${pct}% (${st.done}/${st.total})`, cls: "setting-item-description" });
-			const bar = el.createEl("progress");
-			bar.max = st.total;
-			bar.value = st.done ?? 0;
-			bar.addClass("couchdb-sync-progress");
-		} else {
-			// Always say WHY, not just WHAT. A bare "Not syncing" leaves the user
-			// guessing whether something is broken, finished, or simply never started.
-			const reason = this.statusReason(st, on);
-			if (reason) {
-				el.createEl("p", {
-					text: reason,
-					cls: st.state === SYNC_STATE.ERROR ? "couchdb-sync-warn" : "couchdb-sync-statusdetail",
-				});
-			}
+		// Always say WHY, not just WHAT. A bare "Not syncing" leaves the user guessing
+		// whether something is broken, finished, or simply never started. While work
+		// IS happening there is nothing to explain — the figures below animate instead
+		// of a second line appearing and disappearing under the state label.
+		const reason = this.statusReason(st, on);
+		if (reason) {
+			el.createEl("p", {
+				text: reason,
+				cls: st.state === SYNC_STATE.ERROR ? "couchdb-sync-warn" : "couchdb-sync-statusdetail",
+			});
 		}
+
+		this.markSummaryActivity();
+	}
+
+	/**
+	 * Mark the summary figures as "work in flight", which makes them animate.
+	 *
+	 * Activity is shown ON the numbers themselves rather than as an extra status
+	 * line: the numbers update live anyway, so a separate "Indexing 60/111…" line
+	 * repeated what they already said — with a different denominator, appearing and
+	 * disappearing, and taking the rest of the page up and down with it. A class
+	 * toggle changes no layout at all.
+	 */
+	private markSummaryActivity(): void {
+		const busy =
+			this.plugin.isSyncEnabled() &&
+			this.plugin.isRunning() &&
+			this.plugin.status.state === SYNC_STATE.SYNCING;
+		this.summaryEl?.toggleClass("couchdb-sync-summary-busy", busy);
 	}
 
 	/**
@@ -780,6 +792,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			summary.setText(`${groups.synced.length} / ${syncTotal} files (${pct}%) · ${pending} pending`);
 		}
 		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
+		// className was just reset above, so re-apply the activity marker.
+		this.markSummaryActivity();
 
 		// legend (in the card, above the tree) — actionable items are clickable
 		const legendBox = this.legendEl;

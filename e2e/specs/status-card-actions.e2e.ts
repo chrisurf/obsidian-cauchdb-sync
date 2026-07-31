@@ -204,6 +204,96 @@ describe("CouchDB Sync — status card actions", function () {
 		}
 	});
 
+	it("keeps the card the same size across status changes, and never shows a second counter", async function () {
+		// The card used to grow and shrink by one line as an "Indexing 60/111…" detail
+		// appeared and disappeared — several times a second, because indexing and
+		// replication overwrote each other's status. Everything below it moved along.
+		// Activity is now a class on the figures, which cannot change layout at all.
+		const res = await browser.executeObsidian(async ({ app }, id) => {
+			const a = app as unknown as {
+				setting: { pluginTabs?: { id: string; containerEl: HTMLElement; display(): void }[] };
+				plugins: {
+					plugins: Record<
+						string,
+						{
+							setStatus(state: string, detail?: string): void;
+							setSyncEnabled(v: boolean): Promise<void>;
+							stopSync(): Promise<void>;
+							isRunning(): boolean;
+							status: Record<string, unknown>;
+						}
+					>;
+				};
+			};
+			const plugin = a.plugins.plugins[id];
+			const tab = (a.setting.pluginTabs ?? []).find((t) => t.id === id)!;
+
+			// A session must exist for "activity" to be meaningful. Switching the master
+			// on starts one; the configured server does not resolve, so it fails
+			// harmlessly without touching any real remote.
+			await plugin.setSyncEnabled(true);
+			tab.display();
+			for (let i = 0; i < 40; i++) {
+				if (tab.containerEl.querySelector(".couchdb-sync-summary")) break;
+				await new Promise((r) => setTimeout(r, 100));
+			}
+
+			const card = tab.containerEl.querySelector(".couchdb-sync-card")!;
+			const live = tab.containerEl.querySelector(".couchdb-sync-livestatus")!;
+			const summary = tab.containerEl.querySelector(".couchdb-sync-summary")!;
+			const snap = () => ({
+				h: Math.round(card.getBoundingClientRect().height),
+				// Layout driver even when the modal is not laid out headless: how many
+				// blocks the status area is made of.
+				blocks: live.childElementCount,
+				busy: summary.classList.contains("couchdb-sync-summary-busy"),
+				text: (card.textContent ?? ""),
+			});
+
+			try {
+				plugin.setStatus("syncing");
+				const working = snap();
+				plugin.setStatus("synced");
+				const settled = snap();
+				plugin.setStatus("syncing");
+				const workingAgain = snap();
+				return {
+					running: plugin.isRunning(),
+					working,
+					settled,
+					workingAgain,
+					// The removed progress fields must not come back on the status object.
+					statusKeys: Object.keys(plugin.status).sort(),
+				};
+			} finally {
+				await plugin.stopSync();
+				await plugin.setSyncEnabled(false);
+			}
+		}, PLUGIN_ID);
+
+		assert.equal(res.running, true, "a session should be running for this check");
+
+		// Same number of layout blocks, and same pixel height when the view is laid out.
+		assert.equal(res.working.blocks, res.settled.blocks, "status area gained/lost a block");
+		assert.equal(res.workingAgain.blocks, res.settled.blocks, "status area is not stable");
+		if (res.working.h > 0) {
+			assert.equal(res.working.h, res.settled.h, `card height changed: ${res.working.h} vs ${res.settled.h}`);
+			assert.equal(res.workingAgain.h, res.settled.h, "card height is not stable across changes");
+		}
+
+		// Activity is visible, but only as a paint-level marker.
+		assert.equal(res.working.busy, true, "the figures should be marked as busy while syncing");
+		assert.equal(res.settled.busy, false, "the busy marker must clear once settled");
+
+		// No second progress counter anywhere in the card, and none on the status object.
+		assert.ok(!/Indexing/i.test(res.working.text), "the separate indexing counter must be gone");
+		assert.deepEqual(
+			res.statusKeys,
+			["detail", "state"],
+			`status should carry no progress fields; had: ${res.statusKeys.join(", ")}`,
+		);
+	});
+
 	it("does not repeat the everyday actions further down the page", async function () {
 		const card = await readCard();
 		for (const gone of ["Sync now", "Stop sync", "Start automatically on launch"]) {

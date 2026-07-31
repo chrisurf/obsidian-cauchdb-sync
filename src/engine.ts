@@ -255,11 +255,7 @@ export async function removeFromDb(
 	return n;
 }
 
-type StatusFn = (
-	state: SyncState,
-	detail?: string,
-	progress?: { done: number; total: number }
-) => void;
+type StatusFn = (state: SyncState, detail?: string) => void;
 
 export class SyncEngine {
 	private app: App;
@@ -643,7 +639,6 @@ export class SyncEngine {
 			.sort((a, b) => a.stat.size - b.stat.size); // fewest chunks first
 
 		if (todo.length === 0) return;
-		let done = 0;
 		for (const file of todo) {
 			if (this.aborted) return;
 			try {
@@ -651,11 +646,13 @@ export class SyncEngine {
 			} catch (e) {
 				this.fail(`indexing ${file.path}`, e); // one bad file must not abort the rest
 			}
-			done++;
-			this.setStatus(SYNC_STATE.SYNCING, `Indexing ${done}/${todo.length}…`, {
-				done,
-				total: todo.length,
-			});
+			// Report progress the same way replication does — as "work is happening",
+			// nothing more. Indexing and replication run interleaved, so two sources
+			// writing different status texts used to overwrite each other several
+			// times a second, which made the card's detail line flicker. Sharing one
+			// activity signal removes the conflict at the root; the actual figures
+			// come from the index report, which is the only counter in the UI.
+			this.markActivity();
 			await this.yieldToUi(); // keep the app responsive; let replication interleave
 		}
 	}

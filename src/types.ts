@@ -278,13 +278,20 @@ export const SYNC_STATE = {
 
 export type SyncState = (typeof SYNC_STATE)[keyof typeof SYNC_STATE];
 
-/** Current sync status, shared with the status bar and the settings view. */
+/**
+ * Current sync status, shared with the status bar and the settings view.
+ *
+ * Deliberately carries no progress counter. The status card already reports
+ * progress as "<synced> / <total> files (<pct>%)", derived from the index report;
+ * a second counter with a different denominator (files touched by the current
+ * pass) said almost the same thing in the common case and disagreed with it in
+ * every other. One number, one meaning — `state` tells the card whether work is
+ * in flight, and it animates its own figures accordingly.
+ */
 export interface SyncStatus {
 	state: SyncState;
+	/** why the plugin is in this state, when there is something worth saying */
 	detail?: string;
-	/** progress of the current indexing pass, when applicable */
-	done?: number;
-	total?: number;
 }
 
 /** Raw chunk size in bytes before base64/encryption. Keeps documents well-sized. */

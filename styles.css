@@ -24,6 +24,58 @@
 	color: var(--color-orange);
 }
 
+/*
+ * "Work in flight" is shown ON the figures instead of as an extra status line: a
+ * lighter tint sweeps right-to-left through the glyphs while a session is doing
+ * something. The figures already update live, so a separate "Indexing 60/111…"
+ * counter only repeated them — with a different denominator, and by appearing and
+ * disappearing it took the whole page up and down with it.
+ *
+ * This is purely a paint effect: no layout box changes, so nothing can shift. The
+ * highlight is derived from `currentColor`, so one rule covers both the green
+ * (in sync) and the orange (pending) variant.
+ *
+ * Guarded by @supports because the effect needs background-clip:text with a
+ * transparent fill — without support the text would render invisible, so the
+ * figures simply stay static instead.
+ */
+@supports (background-clip: text) and (color: color-mix(in srgb, red 50%, white)) {
+	.couchdb-sync-summary-busy {
+		background-image: linear-gradient(
+			100deg,
+			currentColor 0%,
+			currentColor 38%,
+			color-mix(in srgb, currentColor 45%, white) 50%,
+			currentColor 62%,
+			currentColor 100%
+		);
+		background-size: 280% 100%;
+		background-position: 180% 0;
+		background-clip: text;
+		-webkit-background-clip: text;
+		-webkit-text-fill-color: transparent;
+		animation: couchdb-sync-sweep 2.1s linear infinite;
+	}
+}
+
+@keyframes couchdb-sync-sweep {
+	from {
+		background-position: 180% 0;
+	}
+	to {
+		background-position: -80% 0;
+	}
+}
+
+/* Respect a reduced-motion preference: keep the plain, static figures. */
+@media (prefers-reduced-motion: reduce) {
+	.couchdb-sync-summary-busy {
+		background-image: none;
+		-webkit-text-fill-color: currentColor;
+		animation: none;
+	}
+}
+
 .couchdb-sync-counts {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
@@ -373,11 +425,6 @@
 	color: var(--text-muted);
 }
 
-.couchdb-sync-progress {
-	width: 100%;
-	margin-top: 0.4em;
-	height: 0.6em;
-}
 
 /* --- "currently working on this file" feedback --- */
 

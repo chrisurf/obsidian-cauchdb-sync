@@ -199,13 +199,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 		await this.saveSettings().catch(() => undefined);
 	}
 
-	private setStatus(
-		state: SyncState,
-		detail?: string,
-		progress?: { done: number; total: number }
-	): void {
+	private setStatus(state: SyncState, detail?: string): void {
+		// Idempotent: the engine signals activity once per indexed file, so a large
+		// vault would otherwise re-render the status bar and every listener thousands
+		// of times for a status that never changed.
+		if (this.status.state === state && this.status.detail === detail) return;
+
 		const wasSyncing = this.status.state === SYNC_STATE.SYNCING;
-		this.status = { state, detail, done: progress?.done, total: progress?.total };
+		this.status = { state, detail };
 
 		if (state === SYNC_STATE.ERROR && detail) console.error("[couchdb-sync]", detail);
 
@@ -244,18 +245,9 @@ export default class CouchDBSyncPlugin extends Plugin {
 		let label = "CouchDB";
 		let ariaSuffix = raw.detail ?? raw.state;
 
-		const engineSyncingWithProgress =
-			raw.state === SYNC_STATE.SYNCING && raw.total !== undefined && raw.total > 0;
-
 		if (raw.state === SYNC_STATE.ERROR || raw.state === SYNC_STATE.OFFLINE || raw.state === SYNC_STATE.CONNECTING) {
 			// these states win unconditionally — drift % would be misleading here
 			displayed = raw.state;
-		} else if (engineSyncingWithProgress) {
-			// initial index pass etc. — engine knows the exact progress
-			displayed = SYNC_STATE.SYNCING;
-			const pct = Math.round((raw.done! / raw.total!) * 100);
-			label = `CouchDB ${pct}%`;
-			ariaSuffix = `syncing ${pct}% — ${raw.detail ?? "indexing"}`;
 		} else if (drift && drift.drift > 0) {
 			// Disk and DB still diverge -> not "in sync". Only call it *syncing* (and
 			// spin the icon) when a session is actually running; with nothing running
