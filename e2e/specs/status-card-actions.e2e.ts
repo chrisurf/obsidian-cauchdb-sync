@@ -164,7 +164,7 @@ describe("CouchDB Sync — status card actions", function () {
 			assert.equal(card.hasAction, true, "the status card must offer the primary action");
 			// One control, one meaning: the button is a verb in every state. It used to
 			// turn into "Stop", which read as a second on/off switch beside the toggle.
-			assert.equal(card.actionLabel, "Sync now", `action label was: ${card.actionLabel}`);
+			assert.equal(card.actionLabel, "Force sync", `action label was: ${card.actionLabel}`);
 		} finally {
 			await setEnabled(false);
 		}
@@ -197,7 +197,7 @@ describe("CouchDB Sync — status card actions", function () {
 		}, PLUGIN_ID);
 
 		assert.equal(res.running, true, "a session should be running");
-		assert.equal(res.label, "Sync now", `the running state must not relabel the button: ${res.label}`);
+		assert.equal(res.label, "Force sync", `the running state must not relabel the button: ${res.label}`);
 		assert.equal(res.enabled, true, "the button must stay clickable as a re-trigger");
 	});
 
@@ -324,7 +324,7 @@ describe("CouchDB Sync — status card actions", function () {
 
 	it("does not repeat the everyday actions further down the page", async function () {
 		const card = await readCard();
-		for (const gone of ["Sync now", "Stop sync", "Start automatically on launch"]) {
+		for (const gone of ["Sync now", "Force sync", "Stop sync", "Start automatically on launch"]) {
 			assert.ok(
 				!card.settingNames.includes(gone),
 				`"${gone}" should no longer be a separate setting; had: ${card.settingNames.join(", ")}`,

@@ -27,7 +27,7 @@ plain-language UX.
 
 ## Features
 
-- 🔄 **Live two-way sync** via PouchDB ↔ CouchDB continuous replication (or one-shot "Sync now").
+- 🔄 **Live two-way sync** via PouchDB ↔ CouchDB continuous replication (or a one-shot "Force sync").
 - 🧩 **Chunked, streaming storage** — files of any size (images, PDFs, audio, video) are split into
   1 MiB content-addressed chunks. Reads and writes stream to/from disk, so a 600 MB file never sits
   in memory; unchanged chunks are reused.
@@ -84,11 +84,11 @@ are deliberate:
   **Index status** shows the truth: counts, %, drift, the file tree, and what's being worked on
   right now — even when sync is idle.
 - **One switch, one action.** Two controls, two clearly separated roles: the **switch** decides
-  *whether* this vault syncs (a state — persisted, and also the way to stop), and **Sync now** just
+  *whether* this vault syncs (a state — persisted, and also the way to stop), and **Force sync** just
   *does it once* (an action — it changes no setting). Turning the switch on starts syncing straight
   away; there is no second "start automatically" setting to contradict it, and no button that
   doubles as a second off switch.
-- **Controls map to plain verbs.** *Sync now* (in the status card), *Download only* (pull, for
+- **Controls map to plain verbs.** *Force sync* (in the status card), *Download only* (pull, for
   followers), *Wipe local cache*. Toggles take effect immediately.
 - **Memory- and mobile-safe pipeline.** Small files first; large files stream and trickle in the
   background; replication batches are bounded — so the app stays responsive and never OOMs.
@@ -149,7 +149,7 @@ With **encryption enabled** (the default), the server stores no readable content
 3. Choose a **conflict strategy**. For *master device wins*, enable *This device is the master* on
    exactly one device (e.g. your desktop).
 4. Make sure the master switch in the status card says **Sync on** — it starts syncing right away
-   and on every launch. Press **Sync now** any time to (re)trigger a full pass.
+   and on every launch. Press **Force sync** any time to re-trigger a full pass.
 
 ### CouchDB server (one-time)
 

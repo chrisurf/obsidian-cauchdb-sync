@@ -126,7 +126,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "couchdb-sync-now",
-			name: "Sync now",
+			name: "Force sync",
 			callback: () => this.restartSync(),
 		});
 
@@ -141,7 +141,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 			name: "Wipe local cache (does not download)",
 			callback: async () => {
 				await this.wipeLocalOnly();
-				new Notice("CouchDB Sync: local cache wiped. Use 'Sync now' to re-download.");
+				new Notice("CouchDB Sync: local cache wiped. Use 'Force sync' to re-download.");
 			},
 		});
 
@@ -318,7 +318,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 				// Idle auto-resolve: when no session is running but the DB still holds
 				// unresolved conflicts, clear them by the configured strategy so they
-				// don't sit red forever waiting for the next full "Sync now". Guarded so
+				// don't sit red forever waiting for the next full "Force sync". Guarded so
 				// overlapping 5s/3s ticks never stack it.
 				if (!this.engine && report.conflicts.length > 0 && !this.resolvingIdle) {
 					this.resolvingIdle = true;
@@ -344,7 +344,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 *
 	 * Deliberately the same thing the toggle in the status card does — not a third
 	 * behaviour. The plugin has exactly two controls: a switch for WHETHER this
-	 * vault syncs, and a "Sync now" button for DOING it once. The status-bar icon is
+	 * vault syncs, and a "Force sync" button for DOING it once. The status-bar icon is
 	 * the switch (it already shows that state), and the panel holds the action.
 	 */
 	private async toggleSyncFromStatusBar(): Promise<void> {
@@ -534,7 +534,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 	/**
 	 * Wipe the LOCAL replica only (fast). Does NOT download — the user starts that
-	 * separately with "Sync now". The server data is untouched.
+	 * separately with "Force sync". The server data is untouched.
 	 */
 	wipeLocalOnly(): Promise<void> {
 		this.engine?.abort();
@@ -550,7 +550,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 				await this.getSharedDb().destroyLocal().catch(() => undefined);
 				this.db = null;
 				this.reportInFlight = null;
-				this.setStatus(SYNC_STATE.IDLE, "local cache wiped — press Sync now to re-download");
+				this.setStatus(SYNC_STATE.IDLE, "local cache wiped — press Force sync to re-download");
 			});
 		return this.restartLock;
 	}
@@ -574,7 +574,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 				this.engine?.stop();
 				this.engine = null;
 				// keep the shared DB handle open so the idle index view still works
-				this.setStatus(SYNC_STATE.IDLE, "stopped — press Sync now to resume");
+				this.setStatus(SYNC_STATE.IDLE, "stopped — press Force sync to resume");
 			});
 		return this.restartLock;
 	}

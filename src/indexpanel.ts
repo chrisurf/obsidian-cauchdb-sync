@@ -312,7 +312,7 @@ export class IndexPanel {
 			return "Encryption is on, but no passphrase is set.";
 		}
 		if (!this.plugin.isRunning()) {
-			return st.detail ?? "Nothing is running right now — press Sync now to start.";
+			return st.detail ?? "Nothing is running right now — press Force sync to start.";
 		}
 		return st.detail ?? ""; // running and healthy: the state label says it all
 	}
@@ -340,8 +340,13 @@ export class IndexPanel {
 
 		const btn = row.createEl("button", { cls: "couchdb-sync-primary-action" });
 		setIcon(btn.createSpan({ cls: "couchdb-sync-primary-icon" }), "refresh-cw");
-		btn.createSpan({ text: "Sync now" });
-		btn.ariaLabel = "Run a full sync now — upload local changes and pull server changes";
+		btn.createSpan({ text: "Force sync" });
+		// "Force" says deliberate re-trigger, not overwrite: this runs an ordinary
+		// two-way pass, and conflicts are still resolved by the configured strategy.
+		// The per-file menu is where overwriting one side actually lives.
+		btn.ariaLabel =
+			"Run a full sync pass now — uploads local changes and pulls server changes. " +
+			"Does not overwrite either side; conflicts still follow your conflict strategy.";
 
 		btn.onclick = async () => {
 			btn.disabled = true;
@@ -456,7 +461,7 @@ export class IndexPanel {
 			});
 			wipeBtn.onclick = async () => {
 				await this.plugin.wipeLocalOnly();
-				new Notice("Local cache wiped. Press 'Sync now' to rebuild from the new remote.");
+				new Notice("Local cache wiped. Press 'Force sync' to rebuild from the new remote.");
 				this.remount();
 			};
 			const adoptBtn = actions.createEl("button", {
@@ -471,7 +476,7 @@ export class IndexPanel {
 				await this.loadIndex(true);
 			};
 		} else {
-			summary.setText("Sync is not running. Press 'Sync now' or 'Download only' to start.");
+			summary.setText("Sync is not running. Press 'Force sync' or 'Download only' to start.");
 		}
 
 		counts.setText("");
@@ -886,7 +891,7 @@ export class IndexPanel {
 			} else if (state === "local") {
 				m.addItem((i) => i.setTitle("Upload to server").setIcon("upload").onClick(() => run("uploaded", () => p.takeLocalPath(path))));
 			}
-			m.addItem((i) => i.setTitle(state === "excluded" ? "Sync once" : "Sync now").setIcon("refresh-cw").onClick(() => run("synced", () => p.forceSyncPath(path))));
+			m.addItem((i) => i.setTitle(state === "excluded" ? "Sync once" : "Force sync").setIcon("refresh-cw").onClick(() => run("synced", () => p.forceSyncPath(path))));
 			m.addItem((i) => i.setTitle("Show history…").setIcon("history").onClick(() => new HistoryModal(p, path, refresh).open()));
 			m.addSeparator();
 			if (state !== "remote") {

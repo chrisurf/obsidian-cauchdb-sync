@@ -167,7 +167,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Live sync (real-time)")
-			.setDesc("Keep changes flowing continuously in both directions. Off = sync only when you press “Sync now”. Takes effect immediately.")
+			.setDesc("Keep changes flowing continuously in both directions. Off = sync only when you press “Force sync”. Takes effect immediately.")
 			.addToggle((t) =>
 				t.setValue(s.liveSync).onChange(async (v) => {
 					s.liveSync = v;
@@ -219,7 +219,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h2", { text: "Actions" });
 
-		// NOTE: "Sync now" and "Stop" are deliberately NOT repeated here — they live
+		// NOTE: "Force sync" is deliberately NOT repeated here — it lives
 		// in the status card, next to the state they act on. Only actions that are
 		// not part of the everyday loop remain in this section.
 
@@ -239,14 +239,14 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Wipe local cache")
-			.setDesc("Delete this device's local copy only — fast, and the server is NOT touched. Afterwards press “Sync now” or “Download only” to rebuild it.")
+			.setDesc("Delete this device's local copy only — fast, and the server is NOT touched. Afterwards press “Force sync” or “Download only” to rebuild it.")
 			.addButton((b) =>
 				b
 					.setWarning()
 					.setButtonText("Wipe local cache")
 					.onClick(async () => {
 						await this.plugin.wipeLocalOnly();
-						new Notice("Local cache wiped. Press “Sync now” or “Download only” to rebuild.");
+						new Notice("Local cache wiped. Press “Force sync” or “Download only” to rebuild.");
 						this.display();
 					})
 			);
