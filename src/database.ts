@@ -84,6 +84,16 @@ export class SyncDatabase {
 	/** decrypt outcome of the most recent getAll() scan (see getDecryptStats) */
 	private lastScanSeen = 0;
 	private lastScanFailed = 0;
+	/**
+	 * Cache of hydrated (decrypted) file docs, keyed by id → {rev, doc}. Decrypting a
+	 * doc's `meta` costs a full PBKDF2 key derivation (~30 ms in the browser, since
+	 * every doc has a unique salt), and the index report re-scans ALL file docs on a
+	 * timer. Without this cache a large vault re-derives hundreds of keys every few
+	 * seconds and the index view never finishes ("Loading…"). A doc is re-decrypted
+	 * only when its `_rev` changes; the cheap mutable fields (`_conflicts`) are
+	 * refreshed from the live scan each time.
+	 */
+	private hydratedCache = new Map<string, { rev: string; doc: FileDoc }>();
 
 	constructor(
 		settings: CouchDBSyncSettings,
@@ -143,25 +153,62 @@ export class SyncDatabase {
 			startkey: FILE_PREFIX,
 			endkey: FILE_PREFIX + RANGE_END,
 		});
-		const out: FileDoc[] = [];
-		let seen = 0;
-		let failed = 0;
+		const wires: Wire[] = [];
 		for (const row of res.rows) {
 			const d = row.doc as unknown as Wire | undefined;
-			if (!d || d.type !== "file") continue;
-			seen++;
-			try {
-				out.push(await hydrateFile(d, this.settings));
-			} catch (e) {
-				failed++;
-				console.error("[couchdb-sync] cannot decrypt file doc", d._id, e);
+			if (d && d.type === "file") wires.push(d);
+		}
+		const seen = wires.length;
+		let failed = 0;
+		// Rebuilt each scan so docs that disappeared drop out of the cache (bounded).
+		const nextCache = new Map<string, { rev: string; doc: FileDoc }>();
+		const out: (FileDoc | null)[] = new Array(wires.length).fill(null);
+
+		// Split into cache hits (free) and misses (each miss is a PBKDF2 derivation).
+		const misses: { i: number; d: Wire }[] = [];
+		for (let i = 0; i < wires.length; i++) {
+			const d = wires[i];
+			const rev = d._rev ?? "";
+			const cached = this.hydratedCache.get(d._id);
+			if (cached && cached.rev === rev) {
+				// Reuse the expensive decrypt; only refresh the cheap, mutable
+				// structural field that can change without a new winning _rev.
+				const doc: FileDoc = { ...cached.doc };
+				if (d._conflicts) doc._conflicts = d._conflicts;
+				else delete doc._conflicts;
+				out[i] = doc;
+				nextCache.set(d._id, cached);
+			} else {
+				misses.push({ i, d });
 			}
 		}
+
+		// Decrypt the misses with bounded concurrency: crypto.subtle runs off the
+		// main thread, so overlapping derivations cut the first-scan wall-clock on a
+		// large vault (where it would otherwise be N * ~30 ms serially).
+		const CONCURRENCY = 8;
+		for (let start = 0; start < misses.length; start += CONCURRENCY) {
+			const batch = misses.slice(start, start + CONCURRENCY);
+			await Promise.all(
+				batch.map(async ({ i, d }) => {
+					try {
+						const doc = await hydrateFile(d, this.settings);
+						out[i] = doc;
+						nextCache.set(d._id, { rev: d._rev ?? "", doc });
+					} catch (e) {
+						failed++;
+						console.error("[couchdb-sync] cannot decrypt file doc", d._id, e);
+					}
+				})
+			);
+		}
+
+		this.hydratedCache = nextCache;
 		// Remember whether a scan hit encrypted docs it could not decrypt at all —
 		// the index report uses this to detect a wrong passphrase (see getDecryptStats).
 		this.lastScanSeen = seen;
 		this.lastScanFailed = failed;
-		return out;
+		return out.filter((d): d is FileDoc => d !== null);
 	}
 
 	/**
