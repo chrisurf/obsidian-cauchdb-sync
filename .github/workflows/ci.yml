@@ -1,10 +1,21 @@
 name: CI
 
+# Runs on PULL REQUESTS, not on every feature-branch push.
+#
+# `pull_request` fires on opened/reopened/synchronize, so a branch is checked from
+# the moment a PR exists and re-checked on every push to it — while work in
+# progress on a branch with no PR costs nothing. It also removes the duplicate run
+# a PR branch used to get (once for the push, once for the PR).
+#
+# `push: main` stays deliberately: release.yml publishes a GitHub Release on every
+# push to main and only runs `npm run build` — no lint, no tests. Without this
+# trigger nothing would check the merge result before it ships.
 on:
-  push:
-    branches: ["**"]
   pull_request:
     branches: ["**"]
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:

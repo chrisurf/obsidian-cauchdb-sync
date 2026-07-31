@@ -5,7 +5,7 @@ export type ConflictStrategy = "master" | "newest";
  * that needs a one-time migration (see `migrateSettings` in main.ts). Fresh
  * installs are stamped with the current version and skip migration.
  */
-export const CURRENT_SETTINGS_VERSION = 1;
+export const CURRENT_SETTINGS_VERSION = 2;
 
 export interface CouchDBSyncSettings {
 	/** persisted settings schema version; drives one-time migrations */
@@ -42,22 +42,27 @@ export interface CouchDBSyncSettings {
 	localDbId: string;
 
 	/**
-	 * Master on/off switch for the whole sync mechanism. When false, NOTHING
-	 * touches the network: no session starts, auto-start is ignored, live sync
-	 * cannot resume, per-file sync actions refuse, and the idle conflict resolver
-	 * stands down. The local index view still reads the cache (local-only, no
-	 * network) so the user can inspect state while sync is off. This is the hard
-	 * kill switch surfaced as the on/off toggle in the status card — distinct from
-	 * `liveSync`/`autoStart`, which are preferences that only take effect while the
-	 * master switch is on. Persisted, so "off" survives restarts. On by default.
+	 * Master on/off switch for the whole sync mechanism, and the ONLY thing that
+	 * decides whether this vault syncs.
+	 *
+	 * ON means "sync this vault": a session starts automatically when Obsidian
+	 * launches. OFF is a hard kill switch — NOTHING touches the network: no session
+	 * starts, live sync cannot resume, per-file sync actions refuse, and the idle
+	 * conflict resolver stands down. The local index view still reads the cache
+	 * (local-only, no network) so state stays inspectable while sync is off.
+	 *
+	 * There is deliberately no separate "start automatically" preference: two flags
+	 * for one intent produced the contradictory "SYNC ON … Idle" state, where the
+	 * switch said yes and nothing ran. Stopping the *current* session without
+	 * changing this switch is still possible (the status card's Stop button); that
+	 * state is explicitly labelled, unlike the silent one it replaces.
+	 *
+	 * Persisted, so "off" survives restarts. On by default.
 	 */
 	syncEnabled: boolean;
 
 	/** whether live (continuous) sync is enabled */
 	liveSync: boolean;
-
-	/** start synchronizing automatically when Obsidian launches */
-	autoStart: boolean;
 
 	/**
 	 * Sync hidden files (dotfiles and dot-folders like .obsidian, .git). Normal files
@@ -110,6 +115,15 @@ export interface CouchDBSyncSettings {
 	 * the server (no warm cache). Off by default.
 	 */
 	forgetCacheOnDisable: boolean;
+
+	/**
+	 * Plugin version whose "what's new" note the user has already seen. Empty on
+	 * a fresh install, so the note shows once; it is stamped with the running
+	 * version the moment the note is due, which also covers every later update
+	 * (installed version !== stamped version). Not a preference — there is
+	 * nothing to configure, only something to remember.
+	 */
+	lastWhatsNewVersion: string;
 }
 
 /**
@@ -122,17 +136,34 @@ export interface CouchDBSyncSettings {
  * later removal is respected.
  */
 export const DEFAULT_HIDDEN_EXCLUDE: string[] = [
-	".obsidian/",
 	".git/",
 	".trash/",
 	".DS_Store",
 	"node_modules/",
 	".claude/",
 	"tmp/",
-	".obsidian/workspace.json",
-	".obsidian/workspace-mobile.json",
-	".obsidian/cache",
 ];
+
+/**
+ * The full default exclude baseline for one vault, including its configuration
+ * folder.
+ *
+ * That folder is `.obsidian` in most vaults but users can rename it, and
+ * Obsidian exposes the real value as `Vault#configDir`. Hardcoding the usual
+ * name meant a renamed config folder was not on the baseline at all — so
+ * enabling hidden-file sync would have replicated the whole settings directory,
+ * workspace layout and plugin state, which is exactly what the baseline exists
+ * to prevent. The value is therefore injected by the caller.
+ */
+export function defaultHiddenExclude(configDir: string): string[] {
+	return [
+		`${configDir}/`,
+		...DEFAULT_HIDDEN_EXCLUDE,
+		`${configDir}/workspace.json`,
+		`${configDir}/workspace-mobile.json`,
+		`${configDir}/cache`,
+	];
+}
 
 export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	schemaVersion: CURRENT_SETTINGS_VERSION,
@@ -148,7 +179,6 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	localDbId: "",
 	syncEnabled: true,
 	liveSync: true,
-	autoStart: true,
 	syncHidden: false,
 	// when hidden sync is ON, keep these volatile/risky hidden paths out
 	hiddenExclude: [...DEFAULT_HIDDEN_EXCLUDE],
@@ -159,6 +189,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	unsafeShutdown: false,
 	connectionVerified: false,
 	forgetCacheOnDisable: false,
+	lastWhatsNewVersion: "",
 };
 
 /**
@@ -274,13 +305,20 @@ export const SYNC_STATE = {
 
 export type SyncState = (typeof SYNC_STATE)[keyof typeof SYNC_STATE];
 
-/** Current sync status, shared with the status bar and the settings view. */
+/**
+ * Current sync status, shared with the status bar and the settings view.
+ *
+ * Deliberately carries no progress counter. The status card already reports
+ * progress as "<synced> / <total> files (<pct>%)", derived from the index report;
+ * a second counter with a different denominator (files touched by the current
+ * pass) said almost the same thing in the common case and disagreed with it in
+ * every other. One number, one meaning — `state` tells the card whether work is
+ * in flight, and it animates its own figures accordingly.
+ */
 export interface SyncStatus {
 	state: SyncState;
+	/** why the plugin is in this state, when there is something worth saying */
 	detail?: string;
-	/** progress of the current indexing pass, when applicable */
-	done?: number;
-	total?: number;
 }
 
 /** Raw chunk size in bytes before base64/encryption. Keeps documents well-sized. */

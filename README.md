@@ -1,147 +1,131 @@
-# CouchDB Sync for Obsidian
+<p align="center">
+  <img src="./assets/hero.png" alt="CouchDB Sync for Obsidian — your vault, everywhere, end-to-end encrypted" width="100%" />
+</p>
 
-Simple, reliable live synchronization of your Obsidian vault against a self-hosted **CouchDB**
-server, with **end-to-end encrypted note content**. A deliberately minimal alternative to the
-(excellent but very complex) [obsidian-livesync](https://github.com/vrtmrz/obsidian-livesync) —
-CouchDB only, a handful of settings, and **no pop-ups**.
+<p align="center">
+  <a href="https://www.buymeacoffee.com/chrisurf" target="_blank">
+    <img src="./assets/buymeacoffee.png" alt="Buy me a coffee" height="48">
+  </a>
+</p>
 
-> **Encryption scope:** with encryption on (the default), note *content* **and** metadata (file
-> paths, sizes, timestamps) are encrypted end-to-end. A little residual metadata remains (total data
-> volume, chunk dedup structure) — see [Security model](#security-model) for exactly what is and
-> isn't protected.
+# ☁️ CouchDB Sync for Obsidian
 
-> **Status (June 2026): working MVP, validated on desktop.** A vault (incl. large audio/`.lpf`
-> files) syncs cleanly and reliably into CouchDB on a single desktop device. Multi-device sync
-> (a second desktop) is the next test. See [Status & roadmap](#status--roadmap) and
-> [`REPORT.md`](./REPORT.md) for the original analysis of LiveSync's pain points.
+Keep the same notes on every device — on your own server, readable only by you.
 
-## Why
+Write a note on your laptop and it appears on your phone. Edit it on the train
+and your desktop has it when you get home. Nothing goes through a company's
+cloud: your notes travel to a server **you** choose, and they are locked before
+they leave your device, so whoever runs that server sees nothing but
+scrambled data.
 
-LiveSync is powerful but supports many backends (S3/MinIO, P2P/WebRTC), config/plugin sync, multiple
-encryption and chunking generations, and requires **byte-identical settings across all devices**.
-That power is the source of its most common complaints: settings complexity, mobile crashes, the
-dreaded "rebuild database", and endless confirmation pop-ups.
+There are no pop-ups to click away and no "rebuild your database" rituals. One
+switch says whether this vault syncs, and a panel shows you the honest truth
+about every single file.
 
-This plugin does **one** thing well: live note sync over **one** CouchDB — with transparent,
-plain-language UX.
+---
 
-## Features
+## 🌱 New to syncing? Start here
 
-- 🔄 **Live two-way sync** via PouchDB ↔ CouchDB continuous replication (or one-shot "Sync now").
-- 🧩 **Chunked, streaming storage** — files of any size (images, PDFs, audio, video) are split into
-  1 MiB content-addressed chunks. Reads and writes stream to/from disk, so a 600 MB file never sits
-  in memory; unchanged chunks are reused.
-- 🔐 **End-to-end encryption on by default** — note **content and metadata** (file paths, sizes,
-  timestamps, device ids) are encrypted at rest with AES-256-GCM (PBKDF2-derived key, 210k
-  iterations), TLS in transit. Document ids are keyed HMACs of the path, so the server never sees a
-  filename. The passphrase never touches the server and must match across devices. A little residual
-  metadata remains — see [Security model](#security-model).
-- ⚖️ **No-prompt conflict resolution**: *newest version wins* or *master device wins*.
-- 📊 **Full-transparency index status** — at a glance: how many of your files are in sync (`X / Y`,
-  with %), and a collapsible **Sync state** tree of every file across this device *and* the server,
-  **colour-coded** into five distinct states so you can tell exactly what each file needs:
-  🟢 green = in sync, 🟠 amber = local only (not uploaded yet), ⚪ grey = remote only (not downloaded
-  here), 🟣 purple = content differs (auto-reconcilable drift), 🔴 red = unresolved conflict.
-  Folders roll up to the most urgent state inside them (green only when the whole subtree is clean),
-  and the summary/lists/tree all derive from one classification so they never disagree. Updates
-  **in place** every few seconds — no flicker.
-- ✨ **Live per-file feedback** — files being transferred pulse with a left-to-right "scan" shimmer
-  and show **chunk progress** (`12 / 40 chunks · 30%`).
-- 🩹 **Self-healing** — if a download references a chunk that went missing (e.g. an interrupted
-  earlier upload) and the file exists locally, the plugin re-uploads it to regenerate the chunk
-  instead of getting stuck.
-- 🧰 **Per-file & per-folder controls** — every row has a **⋯ actions** menu (only the moves that make
-  sense for its state: *download/overwrite local*, *upload/overwrite server*, *sync now/once*,
-  *delete on this device*, *delete everywhere*, *remove from index*), a red **✕** to remove from the
-  index, and a 🕘 **History** button (see below). Folders apply the same actions in bulk to everything
-  inside them.
-- 🕘 **Full file history & restore** — the plugin keeps an explicit, append-only version log per file
-  (content chunks are deduplicated, so history costs only small metadata). Browse every version
-  chronologically, **diff any two** versions *side-by-side* or *inline*, and **restore** any earlier
-  version on all devices with one click — restores are themselves reversible.
-- 🚫 **Excluded files, on demand** — optionally surface files the skip rules exclude (bounded, opt-in)
-  so you can inspect or sync one once, for full transparency over *all* data.
-- 📁 **Hidden files (optional)** — sync `.obsidian` (settings, plugins), `.git`, etc. with a simple
-  toggle and an exclude/include list. Off by default.
-- 🛟 **Safe by design** — no destructive "rebuild" ritual; a **crash guard** disables auto-start
-  after an unclean shutdown so you can never get stuck in a crash loop; **Wipe local cache** only
-  touches this device.
-- 📵 **CORS-free** networking via Obsidian's `requestUrl` (works on mobile too).
+Three ideas cover almost everything:
 
-## Design decisions (why it feels simple)
+| Term | What it means for your vault |
+| --- | --- |
+| 🗄️ **Server** | The meeting point. Every device uploads its changes there and picks up everyone else's. It runs [CouchDB](https://couchdb.apache.org/) — free, open-source database software. You can rent one for a few euros a month or run it on a computer at home. |
+| 🔐 **Passphrase** | A secret sentence you invent. It locks your notes before they leave your device and unlocks them on the other side. The server never learns it, so it must be **exactly the same on every device**. Lose it and your notes cannot be recovered — write it down somewhere safe. |
+| 🔄 **Sync** | The continuous back-and-forth. Once it is switched on, it just runs: you edit, it uploads; someone else edits, it downloads. |
 
-The whole point is to be the opposite of "too many settings, too many pop-ups". The choices below
-are deliberate:
+The short version of a normal day: you write notes and never think about this
+plugin again. It is running in the background, and the status bar at the bottom
+of Obsidian quietly tells you how things are going.
 
-- **One backend only (CouchDB).** No S3/P2P/WebRTC. Removes whole classes of settings and bugs.
-- **No confirmation pop-ups.** Conflicts resolve automatically by a rule you pick once. Destructive
-  actions are local-only or clearly labelled; the master device is your backup.
-- **Transparency over configuration.** Instead of asking you to understand the internals, the
-  **Index status** shows the truth: counts, %, drift, the file tree, and what's being worked on
-  right now — even when sync is idle.
-- **Controls map to plain verbs.** *Sync now* (both ways), *Download only* (pull, for followers),
-  *Stop*, *Wipe local cache*. Toggles take effect immediately and stay consistent (e.g. *Stop* also
-  switches off live sync and auto-start so nothing fights it).
-- **Memory- and mobile-safe pipeline.** Small files first; large files stream and trickle in the
-  background; replication batches are bounded — so the app stays responsive and never OOMs.
-- **Crash-safe, not crash-prone.** Errors disable auto-start rather than retrying a failing
-  operation forever. Recovery is always reachable.
-- **Single clean version.** No migration/back-compat cruft while in active development.
+> **You need a server for this.** That is the one piece of setup this plugin
+> cannot do for you. [Getting a server](#-step-1-get-a-server) walks through the
+> options, from "pay someone else to run it" to "run it yourself in one command".
 
-## Security model
+---
 
-Be precise about what "end-to-end encrypted" means here, so you can decide whether it fits your
-threat model:
+## What you get
 
-With **encryption enabled** (the default), the server stores no readable content *or* metadata.
+### 🔐 Everything is encrypted before it leaves
 
-**Encrypted (unreadable to the server or anyone with the CouchDB data):**
+Encryption is **on by default** and covers more than most sync tools: not only
+what you wrote, but also your file names, folder structure, file sizes and
+timestamps. Someone who steals the whole server database gets a pile of numbered
+blobs — no titles, no folder names, no hints.
 
-- **Note content.** Every chunk's bytes are encrypted with AES-256-GCM before upload. The key is
-  derived from your passphrase via PBKDF2-SHA-256 (210k iterations) with a random per-message salt
-  and IV. The passphrase is never sent to the server. TLS protects everything in transit.
-- **File paths / names.** Document ids are `f:<HMAC-SHA-256(path)>` — a *keyed* one-way hash, so the
-  server sees an opaque id, never the path. The real path travels **encrypted** inside the document.
-- **File sizes, modification/creation timestamps, and device ids.** All of it lives in the
-  encrypted document body, not in clear fields.
-- **Which chunks a file is made of** — the file→chunk mapping is encrypted, so the server cannot tie
-  chunk documents to files.
+### 📊 A status panel that tells you the truth
 
-**Still visible to someone who can read the CouchDB database (residual metadata):**
+Open it from the status bar and see how many files are in sync (`1,284 / 1,284 ·
+100%`) plus a folder tree of *every* file, colour-coded:
 
-- **The existence and approximate total volume of data** — the number of chunk documents and each
-  chunk's size are visible (so an observer can estimate how much you store, but not which file any
-  chunk belongs to).
-- **Content-addressed dedup structure** — identical chunks share an id, so repetition is visible.
-  The chunk id is a *keyed* hash (includes the passphrase), so it does **not** leak the plaintext.
-- **That a document is a deletion** (a tombstone flag stays clear) and a coarse count of files/versions.
-- **Version timestamps** — encoded in the history id so the timeline can sort chronologically.
-- **The *master device* marker** — one device id in a small control document.
+| | State | What it means |
+| --- | --- | --- |
+| 🟢 | **In sync** | This file is identical here and on the server. Nothing to do. |
+| 🟠 | **Local only** | It exists here but hasn't been uploaded yet. |
+| ⚪ | **Remote only** | It exists on the server but hasn't been downloaded here yet. |
+| 🟣 | **Differs** | Both sides changed. The plugin will reconcile it automatically. |
+| 🔴 | **Conflict** | Two devices edited it at the same time. Handled by your chosen rule — see below. |
 
-**On this device:**
+Folders show the most urgent state inside them, so a green folder really means
+"everything in here is fine". Files being transferred right now shimmer and show
+their progress.
 
-- The local cache (PouchDB/IndexedDB) stores the **same encrypted form** as the server; metadata is
-  only ever decrypted in memory. Turn on **“Forget local cache when plugin is disabled”** to destroy
-  the cache on disable.
-- Your **passphrase and CouchDB password are stored in clear** in the plugin's `data.json`
-  (`.obsidian/plugins/couchdb-sync/data.json`) — as with essentially every Obsidian plugin that
-  holds credentials. `data.json` is never synced, and “Forget local cache” does **not** remove it.
-  Protect it with full-disk encryption, and rotate credentials if the file was ever exposed.
+### 🕰️ Every version, kept
 
-> **Changing the encryption setting or passphrase is a storage-format change:** the document ids
-> depend on the passphrase, so switching encryption on/off or rotating the passphrase requires a
-> **local wipe + fresh re-sync** (ideally a fresh remote database) so old and new documents don't
-> mix. Keep the passphrase identical across devices.
+The plugin keeps a history of each note (the last 50 versions). Open it, compare
+any two versions side by side, and restore an older one on all devices with one
+click. Restoring is itself just another version, so you can always undo the undo.
 
-## Configuration
+### ⚖️ Conflicts without pop-ups
 
-1. Set **Server URL** (use `https://`), **Database name**, **Username**, **Password** → *Test*.
-2. Keep **encryption on** and set a **Passphrase** (the same on every device).
-3. Choose a **conflict strategy**. For *master device wins*, enable *This device is the master* on
-   exactly one device (e.g. your desktop).
-4. Press **Sync now** (or turn on **Live sync**).
+If two devices edit the same note before they can talk to each other, the plugin
+resolves it by a rule you pick once — either **the newest edit wins**, or **one
+device you nominate always wins**. It never interrupts you to ask. And because
+every version is kept, the other version is never actually gone.
 
-### CouchDB server (one-time)
+### 📦 Big files, small memory
+
+Photos, PDFs, audio, video — files are cut into 1 MB pieces and only the changed
+pieces are uploaded. Identical pieces are stored once, even across different
+files. A 600 MB file syncs without Obsidian ever holding it in memory.
+
+### 🛟 Hard to break
+
+Sync is one switch, and it is honest: on means running, off means *nothing*
+touches the network. If Obsidian ever shuts down uncleanly mid-sync, the plugin
+starts up switched **off** and tells you why, so you can never land in a loop
+that crashes on every launch. "Wipe local cache" only ever touches this device —
+the server is never harmed by anything you can press here.
+
+---
+
+## 🚀 Getting started
+
+### 🧩 Step 1: Get a server
+
+Pick whichever fits you. All you need at the end are four things: **a web
+address, a database name, a username, and a password.**
+
+**Option A — let someone host it for you (easiest).** Search for "CouchDB
+hosting"; providers like [IBM Cloudant](https://www.ibm.com/products/cloudant)
+or a small managed CouchDB plan give you a URL and login without any admin work.
+Make sure the address starts with `https://`.
+
+**Option B — run it yourself.** If you have a home server, a NAS (Synology and
+Unraid both offer CouchDB), or a small cloud VM, CouchDB installs in minutes. If
+you have [Docker](https://www.docker.com/), a test server is literally one
+command from this repository:
+
+```bash
+docker compose -f docker-compose.couchdb.yml up -d
+```
+
+That gives you `http://127.0.0.1:5984` with user `admin` and password
+`password` — perfect for trying things out on one computer. Change that password
+and use `https://` before you sync anything real over the internet.
+
+**One-time server setting.** However you got your server, open its configuration
+and add this. It lets Obsidian talk to it and allows large files:
 
 ```ini
 [chttpd]
@@ -153,42 +137,162 @@ origins = app://obsidian.md,capacitor://localhost
 credentials = true
 ```
 
-Set a low `_revs_limit` (e.g. 100) and schedule compaction to keep the DB small. The plugin routes
-requests through Obsidian's native HTTP, so CORS issues are largely avoided regardless.
+Finally, create an empty database (the default name this plugin expects is
+`obsidian`).
 
-## Status & roadmap
+### 🔌 Step 2: Connect Obsidian
 
-**Done (validated on desktop):**
+Open **Settings → CouchDB Sync** and fill in the four things from Step 1:
 
-- ✅ Core PouchDB ↔ CouchDB live + one-shot sync, CORS-free via `requestUrl`.
-- ✅ Per-file documents keyed by path + content-addressed chunks; streaming read/write (any size).
-- ✅ End-to-end **content** encryption (AES-256-GCM) on by default (metadata/paths in clear — see
-  [Security model](#security-model)).
-- ✅ No-prompt conflict resolution (newest-wins / master-wins).
-- ✅ Memory-safe pipeline: small-files-first, background indexing, bounded replication batches,
-  range-bounded DB scans (no whole-DB loads).
-- ✅ Index-status UX: in-place updates, %, drift lists, file tree, live per-file chunk progress,
-  per-file Sync button, per-entry remove-from-index ✕ — works while running **and** idle.
-- ✅ Robustness: crash guard / safe mode, auto-heal of missing chunks, quiet teardown, content-based
-  binary/text detection, leftover temp-file cleanup.
-- ✅ Optional hidden-file sync with exclude/include list (off by default).
+1. **Server URL** — the full address, e.g. `https://couch.example.com:6984`
+2. **Database name** — e.g. `obsidian`
+3. **Username** and **Password**
+4. Press **Test connection**. Green means you're good.
 
-**Next:**
+### 🔑 Step 3: Choose your passphrase
 
-- ⏭️ **Multi-device test** — sync between two desktops; verify conflict resolution and convergence.
-- ⏭️ **Mobile test/hardening** — iOS/Android (IndexedDB limits, memory budget).
-- ⏭️ Optional: orphaned-chunk cleanup command; document-history view.
+Leave **End-to-end encryption** on and type a **Passphrase**. Invent something
+long that you can write down — a short sentence works well.
 
-## Development
+> ⚠️ **Write it down now.** The passphrase never reaches the server, which is
+> the whole point — but it also means nobody can reset it for you. And it must
+> be typed *identically* on every device, or they will not understand each
+> other's notes.
+
+### ▶️ Step 4: Let it run
+
+Make sure the switch in the status card says **Sync on**. That's it — your notes
+start uploading, and sync restarts by itself every time you open Obsidian.
+
+### 📱 Step 5: Add your next device
+
+Install the plugin there, enter **the same** server details **and the same
+passphrase**, switch it on, and wait. Your vault downloads itself. If you use
+the *master device wins* rule, turn on **This device is the master** on exactly
+one device — usually your main computer.
+
+---
+
+## 🎛️ Using it day to day
+
+**The status bar** (bottom edge of Obsidian) is two controls in one:
+
+- the **icon** switches sync on and off
+- the **label** (`CouchDB 63%`) opens the full status panel in the sidebar
+
+**The status panel** is the same panel embedded in the settings tab — same tree,
+same buttons. From it you can:
+
+- press **Force sync** to run a full pass right now
+- expand the tree and hover any file for a **⋯ menu** with only the actions that
+  make sense for it: *download / overwrite local*, *upload / overwrite server*,
+  *sync once*, *delete on this device*, *delete everywhere*, *remove from index*
+- click 🕘 to browse, compare and restore that file's versions
+- apply any of those to a whole folder at once
+
+---
+
+## 🧩 Requirements
+
+- Obsidian 1.7.2 or later
+- A CouchDB server you can reach ([Step 1](#-step-1-get-a-server))
+- Tested and validated on desktop. Mobile is supported by design (the plugin
+  uses Obsidian's own networking, so it works without special server tweaks) but
+  has not yet been through a full mobile test round.
+
+---
+
+## ⌨️ Commands
+
+Available from Obsidian's command palette (`Ctrl/Cmd + P`).
+
+| Command | What it does |
+| --- | --- |
+| Open sync status panel | Opens the panel in the sidebar |
+| Force sync | Runs a full sync pass right now |
+| Turn sync on/off | The master switch, without leaving your keyboard |
+| Wipe local cache (does not download) | Clears this device's local copy only |
+| Show what's new | Re-opens the release note for the installed version |
+
+## ⚙️ Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| Server URL | _(empty)_ | Your server's full web address, including `https://` |
+| Database name | `obsidian` | Which database on that server to use |
+| Username / Password | _(empty)_ | Your login for the server |
+| Test connection | — | Checks all of the above, and unlocks the status view |
+| End-to-end encryption | on | Locks note content *and* file names, sizes and dates before upload |
+| Passphrase | _(empty)_ | Your secret. Must be identical on every device |
+| Conflict strategy | newest wins | Who wins when two devices edit the same note |
+| This device is the master | off | With *master wins*: this device's version always wins. Turn on for exactly one device |
+| Live sync (real-time) | on | Keeps changes flowing continuously. Off = only when you press **Force sync** |
+| Sync hidden files | off | Also sync `.obsidian` (your settings, themes, plugins), `.git`, etc. |
+| …except these | a safe default list | With hidden sync on: which hidden folders to leave out |
+| …but still sync these | _(empty)_ | With hidden sync off: which hidden folders to include anyway |
+| Download from server | — | One-way catch-up: pull everything, upload nothing |
+| Wipe local cache | — | Deletes this device's copy. The server is not touched |
+| Forget local cache when plugin is disabled | off | Privacy mode: destroy the local copy whenever you turn the plugin off |
+
+> **Changing encryption or the passphrase changes how everything is stored.** If
+> you switch encryption on or off, or change the passphrase, wipe the local
+> cache and start from a fresh, empty database — otherwise old and new notes get
+> mixed and neither side can read the other.
+
+---
+
+## 🔒 What the plugin does with your data
+
+**Locked before it leaves your device** — your note text, your file and folder
+names, file sizes, creation and modification dates, and which pieces make up
+which file. All of it is encrypted with AES-256-GCM, using a key derived from
+your passphrase. The server stores it and can read none of it.
+
+**Still visible to whoever runs the server** — that data exists and roughly how
+much of it there is, how many files and versions there are (approximately),
+which pieces repeat, and when versions were created. Nothing that reveals a
+title, a folder, or a word you wrote.
+
+**On this device** — the local cache keeps some information in the clear (file
+paths, sizes, fingerprints) so the status panel can work offline. Turn on
+**Forget local cache when plugin is disabled** if you want that removed whenever
+the plugin is off.
+
+**Your credentials** — your server password and your passphrase are stored in
+plain text in the plugin's own `data.json` file inside your vault, exactly as
+with every Obsidian plugin that holds a login. That file is never synced. Keep
+your disk encrypted, and change your credentials if the file was ever exposed.
+
+**Where things go** — only to the server you configured yourself. Nothing is
+sent anywhere else, ever. With sync switched off, the plugin makes no network
+requests at all.
+
+---
+
+## ☕ Support
+
+CouchDB Sync is free and open source, built and maintained in my spare time. If
+it keeps your notes together across your devices, you can support continued
+development with a coffee — it's genuinely appreciated.
+
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-chrisurf-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/chrisurf)
+
+---
+
+## 🛠️ Development
 
 ```bash
 npm install
 npm run dev      # watch build -> main.js
 npm run build    # type-check + production bundle
+npm test         # unit tests
 ```
 
-Copy `manifest.json`, `main.js`, `styles.css` into `<vault>/.obsidian/plugins/couchdb-sync/`.
+Copy `manifest.json`, `main.js` and `styles.css` into
+`<vault>/.obsidian/plugins/couchdb-sync/`.
+
+---
 
 ## License
 
-MIT
+[MIT](LICENSE)

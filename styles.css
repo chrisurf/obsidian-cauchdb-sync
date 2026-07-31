@@ -24,6 +24,58 @@
 	color: var(--color-orange);
 }
 
+/*
+ * "Work in flight" is shown ON the figures instead of as an extra status line: a
+ * lighter tint sweeps right-to-left through the glyphs while a session is doing
+ * something. The figures already update live, so a separate "Indexing 60/111…"
+ * counter only repeated them — with a different denominator, and by appearing and
+ * disappearing it took the whole page up and down with it.
+ *
+ * This is purely a paint effect: no layout box changes, so nothing can shift. The
+ * highlight is derived from `currentColor`, so one rule covers both the green
+ * (in sync) and the orange (pending) variant.
+ *
+ * Guarded by @supports because the effect needs background-clip:text with a
+ * transparent fill — without support the text would render invisible, so the
+ * figures simply stay static instead.
+ */
+@supports (background-clip: text) and (color: color-mix(in srgb, red 50%, white)) {
+	.couchdb-sync-summary-busy {
+		background-image: linear-gradient(
+			100deg,
+			currentColor 0%,
+			currentColor 38%,
+			color-mix(in srgb, currentColor 45%, white) 50%,
+			currentColor 62%,
+			currentColor 100%
+		);
+		background-size: 280% 100%;
+		background-position: 180% 0;
+		background-clip: text;
+		-webkit-background-clip: text;
+		-webkit-text-fill-color: transparent;
+		animation: couchdb-sync-sweep 2.1s linear infinite;
+	}
+}
+
+@keyframes couchdb-sync-sweep {
+	from {
+		background-position: 180% 0;
+	}
+	to {
+		background-position: -80% 0;
+	}
+}
+
+/* Respect a reduced-motion preference: keep the plain, static figures. */
+@media (prefers-reduced-motion: reduce) {
+	.couchdb-sync-summary-busy {
+		background-image: none;
+		-webkit-text-fill-color: currentColor;
+		animation: none;
+	}
+}
+
 .couchdb-sync-counts {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
@@ -286,6 +338,24 @@
 	height: 0.9em;
 }
 
+/*
+ * Both halves of the status bar item are controls: the icon starts/pauses the
+ * session, the text opens the status panel. They must therefore look and behave
+ * like controls — a hover surface makes the split legible (you can see which
+ * half you are about to hit) without adding any chrome in the resting state.
+ */
+.couchdb-sync-status-btn {
+	cursor: pointer;
+	border-radius: 4px;
+	padding: 0 0.25em;
+	transition: background-color 120ms ease, color 120ms ease;
+}
+
+.couchdb-sync-status-btn:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
 @keyframes couchdb-sync-rot {
 	from { transform: rotate(0deg); }
 	to { transform: rotate(360deg); }
@@ -307,6 +377,52 @@
 }
 
 /* --- master on/off sync toggle (right-aligned in the live-status row) --- */
+/*
+ * Primary action in the status card, sitting directly next to the state it acts
+ * on ("Not syncing  [Sync now]"). Styled like the legend buttons below it so the
+ * card reads as one control surface.
+ */
+.couchdb-sync-primary-action {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4em;
+	margin-left: 0.8em;
+	padding: 0.25em 0.7em;
+	border: 1px solid var(--text-faint);
+	border-radius: var(--radius-s);
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	line-height: 1.4;
+	cursor: pointer;
+	box-shadow: none;
+}
+.couchdb-sync-primary-action:hover:not(:disabled) {
+	background: var(--background-modifier-hover);
+	border-color: var(--interactive-accent);
+}
+.couchdb-sync-primary-action:disabled {
+	opacity: 0.5;
+	cursor: default;
+}
+.couchdb-sync-primary-icon {
+	display: inline-flex;
+	align-items: center;
+}
+.couchdb-sync-primary-icon .svg-icon {
+	width: 0.95em;
+	height: 0.95em;
+}
+
+/* Why nothing is happening — shown for every non-error state that has a reason. */
+.couchdb-sync-statusdetail {
+	margin: 0.35em 0 0 0;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: 400;
+}
+
 .couchdb-sync-power {
 	margin-left: auto;
 	display: inline-flex;
@@ -327,11 +443,6 @@
 	color: var(--text-muted);
 }
 
-.couchdb-sync-progress {
-	width: 100%;
-	margin-top: 0.4em;
-	height: 0.6em;
-}
 
 /* --- "currently working on this file" feedback --- */
 
@@ -484,7 +595,9 @@
 	padding: 0 0.5em;
 	white-space: pre-wrap;
 	overflow-wrap: anywhere;
-	border-left: 3px solid transparent;
+	/* The accent is read from the row itself, so .cdl-del/.cdl-add can set it
+	   without having to out-specify this (more specific) selector. */
+	border-left: 3px solid var(--cdl-accent, transparent);
 }
 
 .cdl-eq {
@@ -493,12 +606,12 @@
 
 .cdl-del {
 	background: rgba(var(--color-red-rgb), 0.12);
-	border-left-color: var(--color-red) !important;
+	--cdl-accent: var(--color-red);
 }
 
 .cdl-add {
 	background: rgba(var(--color-green-rgb), 0.12);
-	border-left-color: var(--color-green) !important;
+	--cdl-accent: var(--color-green);
 }
 
 .cdl-pad {
@@ -574,7 +687,8 @@
 /* --- clickable drift/conflict file names (open the diff editor) --- */
 .couchdb-sync-drift-name-link {
 	cursor: pointer;
-	text-decoration: underline dotted;
+	text-decoration-line: underline;
+	text-decoration-style: dotted;
 	text-underline-offset: 2px;
 }
 
@@ -747,4 +861,109 @@
 
 .couchdb-sync-merge-footer {
 	align-items: center;
+}
+
+/* --- sync status panel in the right sidebar --------------------------------
+ *
+ * The panel is shared with the settings tab, which is roughly three times as
+ * wide. Nothing here changes its structure — only the breathing room, so the
+ * same markup stays readable in a narrow leaf: the status row is allowed to wrap
+ * instead of squeezing the toggle off the edge, and the file tree may scroll
+ * sideways rather than forcing the whole leaf to.
+ */
+
+.couchdb-sync-view .couchdb-sync-panel-host {
+	padding: 0.2em 0.1em;
+}
+
+.couchdb-sync-view .couchdb-sync-card {
+	padding: 0.7em 0.8em;
+}
+
+.couchdb-sync-view .couchdb-sync-livestatus-row {
+	flex-wrap: wrap;
+	row-gap: 0.4em;
+}
+
+/* In a narrow leaf the toggle wraps to its own line instead of being pushed out. */
+.couchdb-sync-view .couchdb-sync-power {
+	margin-left: auto;
+}
+
+.couchdb-sync-view .couchdb-sync-legend {
+	gap: 0.35em 0.5em;
+}
+
+.couchdb-sync-view .couchdb-sync-tree {
+	overflow-x: auto;
+}
+
+.couchdb-sync-view .couchdb-sync-section-list {
+	padding-left: 1.4em;
+}
+
+/* Long paths must not widen the leaf; they wrap or scroll inside their row. */
+.couchdb-sync-view .couchdb-sync-drift-name {
+	overflow-wrap: anywhere;
+}
+
+/* ================================================================
+   WHAT'S NEW MODAL
+   ================================================================ */
+
+.couchdb-sync-whats-new-modal {
+	max-width: 640px;
+}
+
+/* Hero and coffee button are fetched from GitHub, so both are laid out to
+   survive the image never arriving — the elements hide themselves on error. */
+.couchdb-sync-whats-new-hero {
+	display: block;
+	width: 100%;
+	height: auto;
+	border-radius: var(--radius-m);
+	margin-bottom: 12px;
+}
+
+.couchdb-sync-whats-new-support {
+	display: flex;
+	justify-content: center;
+	margin-bottom: 12px;
+}
+
+.couchdb-sync-bmc-button {
+	height: 48px;
+	width: auto;
+	border-radius: var(--radius-s);
+}
+
+/* Shown instead of the button image when it cannot be fetched, so the support
+   link is never silently missing. */
+.couchdb-sync-bmc-fallback {
+	display: inline-block;
+	padding: 0.55em 1.1em;
+	border-radius: var(--radius-s);
+	background: var(--interactive-normal);
+	color: var(--text-normal);
+	font-weight: 600;
+	text-decoration-line: none;
+}
+
+.couchdb-sync-bmc-fallback:hover {
+	background: var(--interactive-hover);
+}
+
+/* The note is longer than a modal can be, so the body scrolls and the buttons
+   below it stay reachable. */
+.couchdb-sync-whats-new-body {
+	max-height: 50vh;
+	overflow-y: auto;
+}
+
+.couchdb-sync-whats-new-body h2 {
+	margin-top: 1em;
+}
+
+.couchdb-sync-whats-new-body h2:first-child {
+	margin-top: 0;
 }
