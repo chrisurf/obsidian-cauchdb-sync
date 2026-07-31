@@ -1,8 +1,9 @@
-import { App, Menu, PluginSettingTab, Setting, Notice, setIcon } from "obsidian";
+import { App, Menu, PluginSettingTab, Setting, Notice, ToggleComponent, setIcon } from "obsidian";
 import type CouchDBSyncPlugin from "./main";
 import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
 import { HistoryModal, confirm } from "./history";
+import { DiffMergeModal } from "./diffmerge";
 import { SYNC_STATE, SyncStatus } from "./types";
 
 const AUTO_REFRESH_MS = 3_000;
@@ -411,17 +412,6 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 	/** Highlight rows being worked on and show live chunk progress (done/total · %). */
 	private highlightActive(): void {
-		// update emergency-stop countdown (button text only, no full re-render)
-		const stopBtn = this.liveStatusEl?.querySelector<HTMLButtonElement>(".couchdb-sync-estop");
-		if (stopBtn) {
-			const rem = this.plugin.getEmergencyRemaining();
-			if (rem > 0) {
-				stopBtn.setText(`Stopped ${rem}s`);
-			} else if (stopBtn.disabled) {
-				this.renderLiveStatus(this.plugin.status);
-			}
-		}
-
 		const transfers = new Map(
 			this.plugin.getActiveTransfers().map((t) => [t.path, t] as const)
 		);
@@ -446,11 +436,14 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		if (!el) return;
 		el.empty();
 
-		const remaining = this.plugin.getEmergencyRemaining();
-		const syncing = st.state === SYNC_STATE.SYNCING;
+		// The master switch wins the display: when sync is off, the state coming from
+		// the engine is irrelevant — show a plain "Off" with no spinner.
+		const on = this.plugin.isSyncEnabled();
+		const syncing = on && st.state === SYNC_STATE.SYNCING;
 		const row = el.createDiv({ cls: "couchdb-sync-livestatus-row" });
+		row.toggleClass("couchdb-sync-livestatus-off", !on);
 		const icon = row.createSpan({ cls: "couchdb-sync-status-icon" });
-		setIcon(icon, syncing ? "refresh-cw" : st.state === SYNC_STATE.ERROR ? "alert-triangle" : "check");
+		setIcon(icon, !on ? "power-off" : syncing ? "refresh-cw" : st.state === SYNC_STATE.ERROR ? "alert-triangle" : "check");
 		icon.toggleClass("couchdb-sync-spin", syncing);
 
 		const labelMap: Record<string, string> = {
@@ -462,23 +455,31 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			[SYNC_STATE.PAUSED]: "Paused",
 			[SYNC_STATE.ERROR]: "Error",
 		};
-		row.createSpan({ text: labelMap[st.state] ?? st.state, cls: "couchdb-sync-livestatus-label" });
+		row.createSpan({
+			text: on ? (labelMap[st.state] ?? st.state) : "Off",
+			cls: "couchdb-sync-livestatus-label",
+		});
 
-		// emergency stop button (right-aligned in the row)
-		if (remaining > 0) {
-			const btn = row.createEl("button", {
-				text: `Stopped ${remaining}s`,
-				cls: "couchdb-sync-estop couchdb-sync-estop-active",
-			});
-			btn.disabled = true;
-		} else {
-			const btn = row.createEl("button", {
-				text: "Stop",
-				cls: "couchdb-sync-estop",
-			});
-			btn.ariaLabel = "Emergency stop — pause all sync for 30 seconds";
-			btn.onclick = () => this.plugin.emergencyStop(30);
-		}
+		// Master on/off toggle (right-aligned): the hard kill switch for ALL sync.
+		// On -> clean start honouring the live/one-shot preference; off -> everything
+		// stops immediately and stays stopped across restarts.
+		const toggleWrap = row.createDiv({ cls: "couchdb-sync-power" });
+		toggleWrap.createSpan({ text: on ? "Sync on" : "Sync off", cls: "couchdb-sync-power-caption" });
+		const toggle = new ToggleComponent(toggleWrap);
+		toggle.setValue(on); // set before wiring onChange so this does not re-fire it
+		toggle.setTooltip(on ? "Turn all synchronization off" : "Turn synchronization on");
+		toggle.onChange(async (v) => {
+			toggle.setDisabled(true);
+			try {
+				await this.plugin.setSyncEnabled(v);
+				new Notice(v ? "CouchDB Sync: sync turned on." : "CouchDB Sync: sync turned off.");
+			} catch (e) {
+				new Notice(`CouchDB Sync: ${e instanceof Error ? e.message : String(e)}`);
+			} finally {
+				// Re-render from the authoritative state (label, icon, toggle position).
+				this.renderLiveStatus(this.plugin.status);
+			}
+		});
 
 		if (syncing && st.total && st.total > 0) {
 			const pct = Math.round((st.done! / st.total) * 100);
@@ -816,7 +817,16 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		for (const p of paths) {
 			const li = ul.createEl("li", { cls: "couchdb-sync-drift-item" });
 			li.createSpan({ cls: "couchdb-sync-dot" }); // pulses when active
-			li.createSpan({ text: p, cls: "couchdb-sync-drift-name" });
+			const name = li.createSpan({ text: p, cls: "couchdb-sync-drift-name" });
+			// Divergent files (differs/conflict) can be inspected and reconciled block
+			// by block in the side-by-side diff editor — click the name to open it.
+			if (isDivergent) {
+				name.addClass("couchdb-sync-drift-name-link");
+				name.ariaLabel = "Open side-by-side diff";
+				name.onclick = () => this.openDiff(p);
+				const diffBtn = li.createEl("button", { text: "Diff", cls: "couchdb-sync-rowbtn" });
+				diffBtn.onclick = () => this.openDiff(p);
+			}
 			const btn = li.createEl("button", { text: actionLabel, cls: "couchdb-sync-rowbtn" });
 			btn.onclick = async () => {
 				btn.disabled = true;
@@ -829,6 +839,15 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			};
 			li.dataset.couchdbPath = p;
 		}
+	}
+
+	/** Open the side-by-side diff/merge editor for a drifting or conflicting file. */
+	private openDiff(path: string): void {
+		new DiffMergeModal(this.plugin, path, () => {
+			this.driftSig = ""; // the resolution changes the lists — force a refresh
+			this.treeSig = "";
+			void this.loadIndex(true);
+		}).open();
 	}
 
 	private renderTree(

@@ -41,6 +41,18 @@ export interface CouchDBSyncSettings {
 	 */
 	localDbId: string;
 
+	/**
+	 * Master on/off switch for the whole sync mechanism. When false, NOTHING
+	 * touches the network: no session starts, auto-start is ignored, live sync
+	 * cannot resume, per-file sync actions refuse, and the idle conflict resolver
+	 * stands down. The local index view still reads the cache (local-only, no
+	 * network) so the user can inspect state while sync is off. This is the hard
+	 * kill switch surfaced as the on/off toggle in the status card — distinct from
+	 * `liveSync`/`autoStart`, which are preferences that only take effect while the
+	 * master switch is on. Persisted, so "off" survives restarts. On by default.
+	 */
+	syncEnabled: boolean;
+
 	/** whether live (continuous) sync is enabled */
 	liveSync: boolean;
 
@@ -134,6 +146,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	isMaster: false,
 	deviceId: "",
 	localDbId: "",
+	syncEnabled: true,
 	liveSync: true,
 	autoStart: true,
 	syncHidden: false,

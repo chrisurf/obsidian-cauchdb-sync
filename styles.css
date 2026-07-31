@@ -306,33 +306,25 @@
 	font-size: var(--font-ui-medium);
 }
 
-.couchdb-sync-estop {
+/* --- master on/off sync toggle (right-aligned in the live-status row) --- */
+.couchdb-sync-power {
 	margin-left: auto;
-	padding: 0.15em 0.7em;
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5em;
+}
+
+.couchdb-sync-power-caption {
 	font-size: var(--font-ui-smaller);
 	font-weight: 600;
-	border: 1px solid var(--color-red);
-	border-radius: 4px;
-	background: transparent;
-	color: var(--color-red);
-	cursor: pointer;
-	transition: background 120ms ease, color 120ms ease;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
 }
 
-.couchdb-sync-estop:hover {
-	background: var(--color-red);
-	color: var(--text-on-accent);
-}
-
-.couchdb-sync-estop-active {
-	background: var(--color-red);
-	color: var(--text-on-accent);
-	cursor: default;
-	font-variant-numeric: tabular-nums;
-}
-
-.couchdb-sync-estop-active:hover {
-	opacity: 0.9;
+/* Dim the whole row while sync is switched off so the state reads at a glance. */
+.couchdb-sync-livestatus-off .couchdb-sync-livestatus-label {
+	color: var(--text-muted);
 }
 
 .couchdb-sync-progress {
@@ -577,4 +569,182 @@
 	font-size: var(--font-ui-smaller);
 	background: var(--interactive-accent);
 	color: var(--text-on-accent);
+}
+
+/* --- clickable drift/conflict file names (open the diff editor) --- */
+.couchdb-sync-drift-name-link {
+	cursor: pointer;
+	text-decoration: underline dotted;
+	text-underline-offset: 2px;
+}
+
+.couchdb-sync-drift-name-link:hover {
+	color: var(--text-accent);
+}
+
+/* --- side-by-side diff / merge modal --- */
+.couchdb-sync-merge-modal {
+	width: min(1100px, 96vw);
+}
+
+.couchdb-sync-merge-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 0.6em;
+	margin-bottom: 0.7em;
+}
+
+.couchdb-sync-merge-legend {
+	display: flex;
+	align-items: center;
+	gap: 0.5em;
+	flex-wrap: wrap;
+}
+
+.couchdb-sync-merge-side-tag {
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	padding: 0.1em 0.5em;
+	border-radius: 4px;
+	border: 1px solid transparent;
+}
+
+.couchdb-sync-merge-local {
+	color: var(--color-green);
+	border-color: rgba(var(--color-green-rgb), 0.5);
+	background: rgba(var(--color-green-rgb), 0.1);
+}
+
+.couchdb-sync-merge-remote {
+	color: var(--color-blue);
+	border-color: rgba(var(--color-blue-rgb), 0.5);
+	background: rgba(var(--color-blue-rgb), 0.1);
+}
+
+.couchdb-sync-merge-count {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.couchdb-sync-merge-actions {
+	display: flex;
+	gap: 0.4em;
+}
+
+.couchdb-sync-merge-allbtn {
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+}
+
+.couchdb-sync-merge-body {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	max-height: 60vh;
+	overflow: auto;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	background: var(--background-primary);
+}
+
+.couchdb-sync-merge-block {
+	position: relative;
+}
+
+.couchdb-sync-merge-block.is-change {
+	border-top: 1px solid var(--background-modifier-border);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.couchdb-sync-merge-row {
+	display: grid;
+	grid-template-columns: 3.2em 1fr 3.2em 1fr;
+	align-items: stretch;
+}
+
+.couchdb-sync-merge-lno {
+	padding: 0 0.5em;
+	text-align: right;
+	color: var(--text-faint);
+	background: var(--background-secondary);
+	user-select: none;
+	border-right: 1px solid var(--background-modifier-border);
+}
+
+.couchdb-sync-merge-cell {
+	padding: 0 0.6em;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	min-width: 0;
+}
+
+/* thin divider between the local (left) and remote (right) halves */
+.couchdb-sync-merge-row > .couchdb-sync-merge-cell:nth-child(2) {
+	border-right: 1px solid var(--background-modifier-border);
+}
+
+.couchdb-sync-merge-cell.cdl-eq {
+	color: var(--text-normal);
+}
+
+.couchdb-sync-merge-cell.cdl-kept {
+	background: rgba(var(--color-green-rgb), 0.16);
+}
+
+.couchdb-sync-merge-cell.cdl-dropped {
+	background: rgba(var(--color-red-rgb), 0.08);
+	color: var(--text-muted);
+	text-decoration: line-through;
+	opacity: 0.75;
+}
+
+.couchdb-sync-merge-cell.cdl-pad {
+	background: var(--background-secondary);
+}
+
+/* centre gutter with the two directional apply arrows for a change block */
+.couchdb-sync-merge-gutter {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding: 3px;
+	border-radius: 6px;
+	background: var(--background-primary);
+	box-shadow: 0 0 0 1px var(--background-modifier-border), 0 2px 6px rgba(0, 0, 0, 0.25);
+	z-index: 2;
+}
+
+.couchdb-sync-merge-arrow {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 22px;
+	padding: 0;
+	cursor: pointer;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: var(--background-secondary);
+	color: var(--text-muted);
+}
+
+.couchdb-sync-merge-arrow:hover {
+	color: var(--text-normal);
+	border-color: var(--interactive-accent);
+}
+
+.couchdb-sync-merge-arrow.is-active {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	border-color: var(--interactive-accent);
+}
+
+.couchdb-sync-merge-footer {
+	align-items: center;
 }
