@@ -1,15 +1,23 @@
 name: E2E
 
+# Runs on PULL REQUESTS, not on every feature-branch push — see ci.yml for the
+# reasoning, which applies here doubly: this job boots a real Obsidian and a
+# CouchDB service container, so it is the expensive half of the pipeline.
+#
+# `push: main` stays so the merge result is still checked before release.yml
+# publishes it. `workflow_dispatch` allows a manual run on any branch, which is
+# the escape hatch for a branch that has no PR yet.
 on:
-  push:
-    branches: ["**"]
   pull_request:
     branches: ["**"]
+  push:
+    branches: [main]
   workflow_dispatch:
 
-# Cancel superseded runs on the same ref.
+# Cancel superseded runs. Keyed by PR number where there is one, so pushing twice
+# to a PR cancels the first run; falls back to the ref for main / manual runs.
 concurrency:
-  group: e2e-${{ github.ref }}
+  group: e2e-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
