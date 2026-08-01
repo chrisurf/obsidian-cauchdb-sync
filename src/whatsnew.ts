@@ -44,7 +44,11 @@ export const BUY_ME_A_COFFEE_IMAGE_URL =
  * so a first-time reader and someone upgrading from an early version both come
  * away knowing where to click.
  */
-export const WHATS_NEW = `## 🔌 First time here? Connect a server
+export const WHATS_NEW = `## ⚠️ Alpha — under active development
+
+This is an early **alpha** release. It works, but it still has **known bugs** and rough edges, and behaviour may change between versions. Please keep backups of important vaults and expect the occasional hiccup — and thank you for helping test it. 🙏
+
+## 🔌 First time here? Connect a server
 
 Your notes sync through a **CouchDB** server that you choose — rented, or running on a machine of your own. Open **Settings → CouchDB Sync**, enter the server URL, database name, username and password, and press **Test connection**.
 
