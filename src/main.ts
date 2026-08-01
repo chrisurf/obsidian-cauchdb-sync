@@ -41,6 +41,14 @@ async function originFingerprint(settings: CouchDBSyncSettings): Promise<string>
 const LOCAL_DB_PREFIX = "couchdb-sync-local";
 const LEGACY_LOCAL_DB_NAME = "couchdb-sync-local"; // pre-vault-isolation default
 
+/**
+ * How many consecutive unclean starts (unsafeShutdown still set at launch) force sync
+ * OFF. One is expected on mobile — a background kill before the initial index finishes
+ * leaves the flag set with no onunload to clear it — so only a repeated failure to
+ * reach steady state counts as a real start-crash loop worth stopping.
+ */
+const UNCLEAN_START_LIMIT = 3;
+
 function localDbName(settings: CouchDBSyncSettings): string {
 	return `${LOCAL_DB_PREFIX}-${settings.localDbId}`;
 }
@@ -163,20 +171,29 @@ export default class CouchDBSyncPlugin extends Plugin {
 		});
 
 		// Crash guard: if the previous session never reached a safe state, it left
-		// unsafeShutdown=true. Switch sync OFF so the plugin can never get stuck in a
-		// start-crash loop — and do it on the VISIBLE master switch, so the state the
-		// user sees ("SYNC OFF", with the reason next to it) is the state the plugin
-		// is actually in. Turning it back on is one click once the problem is fixed.
-		const crashed = this.settings.unsafeShutdown;
-		if (crashed) {
+		// unsafeShutdown=true. A start-crash LOOP must be broken by switching sync OFF —
+		// but a SINGLE unclean start is normal on mobile, where the OS suspends/kills the
+		// app before the initial index finishes and no onunload runs. Disabling sync on
+		// the first one is exactly the reported "my phone edits stop syncing / sync is
+		// silently off" trap. So count consecutive unclean starts and only force sync off
+		// once the streak shows a real loop (>= UNCLEAN_START_LIMIT); a lone background
+		// kill just increments the streak and sync keeps running, ready to reach steady
+		// state (which resets the streak) on the next foreground.
+		let crashed = false;
+		if (this.settings.unsafeShutdown) {
 			this.settings.unsafeShutdown = false;
-			this.settings.syncEnabled = false;
+			this.settings.unsafeShutdownStreak += 1;
+			if (this.settings.unsafeShutdownStreak >= UNCLEAN_START_LIMIT) {
+				crashed = true;
+				this.settings.syncEnabled = false;
+				this.settings.unsafeShutdownStreak = 0;
+				new Notice(
+					"CouchDB Sync: the previous syncs did not finish cleanly, so sync has been " +
+						"switched OFF. Fix the issue (or wipe the local cache), then switch sync back on.",
+					12000
+				);
+			}
 			await this.saveSettings();
-			new Notice(
-				"CouchDB Sync: the previous sync did not finish cleanly, so sync has been " +
-					"switched OFF. Fix the issue (or wipe the local cache), then switch sync back on.",
-				12000
-			);
 		}
 
 		if (!this.settings.syncEnabled) {
@@ -307,8 +324,9 @@ export default class CouchDBSyncPlugin extends Plugin {
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
 		this.db = null;
-		// clean shutdown -> not a crash
+		// clean shutdown -> not a crash, and not a loop
 		this.settings.unsafeShutdown = false;
+		this.settings.unsafeShutdownStreak = 0;
 		await this.saveSettings().catch(() => undefined);
 	}
 
@@ -572,6 +590,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 		let dirty = false;
 		if (this.settings.unsafeShutdown) {
 			this.settings.unsafeShutdown = false;
+			dirty = true;
+		}
+		// Reaching steady state clears the unclean-start streak: whatever interrupted the
+		// previous launches, this session made it through, so it was not a crash loop.
+		if (this.settings.unsafeShutdownStreak !== 0) {
+			this.settings.unsafeShutdownStreak = 0;
 			dirty = true;
 		}
 		// Reaching a steady-state sync proves the remote credentials work, so the

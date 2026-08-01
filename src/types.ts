@@ -99,6 +99,16 @@ export interface CouchDBSyncSettings {
 	unsafeShutdown: boolean;
 
 	/**
+	 * Consecutive launches that found unsafeShutdown still set (a start that never
+	 * reached steady state). A single unclean start is normal on mobile — the OS
+	 * suspends/kills the app before the initial index finishes and no onunload runs —
+	 * so sync is only forced off once this streak crosses UNCLEAN_START_LIMIT, i.e.
+	 * on a genuine repeated start-crash loop rather than a one-off background kill.
+	 * Reset to 0 whenever a session reaches a safe steady state (or shuts down cleanly).
+	 */
+	unsafeShutdownStreak: number;
+
+	/**
 	 * Set true once we have proven the configured server+credentials are valid
 	 * (Test connection succeeded, or a sync session reached steady state). Gates
 	 * the index status view so users cannot accidentally inspect the local cache
@@ -187,6 +197,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	keepHistory: 50,
 	showExcluded: false,
 	unsafeShutdown: false,
+	unsafeShutdownStreak: 0,
 	connectionVerified: false,
 	forgetCacheOnDisable: false,
 	lastWhatsNewVersion: "",
