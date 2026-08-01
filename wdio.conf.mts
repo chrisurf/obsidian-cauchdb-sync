@@ -38,16 +38,25 @@ const cacheDir = path.resolve(".obsidian-cache");
  * "Sync now" would replicate the fixture vault into a REAL database. `data.json`
  * is gitignored, so this only ever bites locally, never in CI — the worst kind of
  * flake. Copy just the three release artifacts instead.
+ *
+ * The actual staging (wipe + copy) is done ONCE in onPrepare, not here at module
+ * load. This config module is re-imported by every worker process, so doing the
+ * `rmSync` here made two parallel workers race: one wiped `.e2e-plugin` while the
+ * other was mid-`installPlugins`, which failed with "main.js missing". onPrepare
+ * runs only in the launcher, before any worker session starts.
  */
 const pluginDir = path.resolve(".e2e-plugin");
 const artifacts = ["manifest.json", "main.js", "styles.css"];
-const missing = artifacts.filter((f) => !fs.existsSync(path.resolve(f)));
-if (missing.length > 0) {
-	throw new Error(`Missing build artifact(s): ${missing.join(", ")}. Run "npm run build" first.`);
+
+function stagePlugin(): void {
+	const missing = artifacts.filter((f) => !fs.existsSync(path.resolve(f)));
+	if (missing.length > 0) {
+		throw new Error(`Missing build artifact(s): ${missing.join(", ")}. Run "npm run build" first.`);
+	}
+	fs.rmSync(pluginDir, { recursive: true, force: true });
+	fs.mkdirSync(pluginDir, { recursive: true });
+	for (const f of artifacts) fs.copyFileSync(path.resolve(f), path.join(pluginDir, f));
 }
-fs.rmSync(pluginDir, { recursive: true, force: true });
-fs.mkdirSync(pluginDir, { recursive: true });
-for (const f of artifacts) fs.copyFileSync(path.resolve(f), path.join(pluginDir, f));
 
 const defaultVersions = "latest/latest";
 const versions = await parseObsidianVersions(env.OBSIDIAN_VERSIONS ?? defaultVersions, { cacheDir });
@@ -58,6 +67,12 @@ if (env.CI) {
 }
 
 export const config: WebdriverIO.Config = {
+	// Stage the plugin once, in the launcher, before workers spawn — never per worker
+	// at module load (that raced two workers over the same .e2e-plugin directory).
+	onPrepare() {
+		stagePlugin();
+	},
+
 	runner: "local",
 	framework: "mocha",
 
