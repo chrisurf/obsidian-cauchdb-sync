@@ -19,6 +19,7 @@ import {
 	FILE_PREFIX,
 	HISTORY_PREFIX,
 	HISTORY_SEP,
+	RECONCILE_INTERVAL_MS,
 	SYNC_STATE,
 	SyncRecord,
 	SyncState,
@@ -295,6 +296,12 @@ export class SyncEngine {
 	private aborted = false;
 	/** interval id for hidden-file polling (hidden files have no vault events) */
 	private hiddenTimer: number | null = null;
+	/** interval id for the live-sync reconciliation sweep (self-heal for missed vault events) */
+	private reconcileTimer: number | null = null;
+	/** true while a reconciliation sweep is running, so slow sweeps never stack up */
+	private reconciling = false;
+	/** set once runInitialIndex has settled, so the sweep never races the initial pass */
+	private initialIndexDone = false;
 	/** timer that returns the status to "in sync" after replication activity settles */
 	private settleTimer: number | null = null;
 	/** per-file transfer progress: path -> {done, total} chunks (for live UI) */
@@ -340,6 +347,14 @@ export class SyncEngine {
 			if (this.settings.syncHidden) {
 				this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
 			}
+			// Self-healing slow path: vault events can be missed on mobile (throttled
+			// timers, app suspension, an event firing against a torn-down engine), which
+			// would otherwise strand a create/edit until the next full restart. A periodic
+			// reconciliation re-pushes anything the events dropped. See RECONCILE_INTERVAL_MS.
+			this.reconcileTimer = window.setInterval(
+				() => void this.reconcileLocal(),
+				RECONCILE_INTERVAL_MS
+			);
 			this.startLiveSync();
 			void this.runInitialIndex();
 		} else {
@@ -362,6 +377,10 @@ export class SyncEngine {
 			await this.materializeRemoteOnly();
 			await this.resolveConflicts();
 			if (!this.aborted) {
+				// Steady state reached: from here the periodic sweep may run. Gating it on
+				// this flag keeps it from racing the initial index's own indexLocalFiles
+				// (two concurrent pushes of the same file would collide on a rev).
+				this.initialIndexDone = true;
 				this.onReady(); // reached a safe steady state -> clear crash guard
 				// the indexing pass left the status on "Syncing…"; settle it now so the
 				// spinner stops once the initial work is done (live events take over after).
@@ -427,6 +446,10 @@ export class SyncEngine {
 		if (this.hiddenTimer !== null) {
 			window.clearInterval(this.hiddenTimer);
 			this.hiddenTimer = null;
+		}
+		if (this.reconcileTimer !== null) {
+			window.clearInterval(this.reconcileTimer);
+			this.reconcileTimer = null;
 		}
 		if (this.settleTimer !== null) {
 			window.clearTimeout(this.settleTimer);
@@ -726,6 +749,52 @@ export class SyncEngine {
 			// come from the index report, which is the only counter in the UI.
 			this.markActivity();
 			await this.yieldToUi(); // keep the app responsive; let replication interleave
+		}
+	}
+
+	/**
+	 * Periodic self-heal for live sync (see the reconcileTimer in start()). Vault
+	 * events are the fast path, but on mobile they are unreliable: the OS throttles
+	 * timers and suspends the app, so a create/modify fired around a background
+	 * transition can be dropped, or fire the debounced push against an engine that a
+	 * resume-triggered restart has already aborted — either way the edit never reaches
+	 * the database and live sync appears to "not detect" local changes. Re-running the
+	 * same cheap reconciliation the initial index uses catches any stranded change
+	 * within one interval, and a locally-deleted file whose delete event was missed is
+	 * tombstoned the same way the hidden-file scan already handles hidden deletions.
+	 *
+	 * It is a no-op when nothing drifted (the isUnchanged filter yields an empty set),
+	 * and it is single-flighted so a slow sweep on a large vault never stacks up.
+	 */
+	private async reconcileLocal(): Promise<void> {
+		if (this.aborted || this.reconciling || !this.initialIndexDone) return;
+		this.reconciling = true;
+		try {
+			// stranded creates/edits: re-push anything whose disk stat drifted from state
+			await this.indexLocalFiles();
+			// stranded deletes: tombstone tracked files that vanished with no delete event
+			await this.reconcileLocalDeletes();
+		} catch (e) {
+			if (!this.aborted) this.fail("reconcile", e);
+		} finally {
+			this.reconciling = false;
+		}
+	}
+
+	/**
+	 * Tombstone non-hidden files we have a sync record for but that are gone from disk,
+	 * for the case where their vault "delete" event was never delivered. Hidden files
+	 * are intentionally skipped — scanHidden owns their delete reconciliation. Reuses
+	 * the guarded handleLocalDelete (it no-ops on an already-tombstoned or suppressed
+	 * path), so this cannot double-delete or race an in-flight download.
+	 */
+	private async reconcileLocalDeletes(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const onDisk = new Set(this.app.vault.getFiles().map((f) => f.path));
+		for (const path of [...this.syncState.keys()]) {
+			if (this.aborted) return;
+			if (isHidden(path) || this.skip(path) || onDisk.has(path)) continue;
+			if (!(await adapter.exists(path))) await this.handleLocalDelete(path);
 		}
 	}
 

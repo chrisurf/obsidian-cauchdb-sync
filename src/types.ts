@@ -325,6 +325,18 @@ export interface SyncStatus {
 export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
 
 /**
+ * How often live sync re-scans the vault to catch changes its vault events missed.
+ * Vault events are the fast path (see the engine's attachVaultEvents), but on mobile
+ * the OS throttles timers and suspends the app, so a create/modify fired around a
+ * background transition can be dropped or fire against an already-torn-down engine
+ * and never reach the database. A periodic reconciliation is the self-healing slow
+ * path: it re-pushes any file whose on-disk mtime/size no longer matches what we last
+ * synced. Cheap (an in-memory stat comparison; a no-op when nothing drifted), so it
+ * can run often without hurting a large vault.
+ */
+export const RECONCILE_INTERVAL_MS = 15_000;
+
+/**
  * Document id prefixes. File metadata docs are keyed "f:" + path; chunks are "h:" + hash.
  * The prefix lets us range-query ONLY the (small) file docs and never load chunk data
  * into memory by accident — which would otherwise blow up RAM on large vaults.
