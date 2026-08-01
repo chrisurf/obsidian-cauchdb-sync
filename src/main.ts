@@ -120,6 +120,13 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 		this.registerView(VIEW_TYPE_SYNC_STATUS, (leaf) => new SyncStatusView(leaf, this));
 
+		// Left-ribbon launcher for the status panel. Uses the SAME icon the sidebar
+		// view carries (SyncStatusView.getIcon), so the ribbon button, the view tab and
+		// the status bar all read as one feature. addRibbonIcon auto-unregisters on unload.
+		this.addRibbonIcon("refresh-cw", "CouchDB Sync: open status panel", () =>
+			void this.revealStatusView()
+		);
+
 		this.addSettingTab(new CouchDBSyncSettingTab(this.app, this));
 
 		this.addCommand({
