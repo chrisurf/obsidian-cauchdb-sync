@@ -31,8 +31,12 @@ describe("shouldShowWhatsNew", () => {
 });
 
 describe("what's new content", () => {
-	it("leads with connecting a server, the step a fresh install is blocked on", () => {
-		expect(WHATS_NEW).toMatch(/^## 🔌 First time here\? Connect a server/);
+	it("leads with the alpha notice, then connecting a server", () => {
+		// The alpha/known-bugs notice is deliberately the first thing a reader sees.
+		expect(WHATS_NEW).toMatch(/^## ⚠️ Alpha — under active development/);
+		expect(WHATS_NEW).toMatch(/known bugs/i);
+		// The connect-a-server step (what a fresh install is blocked on) follows it.
+		expect(WHATS_NEW).toMatch(/## 🔌 First time here\? Connect a server/);
 		expect(WHATS_NEW).toMatch(/Test connection/);
 	});
 

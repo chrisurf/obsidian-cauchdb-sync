@@ -29,6 +29,7 @@ import {
 	concatBytes,
 	cyrb53,
 	isHidden,
+	isIdbClosingError,
 	looksLikeText,
 	matchesIgnore,
 	pickConflictWinner,
@@ -265,6 +266,8 @@ export class SyncEngine {
 	private settings: CouchDBSyncSettings;
 	private setStatus: StatusFn;
 	private onReady: () => void;
+	/** called when a DB operation fails because the local IndexedDB connection was closed */
+	private onDbClosed: () => void;
 
 	private syncHandler: PouchDB.Replication.Sync<FileDoc> | null = null;
 	private eventRefs: EventRef[] = [];
@@ -307,13 +310,15 @@ export class SyncEngine {
 		db: SyncDatabase,
 		settings: CouchDBSyncSettings,
 		setStatus: StatusFn,
-		onReady: () => void = () => undefined
+		onReady: () => void = () => undefined,
+		onDbClosed: () => void = () => undefined
 	) {
 		this.app = app;
 		this.db = db;
 		this.settings = settings;
 		this.setStatus = setStatus;
 		this.onReady = onReady;
+		this.onDbClosed = onDbClosed;
 	}
 
 	// --- lifecycle ---------------------------------------------------------
@@ -513,6 +518,16 @@ export class SyncEngine {
 		// noise, not real failures, so keep them quiet.
 		if (this.aborted) {
 			console.debug(`[couchdb-sync] (aborted) ${context}:`, e);
+			return;
+		}
+		// A closed local IndexedDB connection (mobile background/resume) is recoverable,
+		// not a dead-end error: hand it to the recovery path (reopen the handle +
+		// restart) and show a transient "reconnecting" state instead of a scary error.
+		// The engine is bound to the now-dead handle, so it cannot heal itself in place.
+		if (isIdbClosingError(e)) {
+			console.debug(`[couchdb-sync] ${context}: local DB connection closed — recovering`, e);
+			this.setStatus(SYNC_STATE.CONNECTING, "Reconnecting after the app was in the background…");
+			this.onDbClosed();
 			return;
 		}
 		console.error(`[couchdb-sync] ${context}:`, e);

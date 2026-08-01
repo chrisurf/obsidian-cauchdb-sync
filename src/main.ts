@@ -1,4 +1,4 @@
-import { Notice, Plugin, setIcon } from "obsidian";
+import { Notice, Platform, Plugin, setIcon } from "obsidian";
 import PouchDB from "pouchdb-browser";
 import {
 	CouchDBSyncSettings,
@@ -93,6 +93,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 */
 	private effectiveDrift: { drift: number; pct: number } | null = null;
 	private driftRefreshTimer: number | null = null;
+	/** debounces DB-closed recovery so a burst of "connection is closing" errors triggers one restart */
+	private recoveryTimer: number | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -204,6 +206,40 @@ export default class CouchDBSyncPlugin extends Plugin {
 		});
 		// First read once the layout has had a moment to settle (don't block onload).
 		window.setTimeout(() => void this.refreshDriftSummary(), 1500);
+
+		// Mobile resume recovery: iOS/Android close IndexedDB connections and kill live
+		// replication while the app is backgrounded or the device sleeps. When the app
+		// returns to the foreground, reopen the local handle and restart sync so both
+		// reads and replication reconnect. registerDomEvent auto-unregisters on unload.
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (Platform.isMobile && document.visibilityState === "visible") {
+				this.scheduleDbRecovery();
+			}
+		});
+	}
+
+	/**
+	 * Recover from a closed local IndexedDB connection (mobile background/resume).
+	 *
+	 * Reopening the handle is not enough on its own: the running engine bound its live
+	 * replication to the now-dead handle, so recovery restarts sync — `doRestart`
+	 * calls `ensureOpen()` first, so the rebuilt engine binds to a fresh connection.
+	 * Debounced because the trigger can fire in a burst (the live-sync error handler
+	 * and the foreground event can both land within a few hundred ms), and guarded so
+	 * turning sync off cancels a pending recovery instead of powering it back on.
+	 */
+	private scheduleDbRecovery(): void {
+		if (this.recoveryTimer !== null) return; // one recovery in flight is enough
+		this.recoveryTimer = window.setTimeout(() => {
+			this.recoveryTimer = null;
+			if (!this.settings.syncEnabled) {
+				// Sync is off: no session to restart. Still refresh the (self-healing)
+				// index read so the "connection is closing" text clears from the panel.
+				void this.refreshDriftSummary();
+				return;
+			}
+			void this.restartSync();
+		}, 400);
 	}
 
 	/** Opens the "what's new" note for the installed version. */
@@ -235,6 +271,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	private async teardown(): Promise<void> {
+		if (this.recoveryTimer !== null) {
+			window.clearTimeout(this.recoveryTimer);
+			this.recoveryTimer = null;
+		}
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
@@ -467,6 +507,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 		}
 
 		const db = this.getSharedDb();
+		// Reconnect the local IndexedDB if the OS closed it while backgrounded, so the
+		// engine we build below binds its replication to a live handle. Manual recovery
+		// (Force sync / toggle on) reaches this path too, which is why those now work.
+		await db.ensureOpen();
 
 		// Refuse to replicate into a remote that did NOT fill this local cache.
 		// Otherwise repointing the connection at a different server/database and
@@ -496,7 +540,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 			db,
 			this.settings,
 			(s, d) => this.setStatus(s, d),
-			() => void this.markCleanState() // initial index finished -> disarm guard
+			() => void this.markCleanState(), // initial index finished -> disarm guard
+			() => this.scheduleDbRecovery() // local IndexedDB closed -> reopen + restart
 		);
 		this.engine = engine;
 		try {
@@ -740,7 +785,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 		if (!this.settings.syncEnabled) {
 			throw new Error("Sync is turned off. Switch it on to run this action.");
 		}
-		if (!this.engine) await this.restartSync();
+		// If the OS closed the local IndexedDB while backgrounded, the current engine is
+		// bound to a dead handle. Reopen it and rebuild the engine so per-file/bulk
+		// actions (e.g. "Upload all") run on a live connection instead of throwing
+		// "the database connection is closing."
+		const reopened = await this.getSharedDb().ensureOpen();
+		if (reopened || !this.engine) await this.restartSync();
 		if (!this.engine) throw new Error("Sync is not configured. Set up the connection first.");
 		return this.engine;
 	}
