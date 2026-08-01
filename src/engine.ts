@@ -389,6 +389,10 @@ export class SyncEngine {
 			// state) — the download half of a two-way Force sync.
 			await this.materializeRemoteOnly();
 			await this.resolveConflicts();
+			// Persist the sync records the pass just produced RIGHT AWAY (not on the 1.5s
+			// debounce, which a restart/app-kill can cancel). Without this, the whole vault
+			// looks "changed" next launch and every file — every large MP3 — is re-hashed.
+			await this.persistSyncState();
 			if (!this.aborted) {
 				// Steady state reached: from here the periodic sweep may run. Gating it on
 				// this flag keeps it from racing the initial index's own indexLocalFiles
@@ -786,17 +790,15 @@ export class SyncEngine {
 		for (const file of todo) {
 			if (this.aborted) return;
 			try {
-				await this.pushFile(file); // adopts identical content without re-uploading
+				// Only signal "work is happening" when the content genuinely changed. A file
+				// that failed the mtime/size check but hashes identical (a touched-but-not-
+				// edited MP3) is re-verified silently — it must not re-light the "Syncing"
+				// status or re-appear as active, which is what made unchanged files look
+				// like they were endlessly re-syncing.
+				if (await this.pushFile(file)) this.markActivity();
 			} catch (e) {
 				this.fail(`indexing ${file.path}`, e); // one bad file must not abort the rest
 			}
-			// Report progress the same way replication does — as "work is happening",
-			// nothing more. Indexing and replication run interleaved, so two sources
-			// writing different status texts used to overwrite each other several
-			// times a second, which made the card's detail line flicker. Sharing one
-			// activity signal removes the conflict at the root; the actual figures
-			// come from the index report, which is the only counter in the UI.
-			this.markActivity();
 			await this.yieldToUi(); // keep the app responsive; let replication interleave
 		}
 	}
@@ -837,6 +839,9 @@ export class SyncEngine {
 			await this.indexLocalFiles();
 			// stranded deletes: tombstone tracked files that vanished with no delete event
 			await this.reconcileLocalDeletes();
+			// Persist what this sweep verified so a later app-kill does not force the next
+			// launch to re-hash it all again (worst-case unpersisted window is one sweep).
+			await this.persistSyncState();
 		} catch (e) {
 			if (!this.aborted) this.fail("reconcile", e);
 		} finally {
@@ -942,21 +947,27 @@ export class SyncEngine {
 		this.forgetSynced(path);
 	}
 
-	private async pushFile(file: TFile): Promise<void> {
-		await this.pushPath(file.path, file.stat.mtime, file.stat.ctime, file.stat.size);
+	/** Returns true only when a real change was written to the DB (see pushPathInner). */
+	private async pushFile(file: TFile): Promise<boolean> {
+		return this.pushPath(file.path, file.stat.mtime, file.stat.ctime, file.stat.size);
 	}
 
-	/** Index a file (normal or hidden) into the database by its vault-relative path. */
-	private async pushPath(path: string, mtime: number, ctime: number, size: number): Promise<void> {
+	/**
+	 * Index a file (normal or hidden) into the database by its vault-relative path.
+	 * Returns true only when the content genuinely changed and a new revision was
+	 * written; a re-hash that ends up identical (the "adopt" path) returns false, so
+	 * callers can avoid lighting the "Syncing" UI for work that changed nothing.
+	 */
+	private async pushPath(path: string, mtime: number, ctime: number, size: number): Promise<boolean> {
 		if (this.settings.e2eeEnabled && !this.settings.passphrase) {
 			this.setStatus(SYNC_STATE.ERROR, "Encryption is on but no passphrase is set.");
-			return;
+			return false;
 		}
 		// estimate the chunk count up front so the UI can show a percentage immediately
 		const total = Math.max(1, Math.ceil(size / CHUNK_SIZE));
 		this.activeProgress.set(path, { done: 0, total });
 		try {
-			await this.pushPathInner(path, mtime, ctime, size, total);
+			return await this.pushPathInner(path, mtime, ctime, size, total);
 		} finally {
 			this.activeProgress.delete(path);
 		}
@@ -968,7 +979,7 @@ export class SyncEngine {
 		ctime: number,
 		size: number,
 		total: number
-	): Promise<void> {
+	): Promise<boolean> {
 		const enc = this.settings.e2eeEnabled;
 		const pass = this.settings.passphrase;
 
@@ -979,7 +990,7 @@ export class SyncEngine {
 		let binary = false;
 		let firstPiece = true;
 		for await (const piece of this.streamChunksPath(path)) {
-			if (this.aborted) return;
+			if (this.aborted) return false;
 			if (firstPiece) {
 				binary = !looksLikeText(piece);
 				firstPiece = false;
@@ -1013,7 +1024,7 @@ export class SyncEngine {
 			if (Array.isArray(existing._conflicts) && existing._conflicts.length > 0) {
 				await this.dropLosingRevs(path);
 			}
-			return;
+			return false; // content identical — adopted, nothing pushed
 		}
 
 		const doc: FileDoc = {
@@ -1035,6 +1046,7 @@ export class SyncEngine {
 		this.lastHash.set(path, hash);
 		this.recordSynced(path, mtime, size, hash);
 		await this.recordVersion({ path, mtime, size, hash, binary, enc, children, deleted: false });
+		return true; // a real change was written -> replication will ship it
 	}
 
 	/**
@@ -1830,8 +1842,19 @@ export class SyncEngine {
 		}
 	}
 
-	private async persistSyncState(): Promise<void> {
-		if (this.aborted) return; // DB may be closing/destroyed during teardown
+	/**
+	 * Flush the in-memory sync records to IndexedDB NOW, even while aborting. Called on
+	 * restart/teardown so a session's "already in sync" knowledge survives into the next
+	 * one — otherwise the records are lost and every file is re-hashed from scratch on
+	 * the next launch (the dominant cause of large binaries needlessly re-entering sync).
+	 * The DB handle is still open at these call sites (we flush BEFORE close/destroy).
+	 */
+	async flushState(): Promise<void> {
+		await this.persistSyncState(true);
+	}
+
+	private async persistSyncState(force = false): Promise<void> {
+		if (this.aborted && !force) return; // DB may be closing/destroyed during teardown
 		if (this.dirtyStateBuckets.size === 0) return; // nothing changed
 		const buckets = [...this.dirtyStateBuckets];
 		this.dirtyStateBuckets.clear();
