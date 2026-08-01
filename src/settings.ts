@@ -36,6 +36,29 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 		this.panel.unmount();
 	}
 
+	/**
+	 * Add a show/hide toggle (an eye icon) to a masked text field. The field stays
+	 * masked by default; clicking flips its input between `password` and plain `text`
+	 * and swaps the icon (eye ⇄ eye-off). `getInput` is read lazily so it resolves the
+	 * element the `addText` callback captured. A fresh render always starts masked, so
+	 * a revealed value never persists across re-renders.
+	 */
+	private addRevealButton(setting: Setting, getInput: () => HTMLInputElement | undefined): void {
+		let shown = false;
+		setting.addExtraButton((b) =>
+			b
+				.setIcon("eye")
+				.setTooltip("Show")
+				.onClick(() => {
+					const input = getInput();
+					if (!input) return;
+					shown = !shown;
+					input.type = shown ? "text" : "password";
+					b.setIcon(shown ? "eye-off" : "eye").setTooltip(shown ? "Hide" : "Show");
+				})
+		);
+	}
+
 	getSettingDefinitions(): SettingDefinitionItem[] {
 		const s = this.plugin.settings;
 		// The configuration folder is ".obsidian" by default but can be renamed, so
@@ -132,16 +155,19 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 							})
 						)
 					),
-					row("Password", undefined, (setting) =>
+					row("Password", undefined, (setting) => {
+						let input: HTMLInputElement | undefined;
 						setting.addText((t) => {
-							t.inputEl.type = "password";
+							input = t.inputEl;
+							t.inputEl.type = "password"; // masked by default
 							t.setValue(s.password).onChange(async (v) => {
 								s.password = v;
 								await this.plugin.saveSettings();
 								await onCredsChanged();
 							});
-						})
-					),
+						});
+						this.addRevealButton(setting, () => input);
+					}),
 					row(
 						"Test connection",
 						"Check the server URL, database and credentials. On success this also unlocks the Index status view (it stays hidden until you have proven the credentials).",
@@ -185,24 +211,26 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 						"Passphrase",
 						"Shared secret. MUST be identical on every device. Never stored on the server.",
 						(setting) => {
-							setting
-								.addText((t) => {
-									t.inputEl.type = "password";
-									t.setValue(s.passphrase).onChange(async (v) => {
-										s.passphrase = v;
-										await this.plugin.saveSettings();
-									});
+							let input: HTMLInputElement | undefined;
+							setting.addText((t) => {
+								input = t.inputEl;
+								t.inputEl.type = "password"; // masked by default
+								t.setValue(s.passphrase).onChange(async (v) => {
+									s.passphrase = v;
+									await this.plugin.saveSettings();
+								});
+							});
+							this.addRevealButton(setting, () => input);
+							setting.addButton((b) =>
+								b.setButtonText("Verify").onClick(async () => {
+									if (!s.passphrase) {
+										new Notice("Passphrase is empty.");
+										return;
+									}
+									const ok = await selfTest(s.passphrase).catch(() => false);
+									new Notice(ok ? "Encryption works ✓" : "Encryption self-test failed.");
 								})
-								.addButton((b) =>
-									b.setButtonText("Verify").onClick(async () => {
-										if (!s.passphrase) {
-											new Notice("Passphrase is empty.");
-											return;
-										}
-										const ok = await selfTest(s.passphrase).catch(() => false);
-										new Notice(ok ? "Encryption works ✓" : "Encryption self-test failed.");
-									})
-								);
+							);
 						},
 						{ visible: () => this.plugin.settings.e2eeEnabled }
 					),
