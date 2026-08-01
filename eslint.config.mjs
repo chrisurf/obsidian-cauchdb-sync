@@ -9,6 +9,10 @@ import obsidianmd from "eslint-plugin-obsidianmd";
  * of untyped PouchDB and Node interop. Both were missing here, so the review kept
  * finding things `npm run lint` could not. Keeping them in the project's own gate
  * is the point: the next review should have nothing left to report.
+ *
+ * No per-file rule relaxations remain: the settings tab now uses the declarative
+ * settings API (getSettingDefinitions + setDestructive), so the deprecation and
+ * prefer-setting-definitions rules pass on their own rather than being switched off.
  */
 export default tseslint.config(
 	{
@@ -38,19 +42,6 @@ export default tseslint.config(
 			// 256-gcm", "incl. Protocol" and "e.g. Your desktop". Our UI text is
 			// already sentence case; there is nothing left for this rule to find.
 			"obsidianmd/ui/sentence-case": "off",
-		},
-	},
-	{
-		// The declarative settings API (`getSettingDefinitions`) and `setDestructive`
-		// both landed in Obsidian 1.13.0, while this plugin supports 1.7.2 and up —
-		// calling them would be a TypeError for everyone in between. Adopting them
-		// means raising the floor by six more minor versions purely for settings-
-		// search integration, which is not a trade worth making yet. Revisit when
-		// 1.13 is old enough to require; the plugin review lists both as advisory.
-		files: ["src/settings.ts"],
-		rules: {
-			"@typescript-eslint/no-deprecated": "off",
-			"obsidianmd/settings-tab/prefer-setting-definitions": "off",
 		},
 	},
 	{
