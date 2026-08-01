@@ -19,6 +19,7 @@ import {
 	FILE_PREFIX,
 	HISTORY_PREFIX,
 	HISTORY_SEP,
+	RECONCILE_INTERVAL_MS,
 	SYNC_STATE,
 	SyncRecord,
 	SyncState,
@@ -57,6 +58,16 @@ const SYNC_STATE_BUCKETS = 64;
 const HEAL_MAX_ATTEMPTS = 3;
 /** Suffix of the temp file used while streaming a download to disk. Never synced. */
 const TMP_SUFFIX = ".cdbsync-tmp";
+/**
+ * How many times the periodic reconcile re-establishes a live-sync handle that died
+ * on a terminal replication error before it stops retrying and leaves the error
+ * standing (a manual Force sync / toggle then restarts everything). This is the
+ * desktop's counterpart to the mobile resume-recovery: with retry:true PouchDB handles
+ * transient network blips itself, so a handle that reaches the 'error' event is dead
+ * for good and only a fresh handle recovers it. The counter resets on any healthy feed
+ * activity, so only a CONTINUOUSLY failing feed ever hits the limit.
+ */
+const LIVE_SYNC_RESTART_LIMIT = 8;
 
 /** Snapshot comparing this device's files against the synced database. */
 export interface IndexReport {
@@ -295,6 +306,14 @@ export class SyncEngine {
 	private aborted = false;
 	/** interval id for hidden-file polling (hidden files have no vault events) */
 	private hiddenTimer: number | null = null;
+	/** interval id for the live-sync reconciliation sweep (self-heal for missed vault events) */
+	private reconcileTimer: number | null = null;
+	/** true while a reconciliation sweep is running, so slow sweeps never stack up */
+	private reconciling = false;
+	/** set once runInitialIndex has settled, so the sweep never races the initial pass */
+	private initialIndexDone = false;
+	/** consecutive live-sync re-establishments with no healthy activity since (anti-loop) */
+	private liveSyncRestarts = 0;
 	/** timer that returns the status to "in sync" after replication activity settles */
 	private settleTimer: number | null = null;
 	/** per-file transfer progress: path -> {done, total} chunks (for live UI) */
@@ -340,6 +359,15 @@ export class SyncEngine {
 			if (this.settings.syncHidden) {
 				this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
 			}
+			// Self-healing slow path in BOTH directions: the live feed and vault events
+			// can be delayed or missed (a remote file waiting behind a big local upload;
+			// a mobile vault event dropped across an app suspension). A periodic sweep
+			// pulls new remote files to disk first, then re-pushes local changes the
+			// events dropped. See RECONCILE_INTERVAL_MS.
+			this.reconcileTimer = window.setInterval(
+				() => void this.reconcile(),
+				RECONCILE_INTERVAL_MS
+			);
 			this.startLiveSync();
 			void this.runInitialIndex();
 		} else {
@@ -362,6 +390,10 @@ export class SyncEngine {
 			await this.materializeRemoteOnly();
 			await this.resolveConflicts();
 			if (!this.aborted) {
+				// Steady state reached: from here the periodic sweep may run. Gating it on
+				// this flag keeps it from racing the initial index's own indexLocalFiles
+				// (two concurrent pushes of the same file would collide on a rev).
+				this.initialIndexDone = true;
 				this.onReady(); // reached a safe steady state -> clear crash guard
 				// the indexing pass left the status on "Syncing…"; settle it now so the
 				// spinner stops once the initial work is done (live events take over after).
@@ -428,6 +460,10 @@ export class SyncEngine {
 			window.clearInterval(this.hiddenTimer);
 			this.hiddenTimer = null;
 		}
+		if (this.reconcileTimer !== null) {
+			window.clearInterval(this.reconcileTimer);
+			this.reconcileTimer = null;
+		}
 		if (this.settleTimer !== null) {
 			window.clearTimeout(this.settleTimer);
 			this.settleTimer = null;
@@ -482,6 +518,7 @@ export class SyncEngine {
 			// default batch would buffer hundreds of MB and trip the OOM guard.
 			.sync(this.db.remote, { live: true, retry: true, batch_size: 25, batches_limit: 2 })
 			.on("change", (info) => {
+				this.liveSyncRestarts = 0; // a live feed that is delivering is healthy again
 				if (info.direction === "pull") {
 					void this.applyPulledDocs(info.change.docs);
 				}
@@ -490,9 +527,44 @@ export class SyncEngine {
 			// 'paused' = caught up / idle (or offline). This is the resting state, so the
 			// spinner stops here. We deliberately ignore 'active' (it fires constantly on
 			// the live longpoll cycle and would keep the spinner turning forever).
-			.on("paused", (err) => this.settle(err ? SYNC_STATE.OFFLINE : SYNC_STATE.SYNCED))
+			.on("paused", (err) => {
+				if (!err) this.liveSyncRestarts = 0; // caught up cleanly -> feed is healthy
+				this.settle(err ? SYNC_STATE.OFFLINE : SYNC_STATE.SYNCED);
+			})
 			.on("denied", (err) => this.fail("replication denied", err))
-			.on("error", (err) => this.fail("replication error", err));
+			.on("error", (err) => {
+				this.fail("replication error", err);
+				// With retry:true, PouchDB retries transient failures itself and only emits
+				// 'error' for a terminal one — the handle is dead. Drop it so the periodic
+				// reconcile re-establishes a fresh live feed (desktop has no resume-recovery
+				// path of its own). A closed local DB is handled by fail() -> onDbClosed.
+				if (!this.aborted && !isIdbClosingError(err)) this.dropLiveSyncHandle();
+			});
+	}
+
+	/** Cancel and forget the live-sync handle so the next reconcile rebuilds it. */
+	private dropLiveSyncHandle(): void {
+		if (!this.syncHandler) return;
+		try {
+			this.syncHandler.cancel();
+		} catch {
+			/* already dead */
+		}
+		this.syncHandler = null;
+	}
+
+	/**
+	 * Re-establish the live feed if a terminal error killed it, bounded so a feed that
+	 * keeps dying (e.g. a misconfigured server) settles into a visible error instead of
+	 * flapping forever. Runs from the periodic reconcile, which gives it a natural 15 s
+	 * backoff between attempts. Healthy activity resets the counter (see startLiveSync).
+	 */
+	private reviveLiveSyncIfDead(): void {
+		if (this.aborted || !this.settings.liveSync) return;
+		if (this.syncHandler || !this.db.remote) return; // alive, or nothing to bind to
+		if (this.liveSyncRestarts >= LIVE_SYNC_RESTART_LIMIT) return; // gave up; await manual restart
+		this.liveSyncRestarts++;
+		this.startLiveSync();
 	}
 
 	/** Show the spinner for real replication activity, then auto-settle to "in sync". */
@@ -726,6 +798,66 @@ export class SyncEngine {
 			// come from the index report, which is the only counter in the UI.
 			this.markActivity();
 			await this.yieldToUi(); // keep the app responsive; let replication interleave
+		}
+	}
+
+	/**
+	 * Periodic two-way self-heal for live sync (see the reconcileTimer in start()).
+	 * Vault events and the live replication feed are the fast paths, but neither is
+	 * guaranteed to be prompt:
+	 *
+	 * - Pull (remote → this device): the live feed writes incoming docs into the local
+	 *   database, but materializing them to disk competes with this device's own upload
+	 *   work, so a file another device just created can sit undisplayed while a large
+	 *   local index runs ("the desktop never shows the file the phone made"). This is
+	 *   why the pull is reconciled FIRST — a newly arrived file should appear ASAP,
+	 *   ahead of pushing this device's backlog.
+	 * - Push (this device → remote): on mobile the OS throttles timers and suspends the
+	 *   app, so a create/modify vault event can be dropped or fire the debounced push
+	 *   against an engine a resume-triggered restart already aborted — the edit then
+	 *   never reaches the database and live sync appears to "not detect" local changes.
+	 *
+	 * Each half re-runs the same cheap reconciliation the initial index uses, so it is
+	 * a no-op when nothing drifted, and the whole sweep is single-flighted so a slow
+	 * pass on a large vault never stacks up.
+	 */
+	private async reconcile(): Promise<void> {
+		if (this.aborted || this.reconciling || !this.initialIndexDone) return;
+		this.reconciling = true;
+		try {
+			// If a terminal error killed the live feed, bring it back first — on desktop
+			// this is the only thing that reconnects a dead pull (mobile also has the
+			// resume-recovery restart). Cheap and a no-op while the feed is alive.
+			this.reviveLiveSyncIfDead();
+			// PULL FIRST — get files other devices created onto disk before we spend the
+			// sweep re-pushing our own. This is the "check the remote for new files often
+			// and prioritize them" the live feed can be too busy to do promptly.
+			await this.materializeRemoteOnly();
+			// stranded creates/edits: re-push anything whose disk stat drifted from state
+			await this.indexLocalFiles();
+			// stranded deletes: tombstone tracked files that vanished with no delete event
+			await this.reconcileLocalDeletes();
+		} catch (e) {
+			if (!this.aborted) this.fail("reconcile", e);
+		} finally {
+			this.reconciling = false;
+		}
+	}
+
+	/**
+	 * Tombstone non-hidden files we have a sync record for but that are gone from disk,
+	 * for the case where their vault "delete" event was never delivered. Hidden files
+	 * are intentionally skipped — scanHidden owns their delete reconciliation. Reuses
+	 * the guarded handleLocalDelete (it no-ops on an already-tombstoned or suppressed
+	 * path), so this cannot double-delete or race an in-flight download.
+	 */
+	private async reconcileLocalDeletes(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		const onDisk = new Set(this.app.vault.getFiles().map((f) => f.path));
+		for (const path of [...this.syncState.keys()]) {
+			if (this.aborted) return;
+			if (isHidden(path) || this.skip(path) || onDisk.has(path)) continue;
+			if (!(await adapter.exists(path))) await this.handleLocalDelete(path);
 		}
 	}
 

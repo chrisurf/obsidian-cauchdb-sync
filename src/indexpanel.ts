@@ -584,8 +584,12 @@ export class IndexPanel {
 				await this.loadIndex(true);
 			};
 
+			// "total" is the sum of every chip shown, INCLUDING excluded when the toggle
+			// reveals them — so it always equals the Sync-state tree count and moves with
+			// the toggle. (The "X / Y in sync" summary above stays syncable-only: an
+			// excluded file is deliberately not synced, so it must not read as "pending".)
 			const totalItem = legendBox.createSpan({ cls: "couchdb-sync-legend-total" });
-			totalItem.createSpan({ text: `${syncTotal}`, cls: "couchdb-sync-legend-count" });
+			totalItem.createSpan({ text: `${allPaths.length}`, cls: "couchdb-sync-legend-count" });
 			totalItem.createSpan({ text: "total", cls: "couchdb-sync-legend-label" });
 
 			type LegendAction = { tooltip: string; busyLabel: string; run: (paths: string[]) => Promise<void> };
@@ -702,8 +706,14 @@ export class IndexPanel {
 						t.setValue(this.plugin.settings.showExcluded).onChange(async (v) => {
 							this.plugin.settings.showExcluded = v;
 							await this.plugin.saveSettings();
+							// showExcluded is a pure DISPLAY filter over the same report — the
+							// database contents did not change. Re-render the cached report
+							// instead of calling loadIndex(), which would re-scan and re-decrypt
+							// every doc just to hide/show rows. This keeps the toggle instant and
+							// cheap, and updates the summary, the "total" chip and the tree count
+							// together so they can never disagree.
 							this.treeSig = "";
-							await this.loadIndex(true);
+							if (this.lastReport) this.renderReport(this.lastReport, false);
 						})
 					);
 			}
