@@ -232,9 +232,15 @@ export default class CouchDBSyncPlugin extends Plugin {
 		if (this.recoveryTimer !== null) return; // one recovery in flight is enough
 		this.recoveryTimer = window.setTimeout(() => {
 			this.recoveryTimer = null;
+			// This path is reached only when the handle was PROVEN dead — the engine hit
+			// a closed-connection error, or the app just returned to the foreground on
+			// mobile. Force a reopen rather than relying on the info() probe in
+			// ensureOpen: on iOS the probe can occasionally still succeed on a handle
+			// that then fails the next real transaction, which would otherwise loop.
+			this.db?.reopenLocal();
 			if (!this.settings.syncEnabled) {
 				// Sync is off: no session to restart. Still refresh the (self-healing)
-				// index read so the "connection is closing" text clears from the panel.
+				// index read so the stale error text clears from the panel.
 				void this.refreshDriftSummary();
 				return;
 			}

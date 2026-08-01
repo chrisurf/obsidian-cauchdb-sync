@@ -303,10 +303,28 @@ describe("SyncDatabase — recovers from a closed IndexedDB connection (mobile r
 		expect(Array.isArray(docs)).toBe(true);
 	});
 
-	it("does not swallow unrelated errors", async () => {
-		// @ts-expect-error — override for the test
-		db.local.allDocs = () => Promise.reject(new Error("boom: some other failure"));
-		await expect(db.getAll()).rejects.toThrow(/boom/);
+	it("also recovers from the bare PouchDB 'unknown' (status 500) variant", async () => {
+		await db.put(fileDoc("a.md"));
+		const original = db.local.allDocs.bind(db.local);
+		let calls = 0;
+		// @ts-expect-error — override the instance method for the test
+		db.local.allDocs = (...args: unknown[]) => {
+			calls++;
+			// PouchDB maps some post-suspend IDB failures to { status: 500, message: "unknown" }.
+			if (calls === 1) return Promise.reject({ status: 500, name: "unknown", message: "unknown" });
+			return original(...(args as Parameters<typeof original>));
+		};
+		const docs = await db.getAll();
+		expect(calls).toBe(1);
+		expect(Array.isArray(docs)).toBe(true);
+	});
+
+	it("passes a benign not-found straight through WITHOUT reopening", async () => {
+		const before = db.local;
+		// A real missing doc surfaces as a 404 from PouchDB; get() maps it to null and
+		// withLocal must NOT treat that expected outcome as a dead handle.
+		expect(await db.get("does-not-exist.md")).toBe(null);
+		expect(db.local).toBe(before); // no reopen for a benign not-found
 	});
 
 	it("reopenLocal replaces the handle instance", () => {
@@ -315,15 +333,15 @@ describe("SyncDatabase — recovers from a closed IndexedDB connection (mobile r
 		expect(db.local).not.toBe(before);
 	});
 
-	it("ensureOpen returns false for a healthy handle and reopens a closed one", async () => {
+	it("ensureOpen returns false when healthy and reopens on ANY probe failure", async () => {
 		// healthy: info() resolves -> no reopen
 		expect(await db.ensureOpen()).toBe(false);
 
-		// closed: info() rejects with the IDB error -> reopen, return true
+		// unusable: info() rejects (any error) -> reopen unconditionally, return true.
+		// Uses a generic error on purpose: a healthy handle never fails info().
 		const before = db.local;
 		// @ts-expect-error — override for the test
-		db.local.info = () =>
-			Promise.reject(new Error("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing."));
+		db.local.info = () => Promise.reject(new Error("unknown"));
 		expect(await db.ensureOpen()).toBe(true);
 		expect(db.local).not.toBe(before); // a fresh handle
 	});

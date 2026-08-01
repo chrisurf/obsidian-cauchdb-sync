@@ -369,8 +369,23 @@ export function isIdbClosingError(e: unknown): boolean {
 	const err = e as { message?: unknown; name?: unknown } | null;
 	const msg = typeof err?.message === "string" ? err.message : "";
 	const name = typeof err?.name === "string" ? err.name : "";
-	return (
+
+	// DOMException names IndexedDB throws when its connection is closing/closed or the
+	// OS tore it down while the app was suspended. iOS/Android WebViews surface several
+	// beyond the "closing" one — an `UnknownError`/`AbortError` after a resume is the
+	// same dead-connection situation, just a different label. These names are
+	// IndexedDB-specific, so matching them is safe even on the replication path (a
+	// remote HTTP error carries a status code, not a DOMException name).
+	if (
 		name === "InvalidStateError" ||
-		/connection is clos|database is clos|database is closed|InvalidStateError|being closed/i.test(msg)
-	);
+		name === "UnknownError" ||
+		name === "AbortError" ||
+		name === "TransactionInactiveError" ||
+		name === "NotReadableError" ||
+		name === "TimeoutError"
+	) {
+		return true;
+	}
+
+	return /connection is clos|database is clos|database is closed|being closed|IDBDatabase|Indexed Database|backing store/i.test(msg);
 }

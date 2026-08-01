@@ -309,19 +309,33 @@ describe("isIdbClosingError — mobile IndexedDB suspend/resume", () => {
 		).toBe(true);
 	});
 
-	it("matches by error name InvalidStateError", () => {
-		const e = new Error("something"); e.name = "InvalidStateError";
-		expect(isIdbClosingError(e)).toBe(true);
+	it("matches the DOMException names iOS throws after a resume", () => {
+		for (const name of [
+			"InvalidStateError",
+			"UnknownError",
+			"AbortError",
+			"TransactionInactiveError",
+			"NotReadableError",
+			"TimeoutError",
+		]) {
+			const e = new Error("something"); e.name = name;
+			expect(isIdbClosingError(e)).toBe(true);
+		}
 	});
 
-	it("matches 'database is closed' and plain-object rejections", () => {
+	it("matches 'database is closed' / IDBDatabase message rejections", () => {
 		expect(isIdbClosingError({ message: "database is closed" })).toBe(true);
 		expect(isIdbClosingError(new Error("The database is closing"))).toBe(true);
+		expect(isIdbClosingError({ message: "some IDBDatabase failure" })).toBe(true);
 	});
 
-	it("does not match unrelated errors", () => {
+	it("does not match unrelated errors (a remote HTTP status is left to other handling)", () => {
 		expect(isIdbClosingError(new Error("conflict"))).toBe(false);
 		expect(isIdbClosingError({ status: 404 })).toBe(false);
+		// A bare HTTP 500 has no IndexedDB signature — must NOT be treated as a dead
+		// handle here (that would restart-loop on a remote server error); the local
+		// self-heal in SyncDatabase handles the PouchDB "unknown" case separately.
+		expect(isIdbClosingError({ status: 500, name: "unknown", message: "unknown" })).toBe(false);
 		expect(isIdbClosingError(null)).toBe(false);
 		expect(isIdbClosingError("some string")).toBe(false);
 	});
