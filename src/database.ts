@@ -16,7 +16,7 @@ import {
 	hydrateVersion,
 	toStoredId,
 } from "./envelope";
-import { base64ToUint8, uint8ToBase64 } from "./util";
+import { base64ToUint8, isIdbClosingError, uint8ToBase64 } from "./util";
 
 const RANGE_END = "￿";
 
@@ -98,6 +98,9 @@ export class SyncDatabase {
 	 * refreshed from the live scan each time.
 	 */
 	private hydratedCache = new Map<string, { rev: string; doc: FileDoc }>();
+	/** Name + options are kept so the local handle can be re-opened after the OS closes it. */
+	private readonly localName: string;
+	private readonly localOptions?: PouchDB.Configuration.LocalDatabaseConfiguration;
 
 	constructor(
 		settings: CouchDBSyncSettings,
@@ -105,8 +108,65 @@ export class SyncDatabase {
 		localOptions?: PouchDB.Configuration.LocalDatabaseConfiguration
 	) {
 		this.settings = settings;
+		this.localName = localName;
+		this.localOptions = localOptions;
 		// localOptions lets tests swap in the in-memory adapter; production passes none.
-		this.local = new PouchDB<FileDoc>(localName, { auto_compaction: true, ...localOptions });
+		this.local = this.openLocal();
+	}
+
+	private openLocal(): PouchDB.Database<FileDoc> {
+		return new PouchDB<FileDoc>(this.localName, { auto_compaction: true, ...this.localOptions });
+	}
+
+	/**
+	 * Re-open the local replica with a fresh IndexedDB connection (same name → same
+	 * on-disk data). Mobile OSes close IndexedDB connections while an app is
+	 * suspended; our single long-lived handle is then stale and every transaction
+	 * throws "The database connection is closing." Replacing the handle reconnects
+	 * it. The old handle is NOT close()d — it is already closing/closed and close()
+	 * on it can itself throw. The hydrated-doc cache is kept: it is keyed by _id+_rev
+	 * and the reopened replica holds the identical revs, so cached decrypts stay
+	 * valid (and a large vault avoids re-deriving every PBKDF2 key after a resume).
+	 */
+	reopenLocal(): void {
+		this.local = this.openLocal();
+	}
+
+	/**
+	 * Ensure the local handle is usable, re-opening it if the connection was closed
+	 * (mobile background/resume). Returns whether a re-open happened, so callers can
+	 * rebuild anything bound to the old handle (e.g. the engine's live replication).
+	 * A cheap `info()` probe is the reliable liveness check — it runs an IDB
+	 * transaction, which is exactly what throws on a closing connection.
+	 */
+	async ensureOpen(): Promise<boolean> {
+		try {
+			await this.local.info();
+			return false;
+		} catch (e) {
+			if (isIdbClosingError(e)) {
+				this.reopenLocal();
+				return true;
+			}
+			return false; // unrelated failure — leave the handle as-is
+		}
+	}
+
+	/**
+	 * Run a local-DB operation, transparently recovering from a closed IndexedDB
+	 * connection: if the first attempt fails with a "connection is closing" error,
+	 * re-open the handle and retry ONCE on the fresh connection. Any other error
+	 * propagates unchanged. This is what keeps idle index reads working right after a
+	 * resume, before the full recovery restart has run.
+	 */
+	private async withLocal<T>(fn: (db: PouchDB.Database<FileDoc>) => Promise<T>): Promise<T> {
+		try {
+			return await fn(this.local);
+		} catch (e) {
+			if (!isIdbClosingError(e)) throw e;
+			this.reopenLocal();
+			return await fn(this.local);
+		}
 	}
 
 	private remoteUrl(): string {
@@ -151,12 +211,14 @@ export class SyncDatabase {
 		// `conflicts:true` in the SAME scan so the index report gets conflict info for
 		// free (no second pass). The HMAC-based ids still sort under "f:", so the
 		// range is unchanged. Each doc is hydrated (decrypted) back to engine form.
-		const res = await this.local.allDocs({
-			include_docs: true,
-			conflicts: true,
-			startkey: FILE_PREFIX,
-			endkey: FILE_PREFIX + RANGE_END,
-		});
+		const res = await this.withLocal((db) =>
+			db.allDocs({
+				include_docs: true,
+				conflicts: true,
+				startkey: FILE_PREFIX,
+				endkey: FILE_PREFIX + RANGE_END,
+			})
+		);
 		const wires: Wire[] = [];
 		for (const row of res.rows) {
 			const d = row.doc as unknown as Wire | undefined;
@@ -224,10 +286,9 @@ export class SyncDatabase {
 	}
 
 	async get(id: string): Promise<FileDoc | null> {
+		const sid = await toStoredId(id, this.settings);
 		try {
-			const raw = await this.local.get(await toStoredId(id, this.settings), {
-				conflicts: true,
-			});
+			const raw = await this.withLocal((db) => db.get(sid, { conflicts: true }));
 			return await hydrateFile(raw as unknown as Wire, this.settings);
 		} catch (e) {
 			const err = e as { status?: number };
@@ -238,25 +299,29 @@ export class SyncDatabase {
 
 	async put(doc: FileDoc): Promise<void> {
 		const wire = await dehydrateFile(doc, this.settings);
-		try {
-			const existing = await this.local.get(wire._id);
-			wire._rev = (existing as { _rev?: string })._rev;
-		} catch (e) {
-			if ((e as { status?: number }).status !== 404) throw e;
-		}
-		await this.local.put(wire as unknown as FileDoc);
+		await this.withLocal(async (db) => {
+			try {
+				const existing = await db.get(wire._id);
+				wire._rev = (existing as { _rev?: string })._rev;
+			} catch (e) {
+				if ((e as { status?: number }).status !== 404) throw e;
+			}
+			await db.put(wire as unknown as FileDoc);
+		});
 	}
 
 	/** File documents that currently have unresolved conflict revisions. */
 	async getConflicted(): Promise<FileDoc[]> {
 		// File docs only (chunks are immutable and never conflict); range-bounded so
 		// we never pull chunk data into memory.
-		const res = await this.local.allDocs({
-			include_docs: true,
-			conflicts: true,
-			startkey: FILE_PREFIX,
-			endkey: FILE_PREFIX + RANGE_END,
-		});
+		const res = await this.withLocal((db) =>
+			db.allDocs({
+				include_docs: true,
+				conflicts: true,
+				startkey: FILE_PREFIX,
+				endkey: FILE_PREFIX + RANGE_END,
+			})
+		);
 		const out: FileDoc[] = [];
 		for (const row of res.rows) {
 			const d = row.doc as unknown as Wire | undefined;
@@ -272,7 +337,8 @@ export class SyncDatabase {
 	}
 
 	async getRev(id: string, rev: string): Promise<FileDoc> {
-		const raw = await this.local.get(await toStoredId(id, this.settings), { rev });
+		const sid = await toStoredId(id, this.settings);
+		const raw = await this.withLocal((db) => db.get(sid, { rev }));
 		return hydrateFile(raw as unknown as Wire, this.settings);
 	}
 
@@ -281,11 +347,13 @@ export class SyncDatabase {
 	/** All history entries for a path, oldest → newest (chronological). */
 	async listVersions(path: string): Promise<VersionDoc[]> {
 		const base = await historyRangeBase(path, this.settings);
-		const res = await this.local.allDocs({
-			include_docs: true,
-			startkey: base,
-			endkey: base + RANGE_END,
-		});
+		const res = await this.withLocal((db) =>
+			db.allDocs({
+				include_docs: true,
+				startkey: base,
+				endkey: base + RANGE_END,
+			})
+		);
 		const out: VersionDoc[] = [];
 		for (const row of res.rows) {
 			const d = row.doc as unknown as Wire | undefined;
@@ -303,26 +371,30 @@ export class SyncDatabase {
 	/** Append a version entry (idempotent: ignores a same-id duplicate). */
 	async putVersionIfAbsent(doc: VersionDoc): Promise<void> {
 		const wire = await dehydrateVersion(doc, this.settings);
-		const db = this.local as unknown as PouchDB.Database;
-		try {
-			await db.get(wire._id);
-			return; // already recorded
-		} catch (e) {
-			if ((e as { status?: number }).status !== 404) throw e;
-		}
-		try {
-			await db.put(wire);
-		} catch (e) {
-			if ((e as { status?: number }).status !== 409) throw e; // raced
-		}
+		await this.withLocal(async (local) => {
+			const db = local as unknown as PouchDB.Database;
+			try {
+				await db.get(wire._id);
+				return; // already recorded
+			} catch (e) {
+				if ((e as { status?: number }).status !== 404) throw e;
+			}
+			try {
+				await db.put(wire);
+			} catch (e) {
+				if ((e as { status?: number }).status !== 409) throw e; // raced
+			}
+		});
 	}
 
 	async removeVersion(id: string, rev: string): Promise<void> {
-		await this.local.remove(await toStoredId(id, this.settings), rev);
+		const sid = await toStoredId(id, this.settings);
+		await this.withLocal((db) => db.remove(sid, rev));
 	}
 
 	async removeRev(id: string, rev: string): Promise<void> {
-		await this.local.remove(await toStoredId(id, this.settings), rev);
+		const sid = await toStoredId(id, this.settings);
+		await this.withLocal((db) => db.remove(sid, rev));
 	}
 
 	// --- chunk storage -----------------------------------------------------
@@ -333,30 +405,32 @@ export class SyncDatabase {
 	 * document body stays tiny.
 	 */
 	async putChunkIfAbsent(id: string, enc: boolean, bytes: Uint8Array): Promise<void> {
-		const db = this.local as unknown as PouchDB.Database;
-		try {
-			await db.get(id);
-			return; // already present
-		} catch (e) {
-			if ((e as { status?: number }).status !== 404) throw e;
-		}
-		try {
-			await db.put({
-				_id: id,
-				type: "chunk",
-				enc,
-				_attachments: {
-					[CHUNK_ATTACHMENT]: {
-						content_type: "application/octet-stream",
-						// PouchDB accepts a base64 STRING for an inline attachment; CouchDB
-						// stores it binary. (Transient base64 only — never the resting form.)
-						data: uint8ToBase64(bytes),
+		await this.withLocal(async (local) => {
+			const db = local as unknown as PouchDB.Database;
+			try {
+				await db.get(id);
+				return; // already present
+			} catch (e) {
+				if ((e as { status?: number }).status !== 404) throw e;
+			}
+			try {
+				await db.put({
+					_id: id,
+					type: "chunk",
+					enc,
+					_attachments: {
+						[CHUNK_ATTACHMENT]: {
+							content_type: "application/octet-stream",
+							// PouchDB accepts a base64 STRING for an inline attachment; CouchDB
+							// stores it binary. (Transient base64 only — never the resting form.)
+							data: uint8ToBase64(bytes),
+						},
 					},
-				},
-			});
-		} catch (e) {
-			if ((e as { status?: number }).status !== 409) throw e; // created concurrently
-		}
+				});
+			} catch (e) {
+				if ((e as { status?: number }).status !== 409) throw e; // created concurrently
+			}
+		});
 	}
 
 	private async readChunk(
@@ -377,7 +451,7 @@ export class SyncDatabase {
 
 	/** Fetch a single chunk's bytes from the local DB (or null). Keeps memory bounded. */
 	async getChunkLocal(id: string): Promise<ChunkBytes | null> {
-		return this.readChunk(this.local, id);
+		return this.withLocal((db) => this.readChunk(db, id));
 	}
 
 	/** Fetch a single chunk's bytes directly from the remote DB (or null). */
@@ -395,7 +469,7 @@ export class SyncDatabase {
 
 	async getLocalDoc<T>(id: string): Promise<T | null> {
 		try {
-			return (await this.local.get(id)) as unknown as T;
+			return (await this.withLocal((db) => db.get(id))) as unknown as T;
 		} catch (e) {
 			if ((e as { status?: number }).status === 404) return null;
 			throw e;
@@ -411,11 +485,13 @@ export class SyncDatabase {
 	 */
 	async putLocalDoc(id: string, value: Record<string, unknown>): Promise<void> {
 		const existing = (await this.getLocalDoc<{ _rev?: string }>(id)) ?? {};
-		await (this.local as unknown as PouchDB.Database).put({
-			...value,
-			_id: id,
-			_rev: existing._rev,
-		});
+		await this.withLocal((local) =>
+			(local as unknown as PouchDB.Database).put({
+				...value,
+				_id: id,
+				_rev: existing._rev,
+			})
+		);
 	}
 
 	async close(): Promise<void> {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stringArraysEqual, toError } from "../src/util";
+import { isIdbClosingError, stringArraysEqual, toError } from "../src/util";
 import {
 	cyrb53,
 	arrayBufferToBase64,
@@ -297,5 +297,32 @@ describe("toError — coercing PouchDB's non-Error rejections", () => {
 	it("handles primitives", () => {
 		expect(toError("plain string").message).toBe("plain string");
 		expect(toError(undefined).message).toBe("undefined");
+	});
+});
+
+describe("isIdbClosingError — mobile IndexedDB suspend/resume", () => {
+	it("matches the exact PouchDB/WebKit closing message", () => {
+		expect(
+			isIdbClosingError(
+				new Error("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.")
+			)
+		).toBe(true);
+	});
+
+	it("matches by error name InvalidStateError", () => {
+		const e = new Error("something"); e.name = "InvalidStateError";
+		expect(isIdbClosingError(e)).toBe(true);
+	});
+
+	it("matches 'database is closed' and plain-object rejections", () => {
+		expect(isIdbClosingError({ message: "database is closed" })).toBe(true);
+		expect(isIdbClosingError(new Error("The database is closing"))).toBe(true);
+	});
+
+	it("does not match unrelated errors", () => {
+		expect(isIdbClosingError(new Error("conflict"))).toBe(false);
+		expect(isIdbClosingError({ status: 404 })).toBe(false);
+		expect(isIdbClosingError(null)).toBe(false);
+		expect(isIdbClosingError("some string")).toBe(false);
 	});
 });
