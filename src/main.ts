@@ -307,6 +307,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 		}
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
+		// Flush the session's sync records before tearing down (the debounce that would
+		// have written them is cancelled by stop()). Skipped when we are about to wipe the
+		// cache anyway. Keeps the next launch from re-hashing the whole vault.
+		if (!this.settings.forgetCacheOnDisable) {
+			await this.engine?.flushState().catch(() => undefined);
+		}
 		this.engine?.stop();
 		// Drain any in-flight index report before touching the shared handle.
 		if (this.reportInFlight) await this.reportInFlight.catch(() => undefined);
@@ -512,6 +518,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	private async doRestart(mode: "sync" | "download" = "sync"): Promise<void> {
+		// Preserve the outgoing engine's sync records across the restart churn (mobile
+		// resume-recovery, Force sync, toggle). stop() cancels the debounced write, so
+		// without this flush the rebuilt engine would re-hash the whole vault. The shared
+		// local DB handle stays open across restarts, so the write here is safe.
+		await this.engine?.flushState().catch(() => undefined);
+
 		// Master kill switch: the single choke point every start path funnels through.
 		// While off, no session may start — keep the engine torn down and stay idle.
 		if (!this.settings.syncEnabled) {
