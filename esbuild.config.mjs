@@ -10,6 +10,15 @@ Source code: https://github.com/chrisurf/obsidian-cauchdb-sync
 
 const prod = process.argv[2] === "production";
 
+/**
+ * Node built-ins that a bundled browser dependency needs and that MUST be bundled
+ * as a polyfill (not externalized) so the mobile bundle carries no runtime
+ * `require(...)` of a Node built-in. `events` is pulled in by PouchDB; the pure-JS
+ * `events` npm package provides a browser-safe EventEmitter. Add a builtin here
+ * (and install its polyfill) only when the bundle actually imports it.
+ */
+const BROWSER_POLYFILLED = new Set(["events"]);
+
 const context = await esbuild.context({
 	banner: { js: banner },
 	entryPoints: ["src/main.ts"],
@@ -35,8 +44,21 @@ const context = await esbuild.context({
 		"@lezer/lr",
 		// Node built-ins are provided by Electron on desktop and must never be
 		// bundled; both spellings, since "node:fs" and "fs" are distinct specifiers.
-		...builtinModules,
-		...builtinModules.map((m) => `node:${m}`),
+		//
+		// EXCEPTION: builtins that a bundled browser dependency imports must be
+		// POLYFILLED, not externalized. PouchDB pulls in Node's `events`
+		// (EventEmitter); left external it stays a top-level `require("events")` in
+		// main.js. On desktop Electron resolves it, but Obsidian MOBILE has no Node
+		// `require`, so that call throws while the plugin module is still evaluating
+		// — which is why the plugin could be installed but never ENABLED on mobile.
+		// Removing these from the external list lets esbuild bundle the pure-JS
+		// polyfill (the `events` npm package) instead, so the mobile bundle contains
+		// no runtime `require` of a Node built-in. The genuinely desktop-only modules
+		// (`fs`, `path`) are reached through a dynamic, Platform.isDesktop-guarded
+		// `require(id)` in src/node.ts, so they are never referenced statically here
+		// and stay out of the bundle regardless.
+		...builtinModules.filter((m) => !BROWSER_POLYFILLED.has(m)),
+		...builtinModules.filter((m) => !BROWSER_POLYFILLED.has(m)).map((m) => `node:${m}`),
 	],
 	format: "cjs",
 	target: "es2018",
