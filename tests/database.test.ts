@@ -276,3 +276,42 @@ describe("SyncDatabase getAll hydrated-doc cache", () => {
 		await dbEnc.destroyLocal().catch(() => undefined);
 	});
 });
+
+describe("SyncDatabase — recovers from a closed IndexedDB connection (mobile resume)", () => {
+	it("reopens the local handle and retries when a read hits 'connection is closing'", async () => {
+		await db.put(fileDoc("a.md"));
+
+		// Simulate the OS having closed the connection while backgrounded: the first
+		// allDocs on the current handle rejects with the exact IDB error, then the
+		// handle is replaced (reopenLocal) and the retry runs on a fresh instance.
+		const original = db.local.allDocs.bind(db.local);
+		let calls = 0;
+		// @ts-expect-error — override the instance method for the test
+		db.local.allDocs = (...args: unknown[]) => {
+			calls++;
+			if (calls === 1) {
+				return Promise.reject(
+					new Error("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.")
+				);
+			}
+			return original(...(args as Parameters<typeof original>));
+		};
+
+		// Must not throw: getAll self-heals by reopening and retrying.
+		const docs = await db.getAll();
+		expect(calls).toBe(1); // the stubbed (old) handle was hit exactly once, then replaced
+		expect(Array.isArray(docs)).toBe(true);
+	});
+
+	it("does not swallow unrelated errors", async () => {
+		// @ts-expect-error — override for the test
+		db.local.allDocs = () => Promise.reject(new Error("boom: some other failure"));
+		await expect(db.getAll()).rejects.toThrow(/boom/);
+	});
+
+	it("reopenLocal replaces the handle instance", async () => {
+		const before = db.local;
+		db.reopenLocal();
+		expect(db.local).not.toBe(before);
+	});
+});

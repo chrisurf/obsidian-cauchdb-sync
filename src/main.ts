@@ -1,4 +1,4 @@
-import { Notice, Plugin, setIcon } from "obsidian";
+import { Notice, Platform, Plugin, setIcon } from "obsidian";
 import PouchDB from "pouchdb-browser";
 import {
 	CouchDBSyncSettings,
@@ -93,6 +93,8 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 */
 	private effectiveDrift: { drift: number; pct: number } | null = null;
 	private driftRefreshTimer: number | null = null;
+	/** debounces the mobile foreground-resume recovery (visibilitychange can fire repeatedly) */
+	private resumeTimer: number | null = null;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
@@ -204,6 +206,47 @@ export default class CouchDBSyncPlugin extends Plugin {
 		});
 		// First read once the layout has had a moment to settle (don't block onload).
 		window.setTimeout(() => void this.refreshDriftSummary(), 1500);
+
+		// Mobile resume recovery: iOS/Android close IndexedDB connections and kill live
+		// replication while the app is backgrounded or the device sleeps. When the app
+		// returns to the foreground, reopen the local handle and restart sync so both
+		// the index reads and replication reconnect. registerDomEvent auto-unregisters
+		// on unload.
+		this.registerDomEvent(document, "visibilitychange", () => {
+			if (document.visibilityState === "visible") this.onAppResumed();
+		});
+	}
+
+	/**
+	 * The app returned to the foreground. On mobile the OS has likely closed our
+	 * IndexedDB connection and killed replication during suspend, leaving the shared
+	 * handle stale ("The database connection is closing." on the next transaction).
+	 * Debounced because visibilitychange can fire several times around a resume.
+	 * Desktop keeps its connections when a window is merely hidden, so it is skipped.
+	 */
+	private onAppResumed(): void {
+		if (!Platform.isMobile) return;
+		if (this.resumeTimer !== null) return;
+		this.resumeTimer = window.setTimeout(() => {
+			this.resumeTimer = null;
+		}, 1500);
+		void this.recycleAfterResume();
+	}
+
+	/**
+	 * Reopen the local replica (fresh IndexedDB connection) and restart sync so a new
+	 * engine binds its replication to the live handle. The DB layer also self-heals
+	 * reads, but reopening here makes the very first post-resume read and the
+	 * restarted replication use a live connection immediately.
+	 */
+	private async recycleAfterResume(): Promise<void> {
+		try {
+			this.db?.reopenLocal();
+		} catch (e) {
+			console.warn("[couchdb-sync] resume: could not reopen local DB", e);
+		}
+		if (this.settings.syncEnabled) await this.restartSync();
+		else await this.refreshDriftSummary();
 	}
 
 	/** Opens the "what's new" note for the installed version. */
@@ -235,6 +278,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	private async teardown(): Promise<void> {
+		if (this.resumeTimer !== null) {
+			window.clearTimeout(this.resumeTimer);
+			this.resumeTimer = null;
+		}
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		this.engine?.stop();
