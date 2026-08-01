@@ -325,14 +325,14 @@ export interface SyncStatus {
 export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
 
 /**
- * How often live sync re-scans the vault to catch changes its vault events missed.
- * Vault events are the fast path (see the engine's attachVaultEvents), but on mobile
- * the OS throttles timers and suspends the app, so a create/modify fired around a
- * background transition can be dropped or fire against an already-torn-down engine
- * and never reach the database. A periodic reconciliation is the self-healing slow
- * path: it re-pushes any file whose on-disk mtime/size no longer matches what we last
- * synced. Cheap (an in-memory stat comparison; a no-op when nothing drifted), so it
- * can run often without hurting a large vault.
+ * How often live sync re-reconciles in BOTH directions to catch what the fast paths
+ * (vault events for push, the live replication feed for pull) delivered late or not
+ * at all. On the pull side a file another device created can land in the local
+ * database yet sit undisplayed while a big local upload runs; on the push side a
+ * mobile vault event can be dropped across an app suspension. The periodic sweep
+ * materializes new remote files to disk first (so incoming files appear promptly)
+ * and then re-pushes local changes the events missed. Each half is cheap and a no-op
+ * when nothing drifted, so it can run often without hurting a large vault.
  */
 export const RECONCILE_INTERVAL_MS = 15_000;
 

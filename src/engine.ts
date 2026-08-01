@@ -347,12 +347,13 @@ export class SyncEngine {
 			if (this.settings.syncHidden) {
 				this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
 			}
-			// Self-healing slow path: vault events can be missed on mobile (throttled
-			// timers, app suspension, an event firing against a torn-down engine), which
-			// would otherwise strand a create/edit until the next full restart. A periodic
-			// reconciliation re-pushes anything the events dropped. See RECONCILE_INTERVAL_MS.
+			// Self-healing slow path in BOTH directions: the live feed and vault events
+			// can be delayed or missed (a remote file waiting behind a big local upload;
+			// a mobile vault event dropped across an app suspension). A periodic sweep
+			// pulls new remote files to disk first, then re-pushes local changes the
+			// events dropped. See RECONCILE_INTERVAL_MS.
 			this.reconcileTimer = window.setInterval(
-				() => void this.reconcileLocal(),
+				() => void this.reconcile(),
 				RECONCILE_INTERVAL_MS
 			);
 			this.startLiveSync();
@@ -753,23 +754,33 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Periodic self-heal for live sync (see the reconcileTimer in start()). Vault
-	 * events are the fast path, but on mobile they are unreliable: the OS throttles
-	 * timers and suspends the app, so a create/modify fired around a background
-	 * transition can be dropped, or fire the debounced push against an engine that a
-	 * resume-triggered restart has already aborted — either way the edit never reaches
-	 * the database and live sync appears to "not detect" local changes. Re-running the
-	 * same cheap reconciliation the initial index uses catches any stranded change
-	 * within one interval, and a locally-deleted file whose delete event was missed is
-	 * tombstoned the same way the hidden-file scan already handles hidden deletions.
+	 * Periodic two-way self-heal for live sync (see the reconcileTimer in start()).
+	 * Vault events and the live replication feed are the fast paths, but neither is
+	 * guaranteed to be prompt:
 	 *
-	 * It is a no-op when nothing drifted (the isUnchanged filter yields an empty set),
-	 * and it is single-flighted so a slow sweep on a large vault never stacks up.
+	 * - Pull (remote → this device): the live feed writes incoming docs into the local
+	 *   database, but materializing them to disk competes with this device's own upload
+	 *   work, so a file another device just created can sit undisplayed while a large
+	 *   local index runs ("the desktop never shows the file the phone made"). This is
+	 *   why the pull is reconciled FIRST — a newly arrived file should appear ASAP,
+	 *   ahead of pushing this device's backlog.
+	 * - Push (this device → remote): on mobile the OS throttles timers and suspends the
+	 *   app, so a create/modify vault event can be dropped or fire the debounced push
+	 *   against an engine a resume-triggered restart already aborted — the edit then
+	 *   never reaches the database and live sync appears to "not detect" local changes.
+	 *
+	 * Each half re-runs the same cheap reconciliation the initial index uses, so it is
+	 * a no-op when nothing drifted, and the whole sweep is single-flighted so a slow
+	 * pass on a large vault never stacks up.
 	 */
-	private async reconcileLocal(): Promise<void> {
+	private async reconcile(): Promise<void> {
 		if (this.aborted || this.reconciling || !this.initialIndexDone) return;
 		this.reconciling = true;
 		try {
+			// PULL FIRST — get files other devices created onto disk before we spend the
+			// sweep re-pushing our own. This is the "check the remote for new files often
+			// and prioritize them" the live feed can be too busy to do promptly.
+			await this.materializeRemoteOnly();
 			// stranded creates/edits: re-push anything whose disk stat drifted from state
 			await this.indexLocalFiles();
 			// stranded deletes: tombstone tracked files that vanished with no delete event
