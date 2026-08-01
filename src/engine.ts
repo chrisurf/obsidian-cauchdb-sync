@@ -357,6 +357,9 @@ export class SyncEngine {
 			await this.indexLocalFiles();
 			if (this.settings.syncHidden) await this.scanHidden();
 			await this.retryPending();
+			// Download the files that live only in the database (the "remote only"
+			// state) — the download half of a two-way Force sync.
+			await this.materializeRemoteOnly();
 			await this.resolveConflicts();
 			if (!this.aborted) {
 				this.onReady(); // reached a safe steady state -> clear crash guard
@@ -605,9 +608,51 @@ export class SyncEngine {
 			});
 			this.oneShot = null;
 			await this.retryPending();
+			// Replication only re-emits docs changed since the last checkpoint, so a
+			// file already in the local replica but never written to disk would stay
+			// "remote only". Materialize any such files now.
+			await this.materializeRemoteOnly();
 			await this.resolveConflicts();
 		} catch (e) {
 			this.fail("download", e);
+		}
+	}
+
+	/**
+	 * Download and write to disk every file that is in the database but NOT on this
+	 * device — the "remote only" state. This is the DOWNLOAD half of a two-way sync:
+	 * live replication pulls the file DOCS into the local replica, but a doc whose
+	 * content was never materialized (a large file, or one pulled in an earlier
+	 * session) then just sits as "remote only" until the user taps Download on each
+	 * one. Running it as part of the initial pass makes Force sync actually fetch
+	 * those files, as users expect. Missing chunks are fetched from the server by
+	 * applyRemoteChange (or deferred to `pending` and retried), and files already on
+	 * disk are skipped, so this only does work for the genuinely-missing ones.
+	 */
+	private async materializeRemoteOnly(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		let docs: FileDoc[];
+		try {
+			docs = (await this.db.getAll()).filter((d) => !d.deleted);
+		} catch (e) {
+			if (!this.aborted) this.fail("scanning for downloads", e);
+			return;
+		}
+		for (const doc of docs) {
+			if (this.aborted) return;
+			const path = doc.path;
+			if (this.skip(path)) continue;
+			if (this.stuck.has(path)) continue; // known-unrecoverable — don't retry in a loop
+			const onDisk = isHidden(path)
+				? await adapter.exists(path)
+				: this.app.vault.getAbstractFileByPath(path) instanceof TFile;
+			if (onDisk) continue; // only the missing ones — "remote only"
+			try {
+				await this.applyRemoteChange(doc);
+			} catch (e) {
+				this.fail(`downloading ${path}`, e);
+			}
+			await this.yieldToUi();
 		}
 	}
 
