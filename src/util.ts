@@ -353,3 +353,24 @@ export function toError(e: unknown): Error {
 	}
 	return new Error(String(e));
 }
+
+/**
+ * True for the "IndexedDB connection is closing/closed" family of errors.
+ *
+ * Mobile OSes (iOS/Android) close IndexedDB connections while an app is
+ * backgrounded or the device sleeps. Our long-lived local PouchDB handle is then
+ * stale, and any transaction on it throws — via PouchDB — with a message like
+ * "Failed to execute 'transaction' on 'IDBDatabase': The database connection is
+ * closing." (name `InvalidStateError`). Detecting exactly this family lets the
+ * plugin recover (reopen the handle + restart) rather than surface a dead-end
+ * error. Pure, so it is unit-testable.
+ */
+export function isIdbClosingError(e: unknown): boolean {
+	const err = e as { message?: unknown; name?: unknown } | null;
+	const msg = typeof err?.message === "string" ? err.message : "";
+	const name = typeof err?.name === "string" ? err.name : "";
+	return (
+		name === "InvalidStateError" ||
+		/connection is clos|database is clos|database is closed|InvalidStateError|being closed/i.test(msg)
+	);
+}
