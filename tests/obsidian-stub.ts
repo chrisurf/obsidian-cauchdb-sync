@@ -16,5 +16,14 @@ export function normalizePath(p: string): string {
 	return p;
 }
 export function debounce<T extends (...args: never[]) => unknown>(fn: T): T {
-	return fn;
+	// The real obsidian.debounce returns a callable carrying `cancel()` and `run()`.
+	// Tests need those to exist (e.g. engine.stop() cancels its debouncers); the timing
+	// is elided — calls run synchronously — which keeps unit tests deterministic.
+	const wrapped = ((...args: Parameters<T>) => fn(...args)) as T & {
+		cancel(): void;
+		run(): void;
+	};
+	wrapped.cancel = () => undefined;
+	wrapped.run = () => undefined;
+	return wrapped;
 }

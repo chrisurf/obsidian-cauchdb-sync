@@ -99,6 +99,16 @@ export interface CouchDBSyncSettings {
 	unsafeShutdown: boolean;
 
 	/**
+	 * Consecutive launches that found unsafeShutdown still set (a start that never
+	 * reached steady state). A single unclean start is normal on mobile — the OS
+	 * suspends/kills the app before the initial index finishes and no onunload runs —
+	 * so sync is only forced off once this streak crosses UNCLEAN_START_LIMIT, i.e.
+	 * on a genuine repeated start-crash loop rather than a one-off background kill.
+	 * Reset to 0 whenever a session reaches a safe steady state (or shuts down cleanly).
+	 */
+	unsafeShutdownStreak: number;
+
+	/**
 	 * Set true once we have proven the configured server+credentials are valid
 	 * (Test connection succeeded, or a sync session reached steady state). Gates
 	 * the index status view so users cannot accidentally inspect the local cache
@@ -187,6 +197,7 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	keepHistory: 50,
 	showExcluded: false,
 	unsafeShutdown: false,
+	unsafeShutdownStreak: 0,
 	connectionVerified: false,
 	forgetCacheOnDisable: false,
 	lastWhatsNewVersion: "",
@@ -323,6 +334,18 @@ export interface SyncStatus {
 
 /** Raw chunk size in bytes before base64/encryption. Keeps documents well-sized. */
 export const CHUNK_SIZE = 1024 * 1024; // 1 MiB
+
+/**
+ * How often live sync re-reconciles in BOTH directions to catch what the fast paths
+ * (vault events for push, the live replication feed for pull) delivered late or not
+ * at all. On the pull side a file another device created can land in the local
+ * database yet sit undisplayed while a big local upload runs; on the push side a
+ * mobile vault event can be dropped across an app suspension. The periodic sweep
+ * materializes new remote files to disk first (so incoming files appear promptly)
+ * and then re-pushes local changes the events missed. Each half is cheap and a no-op
+ * when nothing drifted, so it can run often without hurting a large vault.
+ */
+export const RECONCILE_INTERVAL_MS = 15_000;
 
 /**
  * Document id prefixes. File metadata docs are keyed "f:" + path; chunks are "h:" + hash.
