@@ -48,13 +48,22 @@ let db: SyncDatabase;
 let engine: SyncEngine;
 let files: Map<string, Entry>;
 
+// Mirror of engine.ts LIVE_SYNC_RESTART_LIMIT (a private const); kept in sync by hand.
+const LIVE_SYNC_RESTART_LIMIT = 8;
+
 /** Reach the engine's private change-path methods and state without widening its API. */
 type EngineInternals = {
 	handleLocalUpsert(file: TFile): Promise<void>;
 	reconcile(): Promise<void>;
+	reviveLiveSyncIfDead(): void;
+	dropLiveSyncHandle(): void;
+	startLiveSync(): void;
 	initialIndexDone: boolean;
+	liveSyncRestarts: number;
+	syncHandler: unknown;
 	lastHash: Map<string, string>;
 	syncState: Map<string, SyncRecord>;
+	db: { remote: unknown };
 };
 const priv = (): EngineInternals => engine as unknown as EngineInternals;
 
@@ -235,6 +244,60 @@ describe("live-sync reconciliation sweep — pull side (the desktop scenario)", 
 		// The incoming file is on disk (pulled first) AND the backlog eventually pushed.
 		expect(files.has("incoming.md")).toBe(true);
 		for (let i = 0; i < 5; i++) expect(await getDoc(`local-${i}.md`)).toBeTruthy();
+	});
+});
+
+describe("live-sync handle recovery (desktop dead-pull path)", () => {
+	it("drops a dead handle: cancels it and clears the reference", () => {
+		const p = priv();
+		let cancelled = false;
+		p.syncHandler = { cancel: () => (cancelled = true) };
+		p.dropLiveSyncHandle();
+		expect(cancelled).toBe(true);
+		expect(p.syncHandler).toBe(null);
+	});
+
+	it("re-establishes the live feed once when it has died, and not while it is alive", () => {
+		const p = priv();
+		let starts = 0;
+		p.startLiveSync = () => {
+			starts++;
+			p.syncHandler = { cancel: () => undefined }; // a handle that stays up
+		};
+		p.db.remote = {}; // something to bind to
+		p.syncHandler = null; // the feed is dead
+
+		p.reviveLiveSyncIfDead();
+		expect(starts).toBe(1);
+		expect(p.liveSyncRestarts).toBe(1);
+
+		// alive again -> no further revive
+		p.reviveLiveSyncIfDead();
+		expect(starts).toBe(1);
+	});
+
+	it("stops re-establishing after the restart limit (a feed that keeps dying)", () => {
+		const p = priv();
+		let starts = 0;
+		p.startLiveSync = () => {
+			starts++; // handle dies immediately: leave syncHandler null
+		};
+		p.db.remote = {};
+		p.syncHandler = null;
+
+		for (let i = 0; i < LIVE_SYNC_RESTART_LIMIT + 10; i++) p.reviveLiveSyncIfDead();
+
+		expect(starts).toBe(LIVE_SYNC_RESTART_LIMIT); // capped, then leaves the error standing
+	});
+
+	it("never binds when there is no remote to bind to", () => {
+		const p = priv();
+		let starts = 0;
+		p.startLiveSync = () => starts++;
+		p.db.remote = null;
+		p.syncHandler = null;
+		p.reviveLiveSyncIfDead();
+		expect(starts).toBe(0);
 	});
 });
 

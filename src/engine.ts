@@ -58,6 +58,16 @@ const SYNC_STATE_BUCKETS = 64;
 const HEAL_MAX_ATTEMPTS = 3;
 /** Suffix of the temp file used while streaming a download to disk. Never synced. */
 const TMP_SUFFIX = ".cdbsync-tmp";
+/**
+ * How many times the periodic reconcile re-establishes a live-sync handle that died
+ * on a terminal replication error before it stops retrying and leaves the error
+ * standing (a manual Force sync / toggle then restarts everything). This is the
+ * desktop's counterpart to the mobile resume-recovery: with retry:true PouchDB handles
+ * transient network blips itself, so a handle that reaches the 'error' event is dead
+ * for good and only a fresh handle recovers it. The counter resets on any healthy feed
+ * activity, so only a CONTINUOUSLY failing feed ever hits the limit.
+ */
+const LIVE_SYNC_RESTART_LIMIT = 8;
 
 /** Snapshot comparing this device's files against the synced database. */
 export interface IndexReport {
@@ -302,6 +312,8 @@ export class SyncEngine {
 	private reconciling = false;
 	/** set once runInitialIndex has settled, so the sweep never races the initial pass */
 	private initialIndexDone = false;
+	/** consecutive live-sync re-establishments with no healthy activity since (anti-loop) */
+	private liveSyncRestarts = 0;
 	/** timer that returns the status to "in sync" after replication activity settles */
 	private settleTimer: number | null = null;
 	/** per-file transfer progress: path -> {done, total} chunks (for live UI) */
@@ -506,6 +518,7 @@ export class SyncEngine {
 			// default batch would buffer hundreds of MB and trip the OOM guard.
 			.sync(this.db.remote, { live: true, retry: true, batch_size: 25, batches_limit: 2 })
 			.on("change", (info) => {
+				this.liveSyncRestarts = 0; // a live feed that is delivering is healthy again
 				if (info.direction === "pull") {
 					void this.applyPulledDocs(info.change.docs);
 				}
@@ -514,9 +527,44 @@ export class SyncEngine {
 			// 'paused' = caught up / idle (or offline). This is the resting state, so the
 			// spinner stops here. We deliberately ignore 'active' (it fires constantly on
 			// the live longpoll cycle and would keep the spinner turning forever).
-			.on("paused", (err) => this.settle(err ? SYNC_STATE.OFFLINE : SYNC_STATE.SYNCED))
+			.on("paused", (err) => {
+				if (!err) this.liveSyncRestarts = 0; // caught up cleanly -> feed is healthy
+				this.settle(err ? SYNC_STATE.OFFLINE : SYNC_STATE.SYNCED);
+			})
 			.on("denied", (err) => this.fail("replication denied", err))
-			.on("error", (err) => this.fail("replication error", err));
+			.on("error", (err) => {
+				this.fail("replication error", err);
+				// With retry:true, PouchDB retries transient failures itself and only emits
+				// 'error' for a terminal one — the handle is dead. Drop it so the periodic
+				// reconcile re-establishes a fresh live feed (desktop has no resume-recovery
+				// path of its own). A closed local DB is handled by fail() -> onDbClosed.
+				if (!this.aborted && !isIdbClosingError(err)) this.dropLiveSyncHandle();
+			});
+	}
+
+	/** Cancel and forget the live-sync handle so the next reconcile rebuilds it. */
+	private dropLiveSyncHandle(): void {
+		if (!this.syncHandler) return;
+		try {
+			this.syncHandler.cancel();
+		} catch {
+			/* already dead */
+		}
+		this.syncHandler = null;
+	}
+
+	/**
+	 * Re-establish the live feed if a terminal error killed it, bounded so a feed that
+	 * keeps dying (e.g. a misconfigured server) settles into a visible error instead of
+	 * flapping forever. Runs from the periodic reconcile, which gives it a natural 15 s
+	 * backoff between attempts. Healthy activity resets the counter (see startLiveSync).
+	 */
+	private reviveLiveSyncIfDead(): void {
+		if (this.aborted || !this.settings.liveSync) return;
+		if (this.syncHandler || !this.db.remote) return; // alive, or nothing to bind to
+		if (this.liveSyncRestarts >= LIVE_SYNC_RESTART_LIMIT) return; // gave up; await manual restart
+		this.liveSyncRestarts++;
+		this.startLiveSync();
 	}
 
 	/** Show the spinner for real replication activity, then auto-settle to "in sync". */
@@ -777,6 +825,10 @@ export class SyncEngine {
 		if (this.aborted || this.reconciling || !this.initialIndexDone) return;
 		this.reconciling = true;
 		try {
+			// If a terminal error killed the live feed, bring it back first — on desktop
+			// this is the only thing that reconnects a dead pull (mobile also has the
+			// resume-recovery restart). Cheap and a no-op while the feed is alive.
+			this.reviveLiveSyncIfDead();
 			// PULL FIRST — get files other devices created onto disk before we spend the
 			// sweep re-pushing our own. This is the "check the remote for new files often
 			// and prioritize them" the live feed can be too busy to do promptly.
