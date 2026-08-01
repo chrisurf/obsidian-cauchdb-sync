@@ -29,7 +29,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # create the release + push the version-bump commit
+      id-token: write # mint the OIDC token Sigstore uses to sign the attestation
+      attestations: write # persist the build-provenance attestation
 
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +102,21 @@ jobs:
       - name: Build plugin
         if: steps.guard.outputs.skip == 'false' && steps.version.outputs.release == 'true'
         run: npm run build
+
+      - name: Mobile-safety guard (no Node built-in require in the bundle)
+        if: steps.guard.outputs.skip == 'false' && steps.version.outputs.release == 'true'
+        run: npm run check:bundle
+
+      - name: Attest build provenance of the release assets
+        if: steps.guard.outputs.skip == 'false' && steps.version.outputs.release == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          # Lets users cryptographically verify these assets were built from this
+          # repo by this workflow (the Obsidian review flags assets without it).
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
 
       - name: Commit and push the release
         if: steps.guard.outputs.skip == 'false' && steps.version.outputs.release == 'true'

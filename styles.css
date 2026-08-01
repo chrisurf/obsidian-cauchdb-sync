@@ -687,9 +687,11 @@
 /* --- clickable drift/conflict file names (open the diff editor) --- */
 .couchdb-sync-drift-name-link {
 	cursor: pointer;
-	text-decoration-line: underline;
-	text-decoration-style: dotted;
-	text-underline-offset: 2px;
+	/* Dotted underline drawn as a border, not `text-decoration` — the
+	   text-decoration-* longhands are flagged "only partially supported" by the
+	   Obsidian CSS review (stylelint-no-unsupported-browser-features), while a
+	   border has universal support and the same visual affordance. */
+	border-bottom: 1px dotted currentColor;
 }
 
 .couchdb-sync-drift-name-link:hover {
@@ -946,7 +948,9 @@
 	background: var(--interactive-normal);
 	color: var(--text-normal);
 	font-weight: 600;
-	text-decoration-line: none;
+	/* Single-value `text-decoration` shorthand has full support; only the
+	   text-decoration-* longhands are flagged by the CSS review. */
+	text-decoration: none;
 }
 
 .couchdb-sync-bmc-fallback:hover {

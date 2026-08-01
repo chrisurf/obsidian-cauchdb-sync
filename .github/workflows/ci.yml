@@ -36,8 +36,11 @@ jobs:
 
       - run: npm ci
 
-      - name: Lint
+      - name: Lint (eslint — obsidianmd + typescript-eslint type-checked)
         run: npm run lint
+
+      - name: Lint CSS (Obsidian browser-feature support)
+        run: npm run lint:css
 
       - name: Type check
         run: npx tsc --noEmit --skipLibCheck
@@ -47,3 +50,6 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Mobile-safety guard (no Node built-in require in the bundle)
+        run: npm run check:bundle

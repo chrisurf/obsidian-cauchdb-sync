@@ -48,12 +48,18 @@ export interface SettingsSnapshot {
  */
 export function renderSettingsSnapshot(): Promise<SettingsSnapshot> {
 	return browser.executeObsidian(({ app }, id) => {
+		type Tab = {
+			id: string;
+			containerEl: HTMLElement;
+			update?(): void;
+			display?(): void;
+		};
 		const a = app as unknown as {
 			setting: {
 				open?(): void;
 				openTab?(tab: unknown): void;
-				pluginTabs?: { id: string; containerEl: HTMLElement; display(): void }[];
-				settingTabs?: { id: string; containerEl: HTMLElement; display(): void }[];
+				pluginTabs?: Tab[];
+				settingTabs?: Tab[];
 			};
 		};
 		const tabs = [...(a.setting.pluginTabs ?? []), ...(a.setting.settingTabs ?? [])];
@@ -61,13 +67,14 @@ export function renderSettingsSnapshot(): Promise<SettingsSnapshot> {
 		if (!tab) throw new Error(`settings tab '${id}' not found`);
 		a.setting.open?.();
 		a.setting.openTab?.(tab);
-		// Section headings are Setting(...).setHeading() rows, which Obsidian renders
-		// as .setting-item.setting-item-heading — NOT as <h2>. Reading h2 here is what
-		// the plugin review asked us to stop emitting, so the probe follows the markup.
+		// Group headings render as .setting-item.setting-item-heading — NOT as <h2>.
 		const HEADING_SEL = ".setting-item-heading .setting-item-name";
-		// Ensure a render even if opening the modal was a no-op headless.
+		// Ensure a render even if opening the modal was a no-op headless. The tab uses
+		// the 1.13 declarative settings API, so render via update(); fall back to the
+		// legacy display() for older Obsidian in the matrix.
 		if (!tab.containerEl || tab.containerEl.querySelectorAll(HEADING_SEL).length === 0) {
-			tab.display();
+			if (typeof tab.update === "function") tab.update();
+			else if (typeof tab.display === "function") tab.display();
 		}
 		const ce = tab.containerEl;
 		return {
