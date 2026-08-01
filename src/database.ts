@@ -16,7 +16,7 @@ import {
 	hydrateVersion,
 	toStoredId,
 } from "./envelope";
-import { base64ToUint8, isIdbClosingError, uint8ToBase64 } from "./util";
+import { base64ToUint8, uint8ToBase64 } from "./util";
 
 const RANGE_END = "￿";
 
@@ -144,26 +144,40 @@ export class SyncDatabase {
 			await this.local.info();
 			return false;
 		} catch (e) {
-			if (isIdbClosingError(e)) {
-				this.reopenLocal();
-				return true;
-			}
-			return false; // unrelated failure — leave the handle as-is
+			// A healthy handle's info() always succeeds, so ANY failure here means the
+			// connection is unusable — reopen unconditionally rather than trying to
+			// classify the error. This is what makes manual recovery (Force sync /
+			// toggle on) work for every post-suspend IndexedDB failure variant, not
+			// just the "connection is closing" one (iOS also throws UnknownError, and
+			// PouchDB surfaces a bare "unknown"). Reopening the same name is cheap and
+			// idempotent; it never touches data or encryption.
+			console.debug("[couchdb-sync] local DB probe failed — reopening handle", e);
+			this.reopenLocal();
+			return true;
 		}
 	}
 
 	/**
-	 * Run a local-DB operation, transparently recovering from a closed IndexedDB
-	 * connection: if the first attempt fails with a "connection is closing" error,
-	 * re-open the handle and retry ONCE on the fresh connection. Any other error
-	 * propagates unchanged. This is what keeps idle index reads working right after a
-	 * resume, before the full recovery restart has run.
+	 * Run a LOCAL-DB operation, transparently recovering from a dead IndexedDB
+	 * connection (mobile background/resume): on failure, re-open the handle and retry
+	 * ONCE on the fresh connection. This is what keeps idle index reads working right
+	 * after a resume, before the full recovery restart has run.
+	 *
+	 * The retry fires for any non-benign failure, not only the "connection is closing"
+	 * message: after a suspend, iOS surfaces the dead connection under several labels
+	 * (`InvalidStateError`, `UnknownError`) and PouchDB even maps some to a bare
+	 * `{ status: 500, message: "unknown" }` — the "Could not read index: unknown" seen
+	 * in the field. A local PouchDB op has no other reason to 500, so classifying by
+	 * message is fragile; instead only the benign, expected outcomes (404 missing / 409
+	 * conflict / 412 precondition) are passed straight through, and everything else is
+	 * treated as a dead handle worth one reopen-and-retry.
 	 */
 	private async withLocal<T>(fn: (db: PouchDB.Database<FileDoc>) => Promise<T>): Promise<T> {
 		try {
 			return await fn(this.local);
 		} catch (e) {
-			if (!isIdbClosingError(e)) throw e;
+			const status = (e as { status?: number } | null)?.status;
+			if (status === 404 || status === 409 || status === 412) throw e; // benign — caller handles
 			this.reopenLocal();
 			return await fn(this.local);
 		}
