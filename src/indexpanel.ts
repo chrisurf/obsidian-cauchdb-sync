@@ -37,6 +37,21 @@ const SEVERITY: Record<FileState, number> = {
 };
 
 /**
+ * Icon per sync state for the status card. Only SYNCED gets the check mark — a
+ * checkmark on IDLE ("Not syncing") read as "all done" even right after a wipe with
+ * every file still unsynced. Idle/offline/paused get their own, honest glyphs.
+ */
+const STATE_ICON: Record<string, string> = {
+	[SYNC_STATE.IDLE]: "circle-slash",
+	[SYNC_STATE.CONNECTING]: "plug",
+	[SYNC_STATE.SYNCING]: "refresh-cw",
+	[SYNC_STATE.SYNCED]: "check",
+	[SYNC_STATE.OFFLINE]: "cloud-off",
+	[SYNC_STATE.PAUSED]: "pause",
+	[SYNC_STATE.ERROR]: "alert-triangle",
+};
+
+/**
  * The sync status panel: status card, per-state lists and the file tree, with all
  * per-file and per-folder actions.
  *
@@ -213,7 +228,9 @@ export class IndexPanel {
 		const row = el.createDiv({ cls: "couchdb-sync-livestatus-row" });
 		row.toggleClass("couchdb-sync-livestatus-off", !on);
 		const icon = row.createSpan({ cls: "couchdb-sync-status-icon" });
-		setIcon(icon, !on ? "power-off" : syncing ? "refresh-cw" : st.state === SYNC_STATE.ERROR ? "alert-triangle" : "check");
+		// The master switch off -> power icon; otherwise the honest per-state glyph
+		// (crucially NOT a check unless we are actually in sync — see STATE_ICON).
+		setIcon(icon, !on ? "power-off" : (STATE_ICON[st.state] ?? "circle-slash"));
 		icon.toggleClass("couchdb-sync-spin", syncing);
 
 		const labelMap: Record<string, string> = {
@@ -461,7 +478,7 @@ export class IndexPanel {
 			});
 			wipeBtn.onclick = async () => {
 				await this.plugin.wipeLocalOnly();
-				new Notice("Local cache wiped. Press 'Force sync' to rebuild from the new remote.");
+				new Notice("Local cache wiped. Press 'Force sync' to rebuild — it uploads your local files and downloads anything on the server.");
 				this.remount();
 			};
 			const adoptBtn = actions.createEl("button", {
