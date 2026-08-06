@@ -157,10 +157,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "wipe-local-cache",
-			name: "Wipe local cache (does not download)",
+			name: "Wipe local cache (rebuild with Force sync)",
 			callback: async () => {
 				await this.wipeLocalOnly();
-				new Notice("CouchDB Sync: local cache wiped. Use 'Force sync' to re-download.");
+				new Notice(
+					"CouchDB Sync: local cache wiped. Press 'Force sync' to rebuild — it uploads your local files and downloads anything the server has."
+				);
 			},
 		});
 
@@ -685,7 +687,10 @@ export default class CouchDBSyncPlugin extends Plugin {
 				await this.getSharedDb().destroyLocal().catch(() => undefined);
 				this.db = null;
 				this.reportInFlight = null;
-				this.setStatus(SYNC_STATE.IDLE, "local cache wiped — press Force sync to re-download");
+				this.setStatus(
+					SYNC_STATE.IDLE,
+					"local cache wiped — press Force sync to rebuild (uploads local files, downloads remote)"
+				);
 			});
 		return this.restartLock;
 	}
