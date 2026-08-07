@@ -42,7 +42,64 @@ describe("CouchDB Sync — documentation screenshots (prototype)", function () {
 			plugin.settings.syncEnabled = false;
 			plugin.settings.e2eeEnabled = false;
 			await plugin.saveSettings();
-			await plugin.revealStatusView(); // ensures a full-mode panel instance exists
+		}, PLUGIN_ID);
+
+		// Seed a realistic vault for a CREATIVE VIDEO-EDITING Obsidian user, at runtime,
+		// so the screenshots read like a real workflow. This touches only the running
+		// test instance's vault — the committed fixture (e2e/vaults/simple) is untouched.
+		await browser.executeObsidian(async ({ app }) => {
+			const vault = (app as unknown as {
+				vault: {
+					getAbstractFileByPath(p: string): unknown;
+					getRoot(): { children: { name: string }[] };
+					createFolder(p: string): Promise<unknown>;
+					create(p: string, data: string): Promise<unknown>;
+					delete(f: unknown, force?: boolean): Promise<unknown>;
+				};
+			}).vault;
+			// Remove the default fixture entries so the screenshot shows ONLY the
+			// video-editing vault. Hidden folders (e.g. .obsidian) are left in place.
+			for (const child of [...vault.getRoot().children]) {
+				if (!child.name.startsWith(".")) {
+					await vault.delete(child, true).catch(() => undefined);
+				}
+			}
+			const files: Record<string, string> = {
+				"Projects/acme-summer-promo.md":
+					"# ACME — Summer Promo\n\n- Deliverables: 30s hero, 15s + 6s cutdowns, 9:16 reel\n- Timeline: Resolve `ACME_promo_v7`\n- Status: color pass ➜ client review\n",
+				"Projects/travel-vlog-iceland.md":
+					"# Travel Vlog — Iceland\n\n- 4K60 HLG, ~2.1 TB footage\n- Music: licensed (see Assets)\n- Cut: 12:40 ➜ target 9:00\n",
+				"Clients/acme-brand-guidelines.md":
+					"# ACME — Brand Guidelines\n\n- LUT: `ACME_house.cube`\n- Lower-thirds font: Sohne\n- Logo safe-area: 8%\n",
+				"Scripts/product-launch-voiceover.md":
+					"# VO — Product Launch\n\n> \"Meet the camera that keeps up with you...\"\n\n- Runtime: 0:45\n- Talent: Mara (booked Tue)\n",
+				"Shot Lists/wedding-riverside-shotlist.md":
+					"# Shot List — Riverside Wedding\n\n- [ ] Ceremony wide (A-cam)\n- [ ] Ring macro (100mm)\n- [ ] Golden-hour couple B-roll\n- [ ] Drone establishing\n",
+				"Editing/davinci-resolve-shortcuts.md":
+					"# Resolve Shortcuts\n\n- Blade: `B` · Ripple delete: `Shift+Del`\n- Retime: `R` · Dynamic zoom: `Alt+Z`\n- Power grade copy: middle-click node\n",
+				"Editing/color-grading-notes.md":
+					"# Color Notes\n\n- Base: Rec.709 @ 2.4 gamma\n- Skin: keep in the vector line\n- Halation on speculars (subtle)\n",
+				"Assets/music-licenses.md":
+					"# Music Licenses\n\n| Track | Source | License |\n|---|---|---|\n| Neon Drive | Artlist | ✔ commercial |\n| Slow Tide | Musicbed | ✔ per-project |\n",
+				"Assets/broll-inventory.md":
+					"# B-Roll Inventory\n\n- City / night / neon — 37 clips\n- Nature / water — 52 clips\n- Studio / product macro — 21 clips\n",
+				"Publishing/youtube-upload-checklist.md":
+					"# YouTube Upload Checklist\n\n- [ ] Thumbnail (3 A/B variants)\n- [ ] Chapters + end screen\n- [ ] Captions (.srt)\n- [ ] Pinned comment\n",
+				"Ideas/reel-hooks.md":
+					"# Reel Hooks\n\n- \"You're editing this the slow way.\"\n- 3 cuts in the first second\n- Pattern interrupt at 0:07\n",
+			};
+			const folders = new Set(Object.keys(files).map((p) => p.slice(0, p.lastIndexOf("/"))));
+			for (const dir of folders) {
+				if (!vault.getAbstractFileByPath(dir)) await vault.createFolder(dir).catch(() => undefined);
+			}
+			for (const [path, content] of Object.entries(files)) {
+				if (!vault.getAbstractFileByPath(path)) await vault.create(path, content).catch(() => undefined);
+			}
+		});
+
+		await browser.executeObsidian(async ({ app }, id) => {
+			await (app as unknown as { plugins: { plugins: Record<string, { revealStatusView(): Promise<void> }> } })
+				.plugins.plugins[id].revealStatusView(); // ensures a full-mode panel instance exists
 		}, PLUGIN_ID);
 
 		// Force Obsidian's DARK base theme so every screenshot is dark. Use the official
