@@ -26,6 +26,10 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	/** Cached legacy-cache doc count; probed once, then drives the legacy-wipe row. */
 	private legacyCount = 0;
 	private legacyProbed = false;
+	/** User asked to edit the connection section even though it is valid (keeps it open). */
+	private editConnection = false;
+	/** One-shot: run an index scan on open so the passphrase status is fresh, then re-render. */
+	private passProbed = false;
 
 	constructor(app: App, plugin: CouchDBSyncPlugin) {
 		super(app, plugin);
@@ -37,6 +41,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 
 	hide(): void {
 		this.panel.unmount();
+		// Re-probe passphrase status on the next open, and start collapsed if valid.
+		this.passProbed = false;
+		this.editConnection = false;
 	}
 
 	/**
@@ -107,6 +114,14 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 			},
 		});
 
+		// --- connection & encryption validity (drives the collapsible section) ---
+		const connOk = () => s.connectionVerified;
+		const passStatus = () => this.plugin.passphraseStatus(); // "empty" | "mismatch" | "ok"
+		const encOk = () => passStatus() === "ok";
+		const allOk = () => connOk() && encOk();
+		// Collapsed = everything valid and the user is not explicitly editing.
+		const collapsed = () => allOk() && !this.editConnection;
+
 		return [
 			// --- status panel (custom UI; owns its row entirely) ---
 			{
@@ -119,15 +134,90 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					el.addClass("couchdb-sync-panel-host");
 					this.panel.unmount();
 					this.panel.mount(el);
+					// One index scan on first open so the passphrase status (getDecryptStats)
+					// is fresh, then re-render once so the connection section collapses/expands
+					// on the real state instead of a first-paint guess. Guarded so update()
+					// (which re-runs this render) cannot loop.
+					if (!this.passProbed) {
+						this.passProbed = true;
+						void this.plugin
+							.getIndexReport()
+							.then(() => this.update())
+							.catch(() => undefined);
+					}
 					return () => this.panel.unmount();
 				},
 			},
 
-			// --- CouchDB connection ---
+			// --- collapsed summary: shown only when connection + encryption are valid ---
+			{
+				name: "Connection & encryption",
+				searchable: false,
+				visible: () => collapsed(),
+				render: (setting) => {
+					setting.settingEl.addClass("couchdb-sync-conn-ok");
+					setting.setName("Connection & encryption ✓");
+					setting.setDesc(
+						"Server connection verified and your passphrase decrypts your notes. Everything is set up."
+					);
+					setting.addButton((b) =>
+						b.setButtonText("Edit").onClick(() => {
+							this.editConnection = true;
+							this.update();
+						})
+					);
+				},
+			},
+
+			// --- Connection & encryption (one collapsible section) ---
+			// Shown only while something is unset/invalid or the user chose to edit; once the
+			// connection is verified AND the passphrase decrypts, it collapses to the green
+			// summary row above so it stops taking up space.
 			{
 				type: "group",
-				heading: "CouchDB connection",
+				heading: "Connection & encryption",
+				visible: () => !collapsed(),
 				items: [
+					// Status banner: red problems while invalid, or a "collapse" affordance when
+					// everything is valid but the user is editing.
+					{
+						name: "Connection status",
+						searchable: false,
+						render: (setting) => {
+							setting.settingEl.empty();
+							setting.settingEl.addClass("couchdb-sync-conn-bannerhost");
+							const problems: string[] = [];
+							if (!connOk()) {
+								problems.push(
+									"Server connection not verified — fill in the details below and press “Test connection”."
+								);
+							}
+							const ps = passStatus();
+							if (ps === "empty") problems.push("Set an encryption passphrase — it is required.");
+							else if (ps === "mismatch") {
+								problems.push(
+									"The encryption passphrase doesn't match the encrypted data on the server."
+								);
+							}
+							const banner = setting.settingEl.createDiv({ cls: "couchdb-sync-conn-banner" });
+							if (problems.length === 0) {
+								banner.addClass("couchdb-sync-conn-banner-ok");
+								banner.createSpan({ text: "✓ Connection verified and encryption passphrase OK." });
+								const btn = banner.createEl("button", {
+									text: "Collapse ▲",
+									cls: "couchdb-sync-rowbtn",
+								});
+								btn.onclick = () => {
+									this.editConnection = false;
+									this.update();
+								};
+							} else {
+								banner.addClass("couchdb-sync-conn-banner-err");
+								const ul = banner.createEl("ul");
+								for (const p of problems) ul.createEl("li", { text: p });
+							}
+						},
+					},
 					row("Server URL", "Full URL incl. protocol and port. Must be https for mobile and for encryption in transit.", (setting) =>
 						setting.addText((t) =>
 							t
@@ -173,7 +263,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 					}),
 					row(
 						"Test connection",
-						"Check the server URL, database and credentials. On success this also unlocks the Index status view (it stays hidden until you have proven the credentials).",
+						"Check the server URL, database and credentials. On success this unlocks the Index status view; if the passphrase also checks out, this section collapses.",
 						(setting) =>
 							setting.addButton((b) =>
 								b.setButtonText("Test").onClick(async () => {
@@ -186,20 +276,17 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 									if (res.ok) {
 										await this.plugin.markConnectionVerified();
 										this.panel.refresh(); // the index view is unlocked now
+										// A successful test ends "editing"; if the passphrase is also
+										// good the section now collapses on the next render.
+										this.editConnection = false;
+										await this.plugin.getIndexReport().catch(() => undefined);
+										this.update();
 									}
 								})
 							)
 					),
-				],
-			},
-
-			// --- Encryption ---
-			{
-				type: "group",
-				heading: "Encryption",
-				items: [
 					// Encryption is mandatory — there is deliberately no on/off toggle. The
-					// passphrase row is the single place that explains and controls it.
+					// passphrase lives here so connection + encryption are one setup step.
 					row(
 						"Encryption passphrase",
 						"Your notes are always end-to-end encrypted (AES-256-GCM). Use the same passphrase on every device — it's the only key to your notes, never leaves your device, and can't be recovered if you lose it.",
@@ -221,7 +308,21 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 										return;
 									}
 									const ok = await selfTest(s.passphrase).catch(() => false);
-									new Notice(ok ? "Encryption works ✓" : "Encryption self-test failed.");
+									if (!ok) {
+										new Notice("Encryption self-test failed.");
+										return;
+									}
+									// Re-scan the local cache with the current passphrase so its
+									// decrypt status is fresh, then reflect it and re-render (which
+									// collapses the section when the connection is also verified).
+									await this.plugin.getIndexReport().catch(() => undefined);
+									const ps = passStatus();
+									new Notice(
+										ps === "mismatch"
+											? "This passphrase does not match the encrypted data on the server."
+											: "Encryption passphrase OK ✓"
+									);
+									this.update();
 								})
 							);
 						}
