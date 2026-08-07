@@ -22,12 +22,22 @@ on:
   workflow_dispatch: {} # allow a manual run from the Actions tab
 
 concurrency:
-  group: auto-release
+  # Renamed from "auto-release" on purpose. On 2026-08-06 a GitHub runner outage
+  # left the push-triggered run for #20 stuck in "queued" forever; because it sat
+  # in the concurrency group with cancel-in-progress:false, the automatic release
+  # for later merges (#22, #23) had to be kicked off by hand. A fresh group name
+  # sidesteps that orphaned run (it lives in the old group) so pushes to main
+  # auto-release again, while the job timeout below stops any single run from
+  # hanging indefinitely.
+  group: auto-release-main
   cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    # A release run is short (build + publish). Cap it so a hung step can never
+    # occupy the concurrency group the way the 2026-08-06 outage did.
+    timeout-minutes: 20
     permissions:
       contents: write # create the release + push the version-bump commit
       id-token: write # mint the OIDC token Sigstore uses to sign the attestation
