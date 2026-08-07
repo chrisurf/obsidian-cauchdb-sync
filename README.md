@@ -173,8 +173,8 @@ Open **Settings → CouchDB Sync** and fill in the four things from Step 1:
 
 ### 🔑 Step 3: Choose your passphrase
 
-Leave **End-to-end encryption** on and type a **Passphrase**. Invent something
-long that you can write down — a short sentence works well.
+Type a **Passphrase**. Your notes are always end-to-end encrypted, so this is
+required — invent something long that you can write down; a short sentence works well.
 
 > ⚠️ **Write it down now.** The passphrase never reaches the server, which is
 > the whole point — but it also means nobody can reset it for you. And it must

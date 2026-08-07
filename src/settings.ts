@@ -197,21 +197,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				type: "group",
 				heading: "Encryption",
 				items: [
+					// Encryption is mandatory — there is deliberately no on/off toggle. The
+					// passphrase row is the single place that explains and controls it.
 					row(
-						"End-to-end encryption",
-						"Encrypt note content AND metadata — file paths, sizes and timestamps — at rest on the server (AES-256-GCM). Recommended; on by default. Changing this setting or the passphrase changes the storage format and requires a local wipe + fresh re-sync.",
-						(setting) =>
-							setting.addToggle((t) =>
-								t.setValue(s.e2eeEnabled).onChange(async (v) => {
-									s.e2eeEnabled = v;
-									await this.plugin.saveSettings();
-									this.update(); // show/hide the passphrase row
-								})
-							)
-					),
-					row(
-						"Passphrase",
-						"Shared secret. MUST be identical on every device. Never stored on the server.",
+						"Encryption passphrase",
+						"Your notes are always end-to-end encrypted (AES-256-GCM). Use the same passphrase on every device — it's the only key to your notes, never leaves your device, and can't be recovered if you lose it.",
 						(setting) => {
 							let input: HTMLInputElement | undefined;
 							setting.addText((t) => {
@@ -233,8 +223,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 									new Notice(ok ? "Encryption works ✓" : "Encryption self-test failed.");
 								})
 							);
-						},
-						{ visible: () => this.plugin.settings.e2eeEnabled }
+						}
 					),
 				],
 			},

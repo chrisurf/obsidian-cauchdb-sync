@@ -133,3 +133,24 @@ describe("migrateSettings (v2) — autoStart folded into syncEnabled", () => {
 		expect("autoStart" in s).toBe(false);
 	});
 });
+
+describe("migrateSettings (v3) — encryption is always on", () => {
+	it("forces e2eeEnabled on for a config that had it off", () => {
+		const s = merged({ e2eeEnabled: false });
+		const changed = migrateSettings(s, 2, CONFIG_DIR);
+		expect(changed).toBe(true);
+		expect(s.e2eeEnabled).toBe(true);
+	});
+
+	it("leaves an already-encrypted config unchanged at v3", () => {
+		const s = merged({ e2eeEnabled: true });
+		expect(migrateSettings(s, 2, CONFIG_DIR)).toBe(false);
+		expect(s.e2eeEnabled).toBe(true);
+	});
+
+	it("does not re-enable for configs already at v3 (respects the schema gate)", () => {
+		const s = merged({ e2eeEnabled: false });
+		expect(migrateSettings(s, 3, CONFIG_DIR)).toBe(false);
+		expect(s.e2eeEnabled).toBe(false);
+	});
+});
