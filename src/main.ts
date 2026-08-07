@@ -10,7 +10,7 @@ import {
 	VersionDoc,
 } from "./types";
 import { migrateSettings } from "./migrate";
-import { SyncDatabase } from "./database";
+import { RemoteScan, SyncDatabase } from "./database";
 import { SyncEngine, IndexReport, buildIndexReport, removeFromDb } from "./engine";
 import { CouchDBSyncSettingTab } from "./settings";
 import { SyncStatusView, VIEW_TYPE_SYNC_STATUS } from "./view";
@@ -49,6 +49,15 @@ const LEGACY_LOCAL_DB_NAME = "couchdb-sync-local"; // pre-vault-isolation defaul
  */
 const UNCLEAN_START_LIMIT = 3;
 
+/**
+ * How long a direct server scan is reused before the index report takes a fresh one.
+ * The panel refreshes every few seconds off the local cache; the true server state
+ * changes far more slowly and each scan is a network round-trip plus a decrypt of any
+ * new file doc, so a short cache keeps the "Server" column honest without hammering
+ * the server on every tick.
+ */
+const REMOTE_SCAN_TTL_MS = 15_000;
+
 function localDbName(settings: CouchDBSyncSettings): string {
 	return `${LOCAL_DB_PREFIX}-${settings.localDbId}`;
 }
@@ -80,6 +89,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 	 * stack full scans on top of each other.
 	 */
 	private reportInFlight: Promise<IndexReport | null> | null = null;
+	/**
+	 * Last direct scan of the REMOTE server, with the time it was taken. The index
+	 * report refreshes on a 3 s timer but a live server round-trip (allDocs + a decrypt
+	 * of each new file doc) is far heavier than reading the local cache, so it is
+	 * throttled to REMOTE_SCAN_TTL_MS and shared here between refreshes.
+	 */
+	private remoteScan: { at: number; scan: RemoteScan } | null = null;
+	private remoteScanInFlight: Promise<RemoteScan | undefined> | null = null;
 	/** guards the idle auto-resolver so overlapping refresh ticks don't stack it */
 	private resolvingIdle = false;
 	/** cached legacy-cache doc count (probed at most once per session) */
@@ -634,6 +651,9 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 	/** Reset the verified flag — required whenever serverUrl/dbName/username change. */
 	async invalidateConnection(): Promise<void> {
+		// A changed remote invalidates the cached server scan too, so the Server column
+		// never shows the previous server's state after the URL/db/user is edited.
+		this.remoteScan = null;
 		if (!this.settings.connectionVerified) return;
 		this.settings.connectionVerified = false;
 		await this.saveSettings();
@@ -803,7 +823,12 @@ export default class CouchDBSyncPlugin extends Plugin {
 
 	/** Build a fresh index report. Always go through getIndexReport (de-duped). */
 	private async computeIndexReport(): Promise<IndexReport | null> {
-		if (this.engine) return this.engine.getIndexReport();
+		// The true server state (throttled, NON-blocking). Returns the last known scan
+		// immediately and refreshes in the background — the local report must never wait
+		// on a network round-trip, so an unreachable server just leaves the Server column
+		// blank until the next refresh, instead of stalling the whole panel.
+		const remote = this.getRemoteScan();
+		if (this.engine) return this.engine.getIndexReport(remote);
 		if (!this.settings.serverUrl) return null; // not configured yet
 		// Don't expose cached doc paths/names to the user until they have proven
 		// they own the configured remote — otherwise typing random text into the
@@ -815,7 +840,45 @@ export default class CouchDBSyncPlugin extends Plugin {
 			const current = await originFingerprint(this.settings);
 			if (stored.fp !== current) return null; // mismatch -> hide
 		}
-		return buildIndexReport(this.app, this.settings, db);
+		return buildIndexReport(this.app, this.settings, db, undefined, remote);
+	}
+
+	/**
+	 * The last known scan of the true server state — returned SYNCHRONOUSLY and never
+	 * blocking on the network. When the cached scan is stale (or missing) a fresh scan
+	 * is kicked off in the background; its result is picked up by the next 3 s refresh.
+	 * This keeps the local report instant: an unreachable server leaves the Server
+	 * column blank for one refresh instead of stalling the whole panel.
+	 *
+	 * Returns undefined (and touches no network) unless the master switch is on with a
+	 * URL and verified credentials — the kill switch means "no network", and unverified
+	 * creds must not be probed automatically. scanRemote() reuses the engine's live
+	 * remote handle when present, so this never reconnects (and never kills) a running
+	 * live-sync feed.
+	 */
+	private getRemoteScan(): RemoteScan | undefined {
+		if (!this.settings.syncEnabled || !this.settings.serverUrl || !this.settings.connectionVerified) {
+			return undefined;
+		}
+		const now = Date.now();
+		const fresh = this.remoteScan && now - this.remoteScan.at < REMOTE_SCAN_TTL_MS;
+		if (!fresh && !this.remoteScanInFlight) {
+			// Refresh in the background; do NOT await it here.
+			this.remoteScanInFlight = this.getSharedDb()
+				.scanRemote()
+				.then((scan) => {
+					this.remoteScan = { at: Date.now(), scan };
+					return scan;
+				})
+				.catch((e) => {
+					console.warn("[couchdb-sync] remote scan failed", e);
+					return this.remoteScan?.scan; // keep the last good scan
+				})
+				.finally(() => {
+					this.remoteScanInFlight = null;
+				});
+		}
+		return this.remoteScan?.scan; // last known state, possibly undefined on first run
 	}
 
 	/** UI helper: state of the origin fingerprint for the current settings. */
