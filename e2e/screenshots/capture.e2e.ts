@@ -44,6 +44,20 @@ describe("CouchDB Sync — documentation screenshots (prototype)", function () {
 			await plugin.saveSettings();
 			await plugin.revealStatusView(); // ensures a full-mode panel instance exists
 		}, PLUGIN_ID);
+
+		// Force Obsidian's DARK base theme so every screenshot is dark. Use the official
+		// changeTheme() when present, and set the body theme classes directly as a
+		// guarantee (our panel reads --background-*/--color-* which resolve per theme).
+		await browser.executeObsidian(async ({ app }) => {
+			const a = app as unknown as { changeTheme?: (t: string) => void };
+			try {
+				a.changeTheme?.("obsidian"); // "obsidian" = dark, "moonstone" = light
+			} catch {
+				/* fall back to the class toggle below */
+			}
+			document.body.classList.remove("theme-light");
+			document.body.classList.add("theme-dark");
+		});
 	});
 
 	/**
