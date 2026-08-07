@@ -1254,9 +1254,5 @@
 	font-style: italic;
 }
 
-.couchdb-sync-openpanel {
-	margin-top: 0.2em;
-}
-
 /* The store and stat grids now wrap responsively via their base rules (used by both
    the sidebar view and the settings tab), so no sidebar-specific override is needed. */
