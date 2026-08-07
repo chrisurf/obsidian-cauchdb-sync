@@ -10,12 +10,11 @@
 
 # ☁️ CouchDB Sync for Obsidian
 
-> [!WARNING]
-> **Alpha — under active development.** This is an early **alpha** release. It
-> works and is genuinely useful, but it still has **known bugs** and rough edges,
-> and behaviour may change between versions. Please keep backups of important
-> vaults and expect the occasional hiccup. Bug reports are very welcome — thank
-> you for helping shape it. 🙏
+> [!IMPORTANT]
+> **Beta.** It works well and is genuinely useful for everyday syncing, but it's
+> still maturing and behaviour may change between versions. A little caution is
+> wise: as with any sync tool, please keep backups of important vaults. Bug
+> reports and feedback are very welcome — thank you for helping shape it. 🙏
 
 Keep the same notes on every device — on your own server, readable only by you.
 
@@ -62,6 +61,15 @@ blobs — no titles, no folder names, no hints.
 
 ### 📊 A status panel that tells you the truth
 
+<p align="center">
+  <img src="./assets/panel-desktop.png" alt="CouchDB Sync status panel — this device, local cache and server all in sync" width="100%" />
+</p>
+
+See all three places your notes live at a glance — **this device**, the on-device
+**local cache**, and the **server** — with the exact delta between each pair. When
+they match it says so; when the server can't be reached it says *that* (e.g. a login
+error) instead of pretending everything is fine.
+
 Open it from the status bar and see how many files are in sync (`1,284 / 1,284 ·
 100%`) plus a folder tree of *every* file, colour-coded:
 
@@ -76,6 +84,13 @@ Open it from the status bar and see how many files are in sync (`1,284 / 1,284 �
 Folders show the most urgent state inside them, so a green folder really means
 "everything in here is fine". Files being transferred right now shimmer and show
 their progress.
+
+<p align="center">
+  <img src="./assets/panel-mobile.png" alt="The same status panel on a phone" width="360" />
+</p>
+
+The same panel on mobile — every store, every file, and the same per-file actions
+(a `⋯` menu on each row: upload, download, resolve, view history, and more).
 
 ### 🕰️ Every version, kept
 
@@ -158,8 +173,8 @@ Open **Settings → CouchDB Sync** and fill in the four things from Step 1:
 
 ### 🔑 Step 3: Choose your passphrase
 
-Leave **End-to-end encryption** on and type a **Passphrase**. Invent something
-long that you can write down — a short sentence works well.
+Type a **Passphrase**. Your notes are always end-to-end encrypted, so this is
+required — invent something long that you can write down; a short sentence works well.
 
 > ⚠️ **Write it down now.** The passphrase never reaches the server, which is
 > the whole point — but it also means nobody can reset it for you. And it must
@@ -229,22 +244,19 @@ Available from Obsidian's command palette (`Ctrl/Cmd + P`).
 | Database name | `obsidian` | Which database on that server to use |
 | Username / Password | _(empty)_ | Your login for the server |
 | Test connection | — | Checks all of the above, and unlocks the status view |
-| End-to-end encryption | on | Locks note content *and* file names, sizes and dates before upload |
-| Passphrase | _(empty)_ | Your secret. Must be identical on every device |
+| Encryption passphrase | _(empty)_ | **Required.** Notes are always end-to-end encrypted (AES-256-GCM); use the same passphrase on every device |
 | Conflict strategy | newest wins | Who wins when two devices edit the same note |
 | This device is the master | off | With *master wins*: this device's version always wins. Turn on for exactly one device |
-| Live sync (real-time) | on | Keeps changes flowing continuously. Off = only when you press **Force sync** |
 | Sync hidden files | off | Also sync `.obsidian` (your settings, themes, plugins), `.git`, etc. |
 | …except these | a safe default list | With hidden sync on: which hidden folders to leave out |
 | …but still sync these | _(empty)_ | With hidden sync off: which hidden folders to include anyway |
-| Download from server | — | One-way catch-up: pull everything, upload nothing |
+| Download from server | — | **Server wins here:** overwrite this device's files with the server's version and fetch anything missing. Uploads nothing; local-only files are kept; any overwritten edit is saved to history |
+| Upload to server | — | **This device wins on the server:** overwrite the server's copy of every file with this device's, and add local-only files. Server-only files are kept (not deleted). Affects every other device |
 | Wipe local cache | — | Deletes this device's copy. The server is not touched |
-| Forget local cache when plugin is disabled | off | Privacy mode: destroy the local copy whenever you turn the plugin off |
 
-> **Changing encryption or the passphrase changes how everything is stored.** If
-> you switch encryption on or off, or change the passphrase, wipe the local
-> cache and start from a fresh, empty database — otherwise old and new notes get
-> mixed and neither side can read the other.
+> **Changing the passphrase changes how everything is stored.** If you change the
+> passphrase, wipe the local cache and start from a fresh, empty database —
+> otherwise old and new notes get mixed and neither side can read the other.
 
 ---
 
@@ -261,9 +273,8 @@ which pieces repeat, and when versions were created. Nothing that reveals a
 title, a folder, or a word you wrote.
 
 **On this device** — the local cache keeps some information in the clear (file
-paths, sizes, fingerprints) so the status panel can work offline. Turn on
-**Forget local cache when plugin is disabled** if you want that removed whenever
-the plugin is off.
+paths, sizes, fingerprints) so the status panel can work offline. Use **Wipe
+local cache** any time you want that removed; it only ever touches this device.
 
 **Your credentials** — your server password and your passphrase are stored in
 plain text in the plugin's own `data.json` file inside your vault, exactly as

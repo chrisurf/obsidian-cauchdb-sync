@@ -3,6 +3,7 @@ import type CouchDBSyncPlugin from "./main";
 import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
 import { IndexPanel } from "./indexpanel";
+import { confirm } from "./history";
 
 /**
  * The plugin's settings tab: the sync status panel at the top, then the settings
@@ -197,21 +198,11 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				type: "group",
 				heading: "Encryption",
 				items: [
+					// Encryption is mandatory — there is deliberately no on/off toggle. The
+					// passphrase row is the single place that explains and controls it.
 					row(
-						"End-to-end encryption",
-						"Encrypt note content AND metadata — file paths, sizes and timestamps — at rest on the server (AES-256-GCM). Recommended; on by default. Changing this setting or the passphrase changes the storage format and requires a local wipe + fresh re-sync.",
-						(setting) =>
-							setting.addToggle((t) =>
-								t.setValue(s.e2eeEnabled).onChange(async (v) => {
-									s.e2eeEnabled = v;
-									await this.plugin.saveSettings();
-									this.update(); // show/hide the passphrase row
-								})
-							)
-					),
-					row(
-						"Passphrase",
-						"Shared secret. MUST be identical on every device. Never stored on the server.",
+						"Encryption passphrase",
+						"Your notes are always end-to-end encrypted (AES-256-GCM). Use the same passphrase on every device — it's the only key to your notes, never leaves your device, and can't be recovered if you lose it.",
 						(setting) => {
 							let input: HTMLInputElement | undefined;
 							setting.addText((t) => {
@@ -233,8 +224,7 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 									new Notice(ok ? "Encryption works ✓" : "Encryption self-test failed.");
 								})
 							);
-						},
-						{ visible: () => this.plugin.settings.e2eeEnabled }
+						}
 					),
 				],
 			},
@@ -280,19 +270,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				type: "group",
 				heading: "Sync",
 				items: [
-					row(
-						"Live sync (real-time)",
-						"Keep changes flowing continuously in both directions. Off = sync only when you press “Force sync”. Takes effect immediately.",
-						(setting) =>
-							setting.addToggle((t) =>
-								t.setValue(s.liveSync).onChange(async (v) => {
-									s.liveSync = v;
-									await this.plugin.saveSettings();
-									if (v) await this.plugin.restartSync(); // start live now
-									else await this.plugin.stopSync(); // stop continuous sync now
-								})
-							)
-					),
+					// Live sync (real-time, both directions) is always on — there is no toggle
+					// to turn it off. Use the master Sync switch to stop syncing entirely.
 					row(
 						"Sync hidden files",
 						`Hidden files are things like ${cfg} (your settings & plugins) and .git. ` +
@@ -348,15 +327,44 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				items: [
 					row(
 						"Download from server",
-						"Pull the server's state to this device WITHOUT uploading local changes, then " +
-							"materialize anything that is in the local index but missing on disk. " +
-							"Useful on a follower device, after a Google Drive desync, or to force the master's state.",
+						"Make the SERVER win on this device: write the server's version of every file to " +
+							"disk, overwriting a divergent local copy and fetching anything missing. Nothing " +
+							"is uploaded, and local-only files are kept. Any overwritten local edit is saved " +
+							"to history first. Useful on a follower device or to force the master's state.",
 						(setting) =>
 							setting.addButton((b) =>
 								b.setButtonText("Download only").onClick(async () => {
 									new Notice("Downloading from server…");
 									await this.plugin.downloadFromServer();
 								})
+							)
+					),
+					row(
+						"Upload to server",
+						"Make THIS DEVICE win on the server: overwrite the server's version of every file " +
+							"with this device's copy, and add any local-only files. Server-only files are kept " +
+							"(this does not delete). This changes what every other device sees, so use it when " +
+							"this vault is the one you trust — e.g. after a desync.",
+						(setting) =>
+							setting.addButton((b) =>
+								b
+									.setDestructive()
+									.setButtonText("Upload to server")
+									.onClick(() => {
+										confirm(this.app, {
+											title: "Upload everything to the server?",
+											body:
+												"This overwrites the server's copy of every file with this device's " +
+												"version. Other devices will pick up this state on their next sync. " +
+												"Server-only files are kept, not deleted. Continue?",
+											cta: "Upload to server",
+											danger: true,
+											onConfirm: async () => {
+												new Notice("Uploading to server…");
+												await this.plugin.uploadToServer();
+											},
+										});
+									})
 							)
 					),
 					row(
@@ -372,22 +380,6 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 										new Notice("Local cache wiped. Press “Force sync” or “Download only” to rebuild.");
 										this.update();
 									})
-							)
-					),
-					row(
-						"Forget local cache when plugin is disabled",
-						"Privacy mode. When you disable or uninstall the plugin, the local PouchDB " +
-							"is destroyed. The local cache always keeps some cleartext metadata on this " +
-							"device — the per-file sync-state index holds vault paths, sizes and hashes " +
-							"even with E2EE on (E2EE protects what reaches the server, not the local " +
-							"cache). Trade-off: re-enabling forces a full re-download from the server. " +
-							"Off by default.",
-						(setting) =>
-							setting.addToggle((t) =>
-								t.setValue(s.forgetCacheOnDisable).onChange(async (v) => {
-									s.forgetCacheOnDisable = v;
-									await this.plugin.saveSettings();
-								})
 							)
 					),
 					// Legacy cleanup: before vault isolation, every vault on the machine
