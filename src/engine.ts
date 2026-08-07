@@ -399,20 +399,7 @@ export class SyncEngine {
 		// the whole vault is re-indexed and uploaded).
 		if (this.settings.liveSync) {
 			// continuous mode: watch the vault, poll hidden files, replicate live
-			this.attachVaultEvents();
-			if (this.settings.syncHidden) {
-				this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
-			}
-			// Self-healing slow path in BOTH directions: the live feed and vault events
-			// can be delayed or missed (a remote file waiting behind a big local upload;
-			// a mobile vault event dropped across an app suspension). A periodic sweep
-			// pulls new remote files to disk first, then re-pushes local changes the
-			// events dropped. See RECONCILE_INTERVAL_MS.
-			this.reconcileTimer = window.setInterval(
-				() => void this.reconcile(),
-				RECONCILE_INTERVAL_MS
-			);
-			this.startLiveSync();
+			this.beginLiveWatch();
 			void this.runInitialIndex();
 		} else {
 			// "sync on command" mode: one-shot pass, then go idle. No watching/polling.
@@ -421,6 +408,34 @@ export class SyncEngine {
 				if (!this.aborted) await this.replicateOnce();
 			})();
 		}
+	}
+
+	/**
+	 * Start (or resume) continuous live sync: watch vault events, poll hidden files,
+	 * run the periodic self-healing reconcile, and open the live replication feed.
+	 * Extracted so the one-shot bulk actions (Download/Upload from/to server) can hand
+	 * back to live sync when their forced pass is done, instead of leaving the engine
+	 * inert while the status card still reads "SYNC ON". Idempotent guards keep a second
+	 * call from stacking a duplicate feed or timer.
+	 */
+	private beginLiveWatch(): void {
+		if (this.aborted || !this.settings.liveSync) return;
+		if (this.eventRefs.length === 0) this.attachVaultEvents();
+		if (this.settings.syncHidden && this.hiddenTimer === null) {
+			this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
+		}
+		// Self-healing slow path in BOTH directions: the live feed and vault events can be
+		// delayed or missed (a remote file waiting behind a big local upload; a mobile
+		// vault event dropped across an app suspension). A periodic sweep pulls new remote
+		// files to disk first, then re-pushes local changes the events dropped. See
+		// RECONCILE_INTERVAL_MS.
+		if (this.reconcileTimer === null) {
+			this.reconcileTimer = window.setInterval(
+				() => void this.reconcile(),
+				RECONCILE_INTERVAL_MS
+			);
+		}
+		if (!this.syncHandler) this.startLiveSync();
 	}
 
 	private async runInitialIndex(): Promise<void> {
@@ -693,18 +708,23 @@ export class SyncEngine {
 		}
 	}
 
-	/** Connect and pull the server state once, without uploading. For followers. */
+	/** Connect and pull the server state once (server wins), then resume live sync. */
 	async startDownloadOnly(): Promise<void> {
 		this.setStatus(SYNC_STATE.CONNECTING);
 		this.db.connectRemote();
 		await this.loadSyncState();
 		if (this.aborted) return;
-		// background, then idle: pure download — no vault events, no upload, no live
 		void (async () => {
 			await this.cleanupTempFiles();
 			await this.downloadOnce();
 			if (!this.aborted) {
 				this.onReady();
+				// The forced one-shot pass is done. Hand back to continuous live sync so
+				// later edits keep propagating — otherwise the engine would sit inert while
+				// the status card still reads "SYNC ON" (the "sync stopped after Download"
+				// trap). initialIndexDone gates the periodic sweep, which is now safe to run.
+				this.initialIndexDone = true;
+				this.beginLiveWatch();
 				this.settle(SYNC_STATE.SYNCED);
 			}
 		})();
@@ -739,20 +759,24 @@ export class SyncEngine {
 	}
 
 	/**
-	 * "Server wins" write pass for the explicit Download action: write the server's
-	 * version of every file doc to disk, overwriting a divergent local copy and
-	 * creating a missing one. Unlike materializeRemoteOnly (which deliberately skips
-	 * files already on disk, for the everyday two-way sync), this one re-applies the
-	 * server doc even when the path exists locally — so a file edited on this device
-	 * but never pushed is replaced by the server's version. That local edit is not
-	 * lost: applyRemoteChange preserves it to history first, and when the disk already
-	 * equals the server it is a no-op. Local-only files are left in place; nothing is
-	 * uploaded or deleted.
+	 * "Server wins" write pass for the explicit Download action: make the disk match the
+	 * server for EVERY file doc — write the server's version (overwriting a divergent
+	 * local copy, creating a missing one) and, crucially, apply the server's DELETIONS
+	 * (trash a file the server tombstoned). Unlike materializeRemoteOnly (which
+	 * deliberately skips files already on disk, for the everyday two-way sync), this one
+	 * re-applies the server doc even when the path exists locally — so a file edited on
+	 * this device but never pushed is replaced by the server's version, and a file
+	 * deleted on the server is removed here too. Overwritten local edits are preserved
+	 * to history first, deletions go to the vault trash (recoverable), and when the disk
+	 * already matches it is a no-op. Local-only files (no server doc) are left in place;
+	 * nothing is uploaded.
 	 */
 	private async overwriteAllFromServer(): Promise<void> {
 		let docs: FileDoc[];
 		try {
-			docs = (await this.db.getAll()).filter((d) => !d.deleted);
+			// Include tombstones: applyRemoteChange trashes the on-disk file for a deleted
+			// doc, which is how "Download from server" propagates a remote deletion to disk.
+			docs = await this.db.getAll();
 		} catch (e) {
 			if (!this.aborted) this.fail("scanning for downloads", e);
 			return;
@@ -786,12 +810,16 @@ export class SyncEngine {
 		this.db.connectRemote();
 		await this.loadSyncState();
 		if (this.aborted) return;
-		// background, then idle: pure upload — no vault events, no live feed
 		void (async () => {
 			await this.cleanupTempFiles();
 			await this.uploadOnce();
 			if (!this.aborted) {
 				this.onReady();
+				// The forced one-shot pass is done. Hand back to continuous live sync so
+				// later edits keep propagating instead of the engine sitting inert while the
+				// status card still reads "SYNC ON" (the "sync stopped after Upload" trap).
+				this.initialIndexDone = true;
+				this.beginLiveWatch();
 				this.settle(SYNC_STATE.SYNCED);
 			}
 		})();
@@ -1014,6 +1042,10 @@ export class SyncEngine {
 			// sweep re-pushing our own. This is the "check the remote for new files often
 			// and prioritize them" the live feed can be too busy to do promptly.
 			await this.materializeRemoteOnly();
+			// stranded REMOTE deletes: remove disk files the server tombstoned but whose
+			// delete change-event we never applied (dropped on a mobile suspend, or pulled
+			// while the engine was momentarily inert). Symmetric to reconcileLocalDeletes.
+			await this.reconcileRemoteDeletes();
 			// stranded creates/edits: re-push anything whose disk stat drifted from state
 			await this.indexLocalFiles();
 			// stranded deletes: tombstone tracked files that vanished with no delete event
@@ -1042,6 +1074,59 @@ export class SyncEngine {
 			if (this.aborted) return;
 			if (isHidden(path) || this.skip(path) || onDisk.has(path)) continue;
 			if (!(await adapter.exists(path))) await this.handleLocalDelete(path);
+		}
+	}
+
+	/**
+	 * Apply remote DELETIONS the live feed may have missed: a file the server tombstoned
+	 * (a deleted doc in the local cache) that is still on this device's disk should be
+	 * removed. The delete change-event can be dropped across a mobile app suspension, or
+	 * the tombstone can be pulled while no feed is materializing changes — leaving the
+	 * file stuck as "only on disk (not cached)" forever, which is the reported symptom.
+	 *
+	 * Guarded so it never eats a fresh local (re)creation: the file is trashed ONLY when
+	 * we still have a sync record for it AND its on-disk stat matches that record (i.e.
+	 * it is the same copy the server deleted, unchanged since). A file whose content
+	 * diverged is treated as a local edit and left for indexLocalFiles to push, which
+	 * resurrects it — the same "local (re)creation beats a remote tombstone" rule live
+	 * sync already applies.
+	 */
+	private async reconcileRemoteDeletes(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		let docs: FileDoc[];
+		try {
+			docs = await this.db.getAll();
+		} catch (e) {
+			if (!this.aborted) this.fail("scanning for remote deletes", e);
+			return;
+		}
+		for (const doc of docs) {
+			if (this.aborted) return;
+			if (!doc.deleted) continue;
+			const path = doc.path;
+			if (this.skip(path)) continue;
+			const rec = this.syncState.get(path);
+			if (!rec) continue; // never synced here → not ours to delete (a local-only file)
+			const hidden = isHidden(path);
+			let cur: { mtime: number; size: number } | null = null;
+			if (hidden) {
+				if (!(await adapter.exists(path))) continue;
+				const st = await adapter.stat(path);
+				if (st && st.type === "file") cur = { mtime: st.mtime, size: st.size };
+			} else {
+				const f = this.app.vault.getAbstractFileByPath(path);
+				if (f instanceof TFile) cur = { mtime: f.stat.mtime, size: f.stat.size };
+			}
+			if (!cur) continue; // not on disk → nothing to remove
+			// Diverged from what we last synced → a local (re)creation/edit; keep it and let
+			// the push side resurrect it rather than silently deleting the user's content.
+			if (cur.mtime !== rec.mtime || cur.size !== rec.size) continue;
+			try {
+				await this.applyRemoteChange(doc); // deleted branch → trashes the file
+			} catch (e) {
+				this.fail(`applying remote delete of ${path}`, e);
+			}
+			await this.yieldToUi();
 		}
 	}
 
