@@ -86,6 +86,18 @@ export class IndexPanel {
 	private treeSig = "";
 	private openSections = new Set<string>();
 	/**
+	 * "full" (the right-sidebar panel) shows everything; "compact" (the settings tab)
+	 * shows only the high-level status card + store widgets, with a button into the
+	 * full panel — so the settings stay short and the details live in one place.
+	 */
+	private readonly mode: "full" | "compact";
+	/**
+	 * Section ids whose open/closed default has already been seeded this mount. A store
+	 * tree opens by default only the FIRST time it is seen (when it needs attention);
+	 * afterwards the user's own toggle (persisted in openSections) wins.
+	 */
+	private autoSeeded = new Set<string>();
+	/**
 	 * Bumped whenever the index-status elements are rebuilt (`display()`) or the tab
 	 * is hidden. A load that started against an older generation holds references to
 	 * elements that are now detached from the document — it must neither write to
@@ -106,9 +118,10 @@ export class IndexPanel {
 	 */
 	private lastReport: IndexReport | null = null;
 
-	constructor(plugin: CouchDBSyncPlugin) {
+	constructor(plugin: CouchDBSyncPlugin, mode: "full" | "compact" = "full") {
 		this.plugin = plugin;
 		this.app = plugin.app;
+		this.mode = mode;
 	}
 
 	/** Render into (and take ownership of) the given host element. */
@@ -159,6 +172,8 @@ export class IndexPanel {
 	private renderIndexStatus(root: HTMLElement): void {
 		// A fresh element set invalidates every load still running against the old one.
 		this.renderGen++;
+		// A fresh mount re-evaluates each store section's default open/closed state.
+		this.autoSeeded.clear();
 
 		// --- status card: live status + summary + legend in one visual block ---
 		const card = root.createDiv({ cls: "couchdb-sync-card" });
@@ -543,10 +558,11 @@ export class IndexPanel {
 		// Renderable from here on — remember it so a tab rebuild can re-paint at once.
 		this.lastReport = report;
 
-		// ---- single source of truth: classify every file into exactly one state ----
-		// Each file gets the most severe state that applies (see SEVERITY). The same
-		// map drives the summary, the lists below, and the tree — so they can never
-		// disagree.
+		// ---- single source of truth: classify every path into exactly one state ----
+		// Each path gets the most severe state that applies (see SEVERITY). The same
+		// map drives the summary, the widgets, the attention list and the trees — so
+		// they can never disagree. "serverOnly" (on the server, not even cached) is
+		// classified like "remote": something this device does not yet have.
 		const stateByPath = new Map<string, FileState>();
 		const setState = (p: string, s: FileState) => {
 			const cur = stateByPath.get(p);
@@ -554,6 +570,7 @@ export class IndexPanel {
 		};
 		for (const p of report.inSync) setState(p, "synced");
 		for (const p of report.dbOnly) setState(p, "remote");
+		for (const p of report.serverOnly ?? []) setState(p, "remote");
 		for (const p of report.localOnly) setState(p, "local");
 		for (const p of report.drift) setState(p, "drift");
 		for (const p of report.conflicts) setState(p, "conflict");
@@ -572,7 +589,6 @@ export class IndexPanel {
 		for (const [p, s] of stateByPath) groups[s].push(p);
 		for (const k of Object.keys(groups) as FileState[]) groups[k].sort((a, b) => a.localeCompare(b));
 
-		const allPaths = [...stateByPath.keys()].sort((a, b) => a.localeCompare(b));
 		// the summary counts only SYNCABLE files; excluded are informational
 		const syncTotal = SYNCABLE.reduce((n, s) => n + groups[s].length, 0);
 		const pending = syncTotal - groups.synced.length;
@@ -586,124 +602,75 @@ export class IndexPanel {
 			summary.addClass("couchdb-sync-summary-pending");
 			summary.setText(`${groups.synced.length} / ${syncTotal} files (${pct}%) · ${pending} pending`);
 		}
-		counts.setText(`This device: ${report.vaultCount} files · Database: ${report.dbCount} files`);
 		// className was just reset above, so re-apply the activity marker.
 		this.markSummaryActivity();
 
-		// legend (in the card, above the tree) — actionable items are clickable
-		const legendBox = this.legendEl;
-		if (legendBox) {
-			legendBox.empty();
-			const p = this.plugin;
-			const refreshAfter = async () => {
-				this.driftSig = "";
-				this.treeSig = "";
-				await this.loadIndex(true);
-			};
+		// ---- store cards (This device / Local cache / Server) + the two deltas ----
+		this.renderStores(counts, report);
 
-			// "total" is the sum of every chip shown, INCLUDING excluded when the toggle
-			// reveals them — so it always equals the Sync-state tree count and moves with
-			// the toggle. (The "X / Y in sync" summary above stays syncable-only: an
-			// excluded file is deliberately not synced, so it must not read as "pending".)
-			const totalItem = legendBox.createSpan({ cls: "couchdb-sync-legend-total" });
-			totalItem.createSpan({ text: `${allPaths.length}`, cls: "couchdb-sync-legend-count" });
-			totalItem.createSpan({ text: "total", cls: "couchdb-sync-legend-label" });
+		// ---- status counters as small, actionable widgets ----
+		this.renderStatWidgets(groups);
 
-			type LegendAction = { tooltip: string; busyLabel: string; run: (paths: string[]) => Promise<void> };
-			const mk = (state: FileState, label: string, count: number, action?: LegendAction) => {
-				if (count === 0 && state === "excluded") return;
-				// An empty group has nothing to act on, so it must not LOOK actionable:
-				// no button styling, no pointer cursor, no tooltip promising work. A
-				// control that invites a click and then does nothing reads as a broken
-				// plugin — which is exactly how the "0 synced / Sync all now" entry read.
-				const act = count > 0 ? action : undefined;
-				const item = legendBox.createSpan({
-					cls: `couchdb-sync-legend-item couchdb-sync-state-${state}` + (act ? " couchdb-sync-legend-btn" : ""),
-				});
-				if (act) item.ariaLabel = act.tooltip;
-				item.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${state}` });
-				item.createSpan({ text: `${count}`, cls: "couchdb-sync-legend-count" });
-				const labelEl = item.createSpan({ text: label, cls: "couchdb-sync-legend-label" });
-				if (act) {
-					item.onclick = async () => {
-						item.classList.add("couchdb-sync-legend-busy");
-						const origLabel = labelEl.getText();
-						labelEl.setText(act.busyLabel);
-						try {
-							await act.run(groups[state]);
-							new Notice(`CouchDB Sync: ${act.busyLabel.replace("…", "")} ${count} file(s).`);
-						} catch (e) {
-							new Notice(`CouchDB Sync: error — ${e instanceof Error ? e.message : String(e)}`);
-						} finally {
-							labelEl.setText(origLabel);
-							item.classList.remove("couchdb-sync-legend-busy");
-							await refreshAfter();
-						}
-					};
-				}
-			};
-
-			const runEach = (fn: (path: string) => Promise<unknown>) =>
-				async (paths: string[]) => { for (const q of paths) await fn(q); };
-
-			mk("synced", "synced", groups.synced.length, {
-				tooltip: "Sync all now",
-				busyLabel: "Syncing…",
-				run: runEach((path) => p.forceSyncPath(path)),
+		// Settings shows only the high-level card; the details (attention list + trees)
+		// live in the full side panel, so the settings tab stays short and uncluttered.
+		if (this.mode === "compact") {
+			driftBox.empty();
+			const open = driftBox.createEl("button", {
+				text: "Open full sync panel →",
+				cls: "couchdb-sync-rowbtn couchdb-sync-openpanel",
 			});
-			mk("local", "local", groups.local.length, {
-				tooltip: "Upload all to server",
-				busyLabel: "Uploading…",
-				run: runEach((path) => p.takeLocalPath(path)),
-			});
-			mk("remote", "remote", groups.remote.length, {
-				tooltip: "Download all to this device",
-				busyLabel: "Downloading…",
-				run: runEach((path) => p.takeRemotePath(path)),
-			});
-			const strategyLabel = this.plugin.settings.conflictStrategy === "master"
-				? "master device wins" : "use newest";
-			mk("drift", "differs", groups.drift.length, {
-				tooltip: `Resolve all (${strategyLabel})`,
-				busyLabel: "Resolving…",
-				run: runEach((path) => p.resolveByStrategyPath(path)),
-			});
-			mk("conflict", "conflict", groups.conflict.length, {
-				tooltip: `Resolve all conflicts (${strategyLabel})`,
-				busyLabel: "Resolving…",
-				run: runEach((path) => p.resolveByStrategyPath(path)),
-			});
-			mk("excluded", "excluded", groups.excluded.length);
+			open.onclick = () => void this.plugin.revealStatusView();
+			treeBox.empty();
+			this.excludedToggleEl?.empty();
+			this.driftSig = this.treeSig = "";
+			return;
 		}
 
 		// ---- save open/closed state of all <details> before rebuilding ----
 		this.saveOpenState(driftBox);
 		this.saveOpenState(treeBox);
 
-		// ---- per-state lists, most urgent first (same colours as the tree) ----
-		const listSig = JSON.stringify([groups.conflict, groups.drift, groups.local, groups.remote]);
-		if (force || listSig !== this.driftSig) {
-			this.driftSig = listSig;
+		// ---- Needs attention: one collapsible section, capped ----
+		const attnSig = JSON.stringify([groups.conflict, groups.drift, groups.local, groups.remote]);
+		if (force || attnSig !== this.driftSig) {
+			this.driftSig = attnSig;
 			driftBox.empty();
-			this.renderStateList(driftBox, "conflict", "Conflicts", groups.conflict);
-			this.renderStateList(driftBox, "drift", "Differs", groups.drift);
-			this.renderStateList(driftBox, "local", "Local only", groups.local);
-			this.renderStateList(driftBox, "remote", "Remote only", groups.remote);
+			this.renderNeedsAttention(driftBox, groups);
 			this.restoreOpenState(driftBox);
 		}
 
-		// ---- tree: the complete file set (this device + database) ----
-		const treeSig = JSON.stringify(allPaths.map((p) => [p, stateByPath.get(p)]));
+		// ---- three stacked, collapsible store trees (Disk / Local cache / Server) ----
+		const showExcluded = this.plugin.settings.showExcluded;
+		const diskTreePaths = showExcluded
+			? [...new Set([...report.diskPaths, ...report.excluded])].sort((a, b) => a.localeCompare(b))
+			: report.diskPaths;
+		const treeSig = JSON.stringify([
+			diskTreePaths,
+			report.allDbPaths,
+			report.serverPaths ?? null,
+			report.serverReachable ?? null,
+			report.serverError ?? null,
+			[...stateByPath.entries()],
+		]);
 		if (force || treeSig !== this.treeSig) {
 			this.treeSig = treeSig;
 			treeBox.empty();
-			const tree = treeBox.createEl("details", { cls: "couchdb-sync-section" });
-			tree.dataset.sectionId = "sync-tree";
-			const treeSummary = tree.createEl("summary", { cls: "couchdb-sync-section-header" });
-			treeSummary.createSpan({ text: "Sync state" });
-			treeSummary.createSpan({ text: `${allPaths.length}`, cls: "couchdb-sync-section-count" });
-			const body = tree.createDiv({ cls: "couchdb-sync-tree" });
-			this.renderTree(body.createDiv(), allPaths, stateByPath);
+			this.renderStoreTree(treeBox, "store-disk", "Disk (Vault)", "A", diskTreePaths, stateByPath, {});
+			const cacheEmptyRebuild =
+				report.allDbPaths.length === 0 &&
+				(report.diskPaths.length > 0 || (report.serverPaths?.length ?? 0) > 0);
+			this.renderStoreTree(treeBox, "store-cache", "Local cache", "B", report.allDbPaths, stateByPath, {
+				emptyRebuild: cacheEmptyRebuild,
+			});
+			this.renderStoreTree(
+				treeBox,
+				"store-server",
+				"Remote server (CouchDB)",
+				"C",
+				report.serverPaths ?? [],
+				stateByPath,
+				{ serverReachable: report.serverReachable, serverError: report.serverError }
+			);
 			this.restoreOpenState(treeBox);
 		}
 
@@ -716,7 +683,7 @@ export class IndexPanel {
 					.setName(`Show ${report.excluded.length} excluded hidden file(s)`)
 					.setDesc(
 						`Hidden files (dot-folders like ${this.plugin.app.vault.configDir} or .git) that are ` +
-						"skipped by your sync rules. Turn on to reveal them in the tree above so you " +
+						"skipped by your sync rules. Turn on to reveal them in the Disk tree above so you " +
 						"can sync individual files once."
 					)
 					.addToggle((t) =>
@@ -726,14 +693,275 @@ export class IndexPanel {
 							// showExcluded is a pure DISPLAY filter over the same report — the
 							// database contents did not change. Re-render the cached report
 							// instead of calling loadIndex(), which would re-scan and re-decrypt
-							// every doc just to hide/show rows. This keeps the toggle instant and
-							// cheap, and updates the summary, the "total" chip and the tree count
-							// together so they can never disagree.
+							// every doc just to hide/show rows.
 							this.treeSig = "";
 							if (this.lastReport) this.renderReport(this.lastReport, false);
 						})
 					);
 			}
+		}
+	}
+
+	/** The three store cards (A/B/C) followed by the two directional delta lines. */
+	private renderStores(el: HTMLElement, report: IndexReport): void {
+		el.empty();
+		el.className = "couchdb-sync-counts couchdb-sync-storewrap";
+		const grid = el.createDiv({ cls: "couchdb-sync-stores" });
+		const mk = (label: string, val: string, sub: string, cls = "") => {
+			const c = grid.createDiv({ cls: "couchdb-sync-store" });
+			c.createDiv({ cls: "couchdb-sync-store-lab", text: label });
+			c.createDiv({ cls: "couchdb-sync-store-val" + (cls ? ` ${cls}` : ""), text: val });
+			c.createDiv({ cls: "couchdb-sync-store-sub", text: sub });
+		};
+		mk("This device", String(report.vaultCount), "files on disk");
+		mk("Local cache", String(report.dbCount), "replica on this device");
+		if (report.serverReachable === false) {
+			mk("Server", "✕ " + this.serverErrShort(report.serverError), "unreachable", "couchdb-sync-store-err");
+		} else if (report.serverReachable === true) {
+			mk("Server", String(report.serverCount ?? 0), "source of truth", "couchdb-sync-store-ok");
+		} else {
+			mk("Server", "—", "sync off / not checked");
+		}
+
+		// Disk ↔ Cache
+		const onlyDisk = report.localOnly.length;
+		const onlyCache = report.dbOnly.length;
+		if (onlyDisk === 0 && onlyCache === 0) {
+			this.renderDelta(el, "Disk ↔ Cache", "good", "Disk and cache are identical.");
+		} else {
+			const parts: string[] = [];
+			if (onlyDisk) parts.push(`${onlyDisk} only on disk (not cached)`);
+			if (onlyCache) parts.push(`${onlyCache} only in cache`);
+			this.renderDelta(el, "Disk ↔ Cache", "warn", parts.join(" · "));
+		}
+
+		// Cache ↔ Server
+		if (report.serverReachable === undefined) {
+			this.renderDelta(el, "Cache ↔ Server", "neutral", "Not checked (sync is off).");
+		} else if (report.serverReachable === false) {
+			this.renderDelta(el, "Cache ↔ Server", "err", "Server unreachable — " + this.serverErrLong(report.serverError));
+		} else {
+			const onlyServer = report.serverOnly?.length ?? 0;
+			const notPushed = report.notPushed?.length ?? 0;
+			if (onlyServer === 0 && notPushed === 0) {
+				this.renderDelta(el, "Cache ↔ Server", "good", "Cache and server are identical.");
+			} else {
+				const parts: string[] = [];
+				if (onlyServer) parts.push(`${onlyServer} only on the server (missing here)`);
+				if (notPushed) parts.push(`${notPushed} not pushed to the server yet`);
+				this.renderDelta(el, "Cache ↔ Server", "warn", parts.join(" · "));
+			}
+		}
+	}
+
+	private renderDelta(
+		el: HTMLElement,
+		tag: string,
+		cls: "good" | "warn" | "err" | "neutral",
+		text: string
+	): void {
+		const row = el.createDiv({ cls: `couchdb-sync-delta couchdb-sync-delta-${cls}` });
+		row.createSpan({ cls: "couchdb-sync-delta-tag", text: tag });
+		row.createSpan({ cls: "couchdb-sync-delta-txt", text: text });
+	}
+
+	private serverErrShort(e?: "auth" | "notfound" | "network"): string {
+		return e === "auth" ? "401" : e === "notfound" ? "404" : "offline";
+	}
+	private serverErrLong(e?: "auth" | "notfound" | "network"): string {
+		return e === "auth"
+			? "the login was rejected (401). Check the user name and password."
+			: e === "notfound"
+				? "the database was not found (404). Check the database name."
+				: "could not reach the server (network/transport).";
+	}
+
+	/** The five status counters as small, card-styled widgets; each acts on its files. */
+	private renderStatWidgets(groups: Record<FileState, string[]>): void {
+		const box = this.legendEl;
+		if (!box) return;
+		box.empty();
+		box.className = "couchdb-sync-legend couchdb-sync-statgrid";
+		const p = this.plugin;
+		const refreshAfter = async () => {
+			this.driftSig = "";
+			this.treeSig = "";
+			await this.loadIndex(true);
+		};
+		const runEach = (fn: (path: string) => Promise<unknown>) =>
+			async (paths: string[]) => { for (const q of paths) await fn(q); };
+		type Def = { state: FileState; label: string; tip: string; run: (paths: string[]) => Promise<void> };
+		const defs: Def[] = [
+			{ state: "synced", label: "synced", tip: "Sync all now", run: runEach((q) => p.forceSyncPath(q)) },
+			{ state: "local", label: "local", tip: "Upload all to server", run: runEach((q) => p.takeLocalPath(q)) },
+			{ state: "remote", label: "server only", tip: "Download all to this device", run: runEach((q) => p.takeRemotePath(q)) },
+			{ state: "drift", label: "differs", tip: "Resolve all", run: runEach((q) => p.resolveByStrategyPath(q)) },
+			{ state: "conflict", label: "conflict", tip: "Resolve all conflicts", run: runEach((q) => p.resolveByStrategyPath(q)) },
+		];
+		for (const d of defs) {
+			const count = groups[d.state].length;
+			// Keep the legacy "legend-item/label/count/btn" classes so the same DOM
+			// contract holds — a stat widget IS the actionable legend entry, restyled.
+			const tile = box.createDiv({
+				cls: `couchdb-sync-stat couchdb-sync-legend-item couchdb-sync-state-${d.state}` +
+					(count === 0 ? " couchdb-sync-stat-zero" : ""),
+			});
+			tile.createDiv({ cls: "couchdb-sync-stat-n couchdb-sync-legend-count", text: String(count) });
+			const l = tile.createDiv({ cls: "couchdb-sync-stat-l" });
+			l.createSpan({ cls: `couchdb-sync-swatch couchdb-sync-state-${d.state}` });
+			l.createSpan({ cls: "couchdb-sync-legend-label", text: d.label });
+			if (count > 0) {
+				tile.addClass("couchdb-sync-stat-btn");
+				tile.addClass("couchdb-sync-legend-btn");
+				tile.ariaLabel = d.tip;
+				tile.onclick = async () => {
+					tile.addClass("couchdb-sync-legend-busy");
+					try {
+						await d.run(groups[d.state]);
+						new Notice(`CouchDB Sync: ${d.tip} — ${count} file(s).`);
+					} catch (e) {
+						new Notice(`CouchDB Sync: error — ${e instanceof Error ? e.message : String(e)}`);
+					} finally {
+						tile.removeClass("couchdb-sync-legend-busy");
+						await refreshAfter();
+					}
+				};
+			}
+		}
+	}
+
+	/** One collapsible "Needs attention" section: every non-synced file, capped. */
+	private renderNeedsAttention(box: HTMLElement, groups: Record<FileState, string[]>): void {
+		const CAP = 30;
+		const order: FileState[] = ["conflict", "drift", "local", "remote"];
+		const items: { path: string; state: FileState }[] = [];
+		for (const st of order) for (const path of groups[st]) items.push({ path, state: st });
+
+		const det = box.createEl("details", { cls: "couchdb-sync-section couchdb-sync-attention" });
+		det.dataset.sectionId = "attention";
+		det.open = items.length > 0;
+		const sum = det.createEl("summary", { cls: "couchdb-sync-section-header" });
+		sum.createSpan({ text: "Needs attention" });
+		sum.createSpan({ text: String(items.length), cls: "couchdb-sync-section-count" });
+		if (items.length === 0) {
+			det.createDiv({ cls: "couchdb-sync-attention-clear", text: "✓ Everything is in sync." });
+			return;
+		}
+		const list = det.createDiv({ cls: "couchdb-sync-attention-list" });
+		for (const it of items.slice(0, CAP)) this.renderAttentionRow(list, it.path, it.state);
+		if (items.length > CAP) {
+			list.createDiv({
+				cls: "couchdb-sync-attention-more",
+				text: `+ ${items.length - CAP} more — open the trees below to see them all.`,
+			});
+		}
+	}
+
+	private renderAttentionRow(list: HTMLElement, path: string, state: FileState): void {
+		const p = this.plugin;
+		const refresh = async () => {
+			this.driftSig = "";
+			this.treeSig = "";
+			await this.loadIndex(true);
+		};
+		const act = async (verb: string, fn: () => Promise<unknown>) => {
+			try {
+				await fn();
+				new Notice(`CouchDB Sync: ${verb}`);
+			} catch (e) {
+				new Notice(`CouchDB Sync: ${verb} failed — ${e instanceof Error ? e.message : String(e)}`);
+			} finally {
+				await refresh();
+			}
+		};
+		const stateLabel: Record<string, string> = {
+			conflict: "conflict", drift: "differs", local: "local only", remote: "server only",
+		};
+		const row = list.createDiv({ cls: "couchdb-sync-attention-row" });
+		row.dataset.couchdbPath = path;
+		row.createSpan({ cls: `couchdb-sync-dot couchdb-sync-state-${state}` }); // pulses while transferring
+		row.createSpan({ cls: `couchdb-sync-attention-chip couchdb-sync-state-${state}`, text: stateLabel[state] ?? state });
+		row.createSpan({ cls: "couchdb-sync-attention-name", text: path });
+		if (state === "drift" || state === "conflict") {
+			const diff = row.createEl("button", { text: "Diff", cls: "couchdb-sync-rowbtn" });
+			diff.onclick = () => this.openDiff(path);
+			const newest = row.createEl("button", { text: "Use newest", cls: "couchdb-sync-rowbtn" });
+			newest.onclick = () => void act("resolved to newest", () => p.resolveByStrategyPath(path));
+		} else if (state === "local") {
+			const up = row.createEl("button", { text: "Upload", cls: "couchdb-sync-rowbtn" });
+			up.onclick = () => void act("uploaded", () => p.takeLocalPath(path));
+		} else if (state === "remote") {
+			const dl = row.createEl("button", { text: "Download", cls: "couchdb-sync-rowbtn" });
+			dl.onclick = () => void act("downloaded", () => p.takeRemotePath(path));
+		}
+		const more = row.createEl("button", { cls: "couchdb-sync-iconbtn" });
+		setIcon(more, "more-horizontal");
+		more.setAttr("aria-label", "Actions");
+		more.onclick = (ev) => {
+			ev.preventDefault();
+			ev.stopPropagation();
+			this.openFileMenu(ev, path, state);
+		};
+	}
+
+	/**
+	 * One store as a collapsible tree section. It opens by default the first time it is
+	 * seen if it needs a look (unreachable server, an empty cache while disk/server hold
+	 * files, or any non-synced file inside); afterwards the user's own toggle wins.
+	 */
+	private renderStoreTree(
+		box: HTMLElement,
+		sectionId: string,
+		title: string,
+		tag: string,
+		paths: string[],
+		stateByPath: Map<string, FileState>,
+		opts: { emptyRebuild?: boolean; serverReachable?: boolean; serverError?: "auth" | "notfound" | "network" }
+	): void {
+		const unreachable = opts.serverReachable === false;
+		const emptyRebuild = !!opts.emptyRebuild;
+		const attn = paths.reduce((n, p) => n + ((stateByPath.get(p) ?? "remote") !== "synced" ? 1 : 0), 0);
+		const autoOpen = unreachable || emptyRebuild || attn > 0;
+		if (!this.autoSeeded.has(sectionId)) {
+			this.autoSeeded.add(sectionId);
+			if (autoOpen) this.openSections.add(sectionId);
+			else this.openSections.delete(sectionId);
+		}
+
+		const det = box.createEl("details", { cls: "couchdb-sync-section couchdb-sync-storetree" });
+		det.dataset.sectionId = sectionId;
+		det.open = autoOpen; // restoreOpenState (run by the caller) applies the persisted choice
+		const sum = det.createEl("summary", { cls: "couchdb-sync-section-header" });
+		sum.createSpan({ text: title });
+		sum.createSpan({ cls: "couchdb-sync-storetree-tag", text: tag });
+		let hint = "all in sync";
+		let hintCls: "ok" | "attn" | "err" = "ok";
+		if (unreachable) {
+			hint = `✕ ${this.serverErrShort(opts.serverError)} unreachable`;
+			hintCls = "err";
+		} else if (emptyRebuild) {
+			hint = "empty — Force sync to rebuild";
+			hintCls = "attn";
+		} else if (attn > 0) {
+			hint = `${attn} need attention`;
+			hintCls = "attn";
+		}
+		sum.createSpan({ cls: `couchdb-sync-storetree-hint couchdb-sync-hint-${hintCls}`, text: hint });
+		sum.createSpan({ cls: "couchdb-sync-section-count", text: unreachable ? "?" : String(paths.length) });
+
+		const body = det.createDiv({ cls: "couchdb-sync-tree" });
+		if (unreachable) {
+			body.createDiv({
+				cls: "couchdb-sync-tree-empty",
+				text: `✕ Unreachable — fix the connection (${this.serverErrShort(opts.serverError)}), then this shows exactly what the server holds.`,
+			});
+		} else if (paths.length === 0) {
+			body.createDiv({
+				cls: "couchdb-sync-tree-empty",
+				text: emptyRebuild ? "empty — press Force sync to rebuild the cache" : "(empty)",
+			});
+		} else {
+			this.renderTree(body.createDiv(), paths, stateByPath);
 		}
 	}
 
@@ -750,53 +978,66 @@ export class IndexPanel {
 		});
 	}
 
-	private renderStateList(
-		box: HTMLElement,
-		state: FileState,
-		title: string,
-		paths: string[]
-	): void {
-		if (paths.length === 0) return;
-		const det = box.createEl("details", { cls: `couchdb-sync-section couchdb-sync-state-${state}` });
-		det.dataset.sectionId = `list-${state}`;
-		const sum = det.createEl("summary", { cls: "couchdb-sync-section-header" });
-		sum.createSpan({ text: title });
-		sum.createSpan({ text: `${paths.length}`, cls: "couchdb-sync-section-count" });
-		const ul = det.createEl("ul", { cls: "couchdb-sync-section-list" });
-		const actionLabel = state === "local" ? "Upload" : state === "remote" ? "Download" : "Sync";
-		const busyLabel = state === "local" ? "Uploading…" : state === "remote" ? "Downloading…" : "Syncing…";
-		// Drift/conflict rows must resolve by the configured strategy (mtime-aware
-		// or master-wins) — a blind local upload would discard a newer remote
-		// version. The directional states (local→upload, remote→download,
-		// synced→re-sync) keep the plain force path.
-		const isDivergent = state === "drift" || state === "conflict";
-		const rowAction = (q: string) =>
-			isDivergent ? this.plugin.resolveByStrategyPath(q) : this.plugin.forceSyncPath(q);
-		for (const p of paths) {
-			const li = ul.createEl("li", { cls: "couchdb-sync-drift-item" });
-			li.createSpan({ cls: "couchdb-sync-dot" }); // pulses when active
-			const name = li.createSpan({ text: p, cls: "couchdb-sync-drift-name" });
-			// Divergent files (differs/conflict) can be inspected and reconciled block
-			// by block in the side-by-side diff editor — click the name to open it.
-			if (isDivergent) {
-				name.addClass("couchdb-sync-drift-name-link");
-				name.ariaLabel = "Open side-by-side diff";
-				name.onclick = () => this.openDiff(p);
-				const diffBtn = li.createEl("button", { text: "Diff", cls: "couchdb-sync-rowbtn" });
-				diffBtn.onclick = () => this.openDiff(p);
+	/**
+	 * Context-aware per-file actions menu — only what makes sense for the state. Shared
+	 * by every file row: the store trees AND the "Needs attention" list, so a file's
+	 * full action set is one tap away wherever it appears.
+	 */
+	private openFileMenu(ev: MouseEvent, path: string, state: FileState): void {
+		const p = this.plugin;
+		const refresh = async () => {
+			this.driftSig = "";
+			this.treeSig = "";
+			await this.loadIndex(true);
+		};
+		const run = async (verb: string, fn: () => Promise<unknown>) => {
+			try {
+				await fn();
+				new Notice(`CouchDB Sync: ${verb}`);
+			} catch (e) {
+				new Notice(`CouchDB Sync: ${verb} failed — ${e instanceof Error ? e.message : String(e)}`);
+			} finally {
+				await refresh();
 			}
-			const btn = li.createEl("button", { text: actionLabel, cls: "couchdb-sync-rowbtn" });
-			btn.onclick = async () => {
-				btn.disabled = true;
-				btn.setText(busyLabel);
+		};
+		const m = new Menu();
+		if (state === "drift" || state === "conflict") {
+			m.addItem((i) => i.setTitle("Open side-by-side diff…").setIcon("diff").onClick(() => this.openDiff(path)));
+			m.addItem((i) => i.setTitle("Use newest version").setIcon("clock").onClick(async () => {
 				try {
-					await rowAction(p);
+					const side = await p.useNewestPath(path);
+					new Notice(`CouchDB Sync: took ${side} version (newest)`);
+				} catch (e) {
+					new Notice(`CouchDB Sync: use newest failed — ${e instanceof Error ? e.message : String(e)}`);
 				} finally {
-					this.driftSig = ""; // force the lists to refresh on the next tick
+					await refresh();
 				}
-			};
-			li.dataset.couchdbPath = p;
+			}));
+			m.addItem((i) => i.setTitle("Use server version (overwrite local)").setIcon("download").onClick(() => run("downloaded server version", () => p.takeRemotePath(path))));
+			m.addItem((i) => i.setTitle("Use local version (overwrite server)").setIcon("upload").onClick(() => run("uploaded local version", () => p.takeLocalPath(path))));
+		} else if (state === "remote") {
+			m.addItem((i) => i.setTitle("Download to this device").setIcon("download").onClick(() => run("downloaded", () => p.takeRemotePath(path))));
+		} else if (state === "local") {
+			m.addItem((i) => i.setTitle("Upload to server").setIcon("upload").onClick(() => run("uploaded", () => p.takeLocalPath(path))));
 		}
+		m.addItem((i) => i.setTitle(state === "excluded" ? "Sync once" : "Force sync").setIcon("refresh-cw").onClick(() => void run("synced", () => p.forceSyncPath(path))));
+		// HistoryModal notifies through a plain `() => void`; the refresh it triggers
+		// is a background reload nobody waits on, so ignore the promise explicitly.
+		m.addItem((i) => i.setTitle("Show history…").setIcon("history").onClick(() => new HistoryModal(p, path, () => void refresh()).open()));
+		m.addSeparator();
+		if (state !== "remote") {
+			m.addItem((i) => i.setTitle("Delete on this device").setIcon("trash").onClick(() =>
+				confirm(this.app, { title: "Delete on this device?", body: `Removes "${path}" from this device only. The server keeps its copy (it may re-download while live sync is on).`, cta: "Delete here", danger: true, onConfirm: () => run("deleted locally", () => p.deleteLocalPath(path)) })));
+		}
+		if (state === "synced" || state === "remote" || state === "drift" || state === "conflict") {
+			m.addItem((i) => i.setTitle("Delete everywhere").setIcon("trash-2").onClick(() =>
+				confirm(this.app, { title: "Delete everywhere?", body: `Deletes "${path}" on ALL devices. It stays in history and can be restored.`, cta: "Delete everywhere", danger: true, onConfirm: () => run("deleted everywhere", () => p.deleteEverywherePath(path)) })));
+		}
+		if (state !== "local") {
+			m.addItem((i) => i.setTitle("Remove from database index (keep local)").setIcon("database").onClick(() =>
+				confirm(this.app, { title: "Remove from index?", body: `Stops syncing "${path}" and removes it from the database. Every device keeps its local copy; it re-appears if re-indexed.`, cta: "Remove from index", onConfirm: () => run("removed from index", () => p.removeFromIndex(path, false)) })));
+		}
+		m.showAtMouseEvent(ev);
 	}
 
 	/** Open the side-by-side diff/merge editor for a drifting or conflicting file. */
@@ -898,47 +1139,6 @@ export class IndexPanel {
 			return b;
 		};
 
-		// context-aware per-file actions menu (only what makes sense for the state)
-		const fileMenu = (ev: MouseEvent, path: string, state: FileState) => {
-			const m = new Menu();
-			if (state === "drift" || state === "conflict") {
-				m.addItem((i) => i.setTitle("Use newest version").setIcon("clock").onClick(async () => {
-					try {
-						const side = await p.useNewestPath(path);
-						new Notice(`CouchDB Sync: took ${side} version (newest)`);
-					} catch (e) {
-						new Notice(`CouchDB Sync: use newest failed — ${e instanceof Error ? e.message : String(e)}`);
-					} finally {
-						await refresh();
-					}
-				}));
-				m.addItem((i) => i.setTitle("Use server version (overwrite local)").setIcon("download").onClick(() => run("downloaded server version", () => p.takeRemotePath(path))));
-				m.addItem((i) => i.setTitle("Use local version (overwrite server)").setIcon("upload").onClick(() => run("uploaded local version", () => p.takeLocalPath(path))));
-			} else if (state === "remote") {
-				m.addItem((i) => i.setTitle("Download to this device").setIcon("download").onClick(() => run("downloaded", () => p.takeRemotePath(path))));
-			} else if (state === "local") {
-				m.addItem((i) => i.setTitle("Upload to server").setIcon("upload").onClick(() => run("uploaded", () => p.takeLocalPath(path))));
-			}
-			m.addItem((i) => i.setTitle(state === "excluded" ? "Sync once" : "Force sync").setIcon("refresh-cw").onClick(() => void run("synced", () => p.forceSyncPath(path))));
-			// HistoryModal notifies through a plain `() => void`; the refresh it triggers
-			// is a background reload nobody waits on, so ignore the promise explicitly.
-			m.addItem((i) => i.setTitle("Show history…").setIcon("history").onClick(() => new HistoryModal(p, path, () => void refresh()).open()));
-			m.addSeparator();
-			if (state !== "remote") {
-				m.addItem((i) => i.setTitle("Delete on this device").setIcon("trash").onClick(() =>
-					confirm(this.app, { title: "Delete on this device?", body: `Removes "${path}" from this device only. The server keeps its copy (it may re-download while live sync is on).`, cta: "Delete here", danger: true, onConfirm: () => run("deleted locally", () => p.deleteLocalPath(path)) })));
-			}
-			if (state === "synced" || state === "remote" || state === "drift" || state === "conflict") {
-				m.addItem((i) => i.setTitle("Delete everywhere").setIcon("trash-2").onClick(() =>
-					confirm(this.app, { title: "Delete everywhere?", body: `Deletes "${path}" on ALL devices. It stays in history and can be restored.`, cta: "Delete everywhere", danger: true, onConfirm: () => run("deleted everywhere", () => p.deleteEverywherePath(path)) })));
-			}
-			if (state !== "local") {
-				m.addItem((i) => i.setTitle("Remove from database index (keep local)").setIcon("database").onClick(() =>
-					confirm(this.app, { title: "Remove from index?", body: `Stops syncing "${path}" and removes it from the database. Every device keeps its local copy; it re-appears if re-indexed.`, cta: "Remove from index", onConfirm: () => run("removed from index", () => p.removeFromIndex(path, false)) })));
-			}
-			m.showAtMouseEvent(ev);
-		};
-
 		// folder bulk actions, applied to the descendant files of the relevant state
 		const folderMenu = (ev: MouseEvent, folderPath: string) => {
 			const prefix = folderPath + "/";
@@ -984,7 +1184,7 @@ export class IndexPanel {
 				div.setAttr("aria-label", stateTitle[fState]);
 				div.createSpan({ cls: "couchdb-sync-dot" });
 				div.createSpan({ text: `📄 ${file.name}`, cls: "couchdb-sync-tree-fname" });
-				iconBtn(div, "more-horizontal", "Actions", (ev) => fileMenu(ev, file.path, fState));
+				iconBtn(div, "more-horizontal", "Actions", (ev) => this.openFileMenu(ev, file.path, fState));
 				div.dataset.couchdbPath = file.path;
 			}
 		};

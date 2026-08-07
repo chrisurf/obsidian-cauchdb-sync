@@ -8,7 +8,7 @@ import {
 	normalizePath,
 	debounce,
 } from "obsidian";
-import { SyncDatabase } from "./database";
+import { RemoteScan, SyncDatabase } from "./database";
 import { nodeFs, nodePath } from "./node";
 import { decryptBytes, decryptString, encryptBytes, encryptString } from "./crypto";
 import { Wire, encActive, hydrateFile } from "./envelope";
@@ -71,8 +71,8 @@ const LIVE_SYNC_RESTART_LIMIT = 8;
 
 /** Snapshot comparing this device's files against the synced database. */
 export interface IndexReport {
-	vaultCount: number;
-	dbCount: number;
+	vaultCount: number; // A — files on disk (this device)
+	dbCount: number; // B — file docs in the local cache replica
 	inSync: string[];
 	localOnly: string[]; // on this device, not yet in the database
 	dbOnly: string[]; // in the database, not on this device
@@ -80,6 +80,7 @@ export interface IndexReport {
 	conflicts: string[]; // unresolved conflict revisions in the database
 	excluded: string[]; // present locally or in the DB but filtered out by the skip rules
 	allDbPaths: string[]; // every indexed path (for the tree view)
+	diskPaths: string[]; // A — every non-skipped file on disk (for the Disk tree)
 	/**
 	 * Set when the database holds encrypted docs but NONE could be decrypted with
 	 * the current passphrase — i.e. the passphrase is wrong. The UI must show a
@@ -87,6 +88,16 @@ export interface IndexReport {
 	 * would tempt the user to "Upload all" and mint divergent duplicates).
 	 */
 	passphraseError?: boolean;
+
+	// --- server (C): the true remote CouchDB state, from an optional direct scan ---
+	/** undefined when no remote scan was performed; else whether the server answered. */
+	serverReachable?: boolean;
+	/** why the server could not be read (only when serverReachable === false). */
+	serverError?: "auth" | "notfound" | "network";
+	serverCount?: number; // C — non-skipped file paths on the server
+	serverPaths?: string[]; // C — for the Server tree
+	serverOnly?: string[]; // on the server, not in the local cache — "this device is behind"
+	notPushed?: string[]; // in the local cache, not on the server — "not pushed yet"
 }
 
 /** True for paths we never sync. Shared by the engine and the index report. */
@@ -171,7 +182,8 @@ export async function buildIndexReport(
 	app: App,
 	settings: CouchDBSyncSettings,
 	db: SyncDatabase,
-	syncState?: Map<string, SyncRecord>
+	syncState?: Map<string, SyncRecord>,
+	remote?: RemoteScan
 ): Promise<IndexReport> {
 	const records = syncState ?? (await readSyncStateRecords(db));
 
@@ -232,6 +244,31 @@ export async function buildIndexReport(
 	}
 
 	const sort = (a: string[]) => a.sort((x, y) => x.localeCompare(y));
+
+	// Server (C) — only when a direct remote scan was supplied. The cache set (B) is
+	// the non-skipped docs we already have; the two deltas (server-only / not-pushed)
+	// are what live sync would still have to move in each direction.
+	let serverReachable: boolean | undefined;
+	let serverError: IndexReport["serverError"];
+	let serverCount: number | undefined;
+	let serverPaths: string[] | undefined;
+	let serverOnly: string[] | undefined;
+	let notPushed: string[] | undefined;
+	if (remote) {
+		serverReachable = remote.reachable;
+		if (!remote.reachable) {
+			serverError = remote.error;
+		} else {
+			const sPaths = remote.paths.filter((p) => !isSkipped(p, app, settings));
+			const cacheSet = new Set(docs.map((d) => d.path));
+			const serverSet = new Set(sPaths);
+			serverPaths = sort([...sPaths]);
+			serverCount = sPaths.length;
+			serverOnly = sort(sPaths.filter((p) => !cacheSet.has(p)));
+			notPushed = sort([...cacheSet].filter((p) => !serverSet.has(p)));
+		}
+	}
+
 	return {
 		vaultCount: vaultPaths.length,
 		dbCount: docs.length,
@@ -242,7 +279,14 @@ export async function buildIndexReport(
 		conflicts: sort(conflicts),
 		excluded: sort(excluded),
 		allDbPaths: sort(docs.map((d) => d.path)),
+		diskPaths: sort([...vaultPaths]),
 		passphraseError,
+		serverReachable,
+		serverError,
+		serverCount,
+		serverPaths,
+		serverOnly,
+		notPushed,
 	};
 }
 
@@ -1878,7 +1922,7 @@ export class SyncEngine {
 	}
 
 	/** Index/drift report for the running session (includes hidden files). */
-	getIndexReport(): Promise<IndexReport> {
-		return buildIndexReport(this.app, this.settings, this.db, this.syncState);
+	getIndexReport(remote?: RemoteScan): Promise<IndexReport> {
+		return buildIndexReport(this.app, this.settings, this.db, this.syncState, remote);
 	}
 }

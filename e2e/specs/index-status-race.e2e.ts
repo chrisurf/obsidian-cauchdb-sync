@@ -3,39 +3,46 @@ import { describe, it, before, after } from "mocha";
 import assert from "node:assert/strict";
 import { PLUGIN_ID } from "./helpers.js";
 
+const VIEW_TYPE = "couchdb-sync-status";
+
 /**
- * Regression: the index status view loses its details (file tree + summary +
- * counts) when a slow index report overlaps a re-render of the settings tab.
+ * Regression: the FULL sync panel (the right-sidebar view) loses its details
+ * (store trees + summary + counters) when a slow index report overlaps a
+ * re-render.
  *
  * Real-world trigger: `buildIndexReport` walks every hidden folder on each run
  * (see listHidden), which on a vault with a large `.obsidian` tree takes tens of
- * seconds. Any second `display()` in that window (re-opening settings, switching
- * tabs, toggling a setting) replaces the DOM elements while the first run still
- * holds references to the old, now-detached ones.
+ * seconds. Any second mount in that window (re-opening the panel, a rebuild)
+ * replaces the DOM elements while the first run still holds references to the
+ * old, now-detached ones.
  *
- * `loadIndexInner` captures summary/counts/drift/tree in local consts BEFORE the
- * await, but reads legend/excluded-toggle from `this` AFTER it. So the stale run
- * writes half its output into detached orphans and half into the live DOM — and
- * it stamps `driftSig`/`treeSig`, which makes every later refresh believe the
- * tree is already up to date and skip rendering it.
+ * `loadIndexInner` captures its target elements BEFORE the await; the render
+ * generation guards against a stale run writing into detached orphans and
+ * stamping `driftSig`/`treeSig` for a tree it drew into nothing. This spec drives
+ * that race deterministically by gating getIndexReport and asserts the CORRECT
+ * behaviour: whatever the interleaving, the visible panel must never end up with
+ * the counters rendered but the trees missing.
  *
- * Observable result (and exactly what the bug report screenshot shows): the
- * legend row and the excluded-files toggle are present, while the summary still
- * says "Loading…" and the whole per-file tree is missing.
- *
- * This spec drives that race deterministically by gating getIndexReport, and
- * asserts the CORRECT behaviour: whatever the interleaving, the visible DOM must
- * never end up with a legend but no tree.
+ * The panel is exercised in its FULL form (the sidebar view). The settings tab
+ * deliberately mounts the panel in COMPACT mode (status + counters only, no
+ * trees), so the tree-race lives with the full view now.
  */
-describe("CouchDB Sync — index status under a slow, overlapping report", function () {
+type RacePanel = {
+	mount(root: HTMLElement): void;
+	unmount(): void;
+	loadIndex(force: boolean): Promise<void>;
+	treeSig?: string;
+};
+
+describe("CouchDB Sync — full panel under a slow, overlapping report", function () {
 	/** Settings as they were before this spec, restored in `after`. */
 	let savedSettings: Record<string, unknown> = {};
 
 	before(async function () {
-		// Configure enough that the report is not privacy-gated, but keep the
-		// master sync switch OFF so no session and no network I/O ever starts.
-		// The previous values are captured so this spec cannot leak a verified
-		// connection into specs that assert on the unconfigured privacy gate.
+		// Configure enough that the report is not privacy-gated, but keep the master
+		// sync switch OFF so no session and no network I/O ever starts. The previous
+		// values are captured so this spec cannot leak a verified connection into
+		// specs that assert on the unconfigured privacy gate.
 		savedSettings = await browser.executeObsidian(
 			async ({ app }, id) => {
 				const plugin = (
@@ -43,11 +50,7 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 						plugins: {
 							plugins: Record<
 								string,
-								{
-									settings: Record<string, unknown>;
-									saveSettings(): Promise<void>;
-									driftRefreshTimer?: number;
-								}
+								{ settings: Record<string, unknown>; saveSettings(): Promise<void> }
 							>;
 						};
 					}
@@ -60,9 +63,6 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 				plugin.settings.syncEnabled = false;
 				plugin.settings.e2eeEnabled = false;
 				await plugin.saveSettings();
-				// Silence the plugin's own 5 s drift timer so it cannot consume our
-				// gated getIndexReport calls and skew the interleaving under test.
-				if (plugin.driftRefreshTimer != null) window.clearInterval(plugin.driftRefreshTimer);
 				return before;
 			},
 			PLUGIN_ID,
@@ -70,59 +70,91 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 	});
 
 	after(async function () {
-		// Put the settings back exactly as they were — leaving `connectionVerified`
-		// behind would unlock the index view for every spec that runs after this one.
+		// Restore the panel to the view's own host (this spec mounts it into throwaway
+		// hosts) and put the settings back exactly as they were — leaving
+		// `connectionVerified` behind would unlock the index view for later specs.
 		await browser.executeObsidian(
-			async ({ app }, id, restore) => {
-				const plugin = (
-					app as unknown as {
-						plugins: {
-							plugins: Record<
-								string,
-								{ settings: Record<string, unknown>; saveSettings(): Promise<void> }
-							>;
-						};
-					}
-				).plugins.plugins[id];
+			async ({ app }, id, restore, viewType) => {
+				const a = app as unknown as {
+					workspace: {
+						getLeavesOfType(t: string): { view: { contentEl: HTMLElement; onOpen(): Promise<void>; onClose(): Promise<void> } }[];
+					};
+					plugins: {
+						plugins: Record<string, { settings: Record<string, unknown>; saveSettings(): Promise<void> }>;
+					};
+				};
+				const leaf = a.workspace.getLeavesOfType(viewType)[0];
+				if (leaf) {
+					// Re-run the view's own mount so it owns a fresh, correctly-hosted panel.
+					await leaf.view.onClose();
+					await leaf.view.onOpen();
+				}
+				const plugin = a.plugins.plugins[id];
 				Object.assign(plugin.settings, restore);
 				await plugin.saveSettings();
 			},
 			PLUGIN_ID,
 			savedSettings,
+			VIEW_TYPE,
 		);
 	});
 
-	it("renders the file tree on a normal (fast) render — baseline", async function () {
-		const hasTree = await browser.executeObsidian(async ({ app }, id) => {
+	/** Open the sidebar view and return its full panel instance. */
+	async function fullPanelExists(): Promise<boolean> {
+		return browser.executeObsidian(async ({ app }, id, viewType) => {
 			const a = app as unknown as {
-				setting: { pluginTabs?: { id: string; containerEl: HTMLElement; display(): void }[] };
+				workspace: { getLeavesOfType(t: string): { view: { panel?: unknown } }[] };
+				plugins: { plugins: Record<string, { revealStatusView(): Promise<void> }> };
 			};
-			const tab = (a.setting.pluginTabs ?? []).find((t) => t.id === id)!;
-			tab.display();
-			for (let i = 0; i < 60; i++) {
-				if (tab.containerEl.querySelector(".couchdb-sync-tree")) return true;
+			await a.plugins.plugins[id].revealStatusView();
+			for (let i = 0; i < 40; i++) {
+				const leaf = a.workspace.getLeavesOfType(viewType)[0];
+				if (leaf?.view?.panel) return true;
 				await new Promise((r) => setTimeout(r, 100));
 			}
 			return false;
-		}, PLUGIN_ID);
+		}, PLUGIN_ID, VIEW_TYPE);
+	}
 
-		assert.equal(hasTree, true, "baseline: the sync-state tree should render when nothing races");
+	it("renders the store trees on a normal (fast) render — baseline", async function () {
+		assert.equal(await fullPanelExists(), true, "the sidebar view must expose its panel");
+		const hasTree = await browser.executeObsidian(async ({ app }, id, viewType) => {
+			const a = app as unknown as {
+				workspace: { getLeavesOfType(t: string): { view: { panel: RacePanel } }[] };
+			};
+			void id;
+			const panel = a.workspace.getLeavesOfType(viewType)[0].view.panel;
+			const host = document.body.createDiv();
+			panel.unmount();
+			panel.mount(host);
+			for (let i = 0; i < 60; i++) {
+				if (host.querySelector(".couchdb-sync-tree")) {
+					host.remove();
+					return true;
+				}
+				await new Promise((r) => setTimeout(r, 100));
+			}
+			host.remove();
+			return false;
+		}, PLUGIN_ID, VIEW_TYPE);
+
+		assert.equal(hasTree, true, "baseline: the store trees should render when nothing races");
 	});
 
 	it("keeps the details visible when a slow report overlaps a re-render", async function () {
-		const state = await browser.executeObsidian(async ({ app }, id) => {
+		const state = await browser.executeObsidian(async ({ app }, id, viewType) => {
 			const a = app as unknown as {
-				setting: { pluginTabs?: { id: string; containerEl: HTMLElement; display(): void }[] };
+				workspace: { getLeavesOfType(t: string): { view: { panel: RacePanel } }[] };
 				plugins: { plugins: Record<string, { getIndexReport(): Promise<unknown> }> };
 			};
 			const plugin = a.plugins.plugins[id];
-			const tab = (a.setting.pluginTabs ?? []).find((t) => t.id === id)!;
+			const panel = a.workspace.getLeavesOfType(viewType)[0].view.panel;
 			const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 			// Gate the report so the interleaving is deterministic: the FIRST call is
-			// released on demand, later calls stay pending until the test lets them
-			// go — modelling "every report takes tens of seconds", so the run started
-			// by the second display() is still in flight when the first one lands.
+			// released on demand, later calls stay pending until the test lets them go —
+			// modelling "every report takes tens of seconds", so the run started by the
+			// second mount is still in flight when the first one lands.
 			const original = plugin.getIndexReport.bind(plugin);
 			let releaseFirst!: () => void;
 			let releaseRest!: () => void;
@@ -135,40 +167,43 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 				return original();
 			};
 
+			const hostA = document.body.createDiv();
+			const hostB = document.body.createDiv();
 			try {
-				tab.display(); // run 1 — targets element set A, blocks on firstGate
+				panel.unmount();
+				panel.mount(hostA); // run 1 — targets host A, blocks on firstGate
 				await sleep(100);
-				tab.display(); // run 2 — element set B is on screen now, still blocked
+				panel.mount(hostB); // run 2 — host B is on screen now, still blocked
 				await sleep(100);
-				releaseFirst(); // run 1 lands late, against the detached element set A
+				releaseFirst(); // run 1 lands late, against the detached host A
 				await sleep(800);
 
-				const ce = tab.containerEl;
-				const hasTree = !!ce.querySelector(".couchdb-sync-tree");
+				// Host B is the live element set; a synchronous re-paint of the last known
+				// report gives it the trees immediately even while run 2 is still gated.
+				const hasTree = !!hostB.querySelector(".couchdb-sync-tree");
 				return {
 					hasTree,
-					legendItems: ce.querySelectorAll(".couchdb-sync-legend-item").length,
-					summary: (ce.querySelector(".couchdb-sync-summary")?.textContent ?? "").trim(),
-					counts: (ce.querySelector(".couchdb-sync-counts")?.textContent ?? "").trim(),
-					// A stamped render signature must always describe what is really on
-					// screen — a stale run stamping it for a tree it drew into an orphan
-					// is what made the empty view permanent.
-					sigMatchesDom: !!(tab as unknown as { panel: { treeSig?: string } }).panel.treeSig === hasTree,
+					legendItems: hostB.querySelectorAll(".couchdb-sync-legend-item").length,
+					summary: (hostB.querySelector(".couchdb-sync-summary")?.textContent ?? "").trim(),
+					counts: (hostB.querySelector(".couchdb-sync-counts")?.textContent ?? "").trim(),
+					sigMatchesDom: !!panel.treeSig === hasTree,
 				};
 			} finally {
-				releaseRest(); // let the pending run finish; leave no gate behind
+				releaseRest();
 				await sleep(400);
 				plugin.getIndexReport = original;
+				hostA.remove();
+				hostB.remove();
 			}
-		}, PLUGIN_ID);
+		}, PLUGIN_ID, VIEW_TYPE);
 
 		// Diagnostic: this is the exact shape of the reported bug.
 		const orphaned = state.legendItems > 0 && !state.hasTree;
 		assert.equal(
 			orphaned,
 			false,
-			`stale run wrote into detached elements: legend rendered (${state.legendItems} items) ` +
-				`but the tree is missing. summary=${JSON.stringify(state.summary)} ` +
+			`stale run wrote into detached elements: counters rendered (${state.legendItems} items) ` +
+				`but the trees are missing. summary=${JSON.stringify(state.summary)} ` +
 				`counts=${JSON.stringify(state.counts)}`,
 		);
 		assert.notEqual(
@@ -176,7 +211,7 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 			"Loading…",
 			"the summary must not be left on the placeholder once a report has completed",
 		);
-		assert.notEqual(state.counts, "", "the counts line must be filled in");
+		assert.notEqual(state.counts, "", "the store cards must be filled in");
 		assert.equal(
 			state.sigMatchesDom,
 			true,
@@ -185,55 +220,68 @@ describe("CouchDB Sync — index status under a slow, overlapping report", funct
 	});
 
 	it("keeps the periodic refresh working after the race", async function () {
-		// The auto-refresh tick uses force=false. It must terminate, must not blank
-		// the view, and must leave signature and DOM consistent — i.e. the view stays
-		// self-consistent instead of silently skipping a render it still owes.
-		const state = await browser.executeObsidian(async ({ app }, id) => {
+		// The auto-refresh tick uses force=false. It must terminate, must not blank the
+		// view, and must leave signature and DOM consistent.
+		const state = await browser.executeObsidian(async ({ app }, id, viewType) => {
 			const a = app as unknown as {
-				setting: {
-					pluginTabs?: {
-						id: string;
-						containerEl: HTMLElement;
-						panel: { loadIndex(force: boolean): Promise<void>; treeSig?: string };
-					}[];
-				};
+				workspace: { getLeavesOfType(t: string): { view: { panel: RacePanel } }[] };
 			};
-			const tab = (a.setting.pluginTabs ?? []).find((t) => t.id === id)!;
-			await tab.panel.loadIndex(false); // what the 3 s auto-refresh timer does
+			void id;
+			const panel = a.workspace.getLeavesOfType(viewType)[0].view.panel;
+			const host = document.body.createDiv();
+			panel.unmount();
+			panel.mount(host);
+			await new Promise((r) => setTimeout(r, 400));
+			await panel.loadIndex(false); // what the 3 s auto-refresh timer does
 			await new Promise((r) => setTimeout(r, 300));
-			const hasTree = !!tab.containerEl.querySelector(".couchdb-sync-tree");
-			return { hasTree, sigMatchesDom: !!tab.panel.treeSig === hasTree };
-		}, PLUGIN_ID);
+			const hasTree = !!host.querySelector(".couchdb-sync-tree");
+			const out = { hasTree, sigMatchesDom: !!panel.treeSig === hasTree };
+			host.remove();
+			return out;
+		}, PLUGIN_ID, VIEW_TYPE);
 
-		assert.equal(state.hasTree, true, "the periodic refresh must not lose the file tree");
+		assert.equal(state.hasTree, true, "the periodic refresh must not lose the store trees");
 		assert.equal(state.sigMatchesDom, true, "render signature and DOM drifted apart");
 	});
 
-	it("re-paints the details immediately when the tab is rebuilt", async function () {
-		// Reopening settings must not blank the transparency view while a fresh report
-		// is still in flight: the last known state is painted synchronously.
-		const hasTreeImmediately = await browser.executeObsidian(async ({ app }, id) => {
+	it("re-paints the details immediately when the panel is rebuilt", async function () {
+		// Rebuilding must not blank the transparency view while a fresh report is still
+		// in flight: the last known state is painted synchronously.
+		const hasTreeImmediately = await browser.executeObsidian(async ({ app }, id, viewType) => {
 			const a = app as unknown as {
-				setting: { pluginTabs?: { id: string; containerEl: HTMLElement; display(): void }[] };
+				workspace: { getLeavesOfType(t: string): { view: { panel: RacePanel } }[] };
 				plugins: { plugins: Record<string, { getIndexReport(): Promise<unknown> }> };
 			};
 			const plugin = a.plugins.plugins[id];
-			const tab = (a.setting.pluginTabs ?? []).find((t) => t.id === id)!;
+			const panel = a.workspace.getLeavesOfType(viewType)[0].view.panel;
+			// Prime the panel with a real report first, so there is a last-known state.
+			const primeHost = document.body.createDiv();
+			panel.unmount();
+			panel.mount(primeHost);
+			for (let i = 0; i < 60; i++) {
+				if (primeHost.querySelector(".couchdb-sync-tree")) break;
+				await new Promise((r) => setTimeout(r, 100));
+			}
 			const original = plugin.getIndexReport.bind(plugin);
 			// A report that never lands — the view must still show what it knows.
 			plugin.getIndexReport = () => new Promise(() => undefined);
 			try {
-				tab.display();
-				return !!tab.containerEl.querySelector(".couchdb-sync-tree");
+				const host = document.body.createDiv();
+				panel.unmount();
+				panel.mount(host);
+				const has = !!host.querySelector(".couchdb-sync-tree");
+				host.remove();
+				return has;
 			} finally {
 				plugin.getIndexReport = original;
+				primeHost.remove();
 			}
-		}, PLUGIN_ID);
+		}, PLUGIN_ID, VIEW_TYPE);
 
 		assert.equal(
 			hasTreeImmediately,
 			true,
-			"the tree must be re-painted from the last known report without waiting for a new one",
+			"the trees must be re-painted from the last known report without waiting for a new one",
 		);
 	});
 });

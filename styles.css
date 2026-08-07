@@ -971,3 +971,259 @@
 .couchdb-sync-whats-new-body h2:first-child {
 	margin-top: 0;
 }
+
+/* ================================================================
+   THREE-STORE PANEL: store cards, deltas, stat widgets, attention, trees
+   ================================================================ */
+
+/* --- store cards (This device / Local cache / Server) --- */
+.couchdb-sync-storewrap {
+	color: var(--text-normal);
+}
+
+.couchdb-sync-stores {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 0.5em;
+	margin-top: 0.5em;
+}
+
+.couchdb-sync-store {
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 0.55em 0.4em;
+	text-align: center;
+}
+
+.couchdb-sync-store-lab {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	font-weight: 600;
+}
+
+.couchdb-sync-store-val {
+	font-size: 1.5em;
+	font-weight: 800;
+	line-height: 1.15;
+	margin-top: 0.1em;
+	font-variant-numeric: tabular-nums;
+}
+
+.couchdb-sync-store-val.couchdb-sync-store-ok {
+	color: var(--color-green);
+}
+
+.couchdb-sync-store-val.couchdb-sync-store-err {
+	color: var(--color-red);
+	font-size: 1.05em;
+	margin-top: 0.35em;
+}
+
+.couchdb-sync-store-sub {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	margin-top: 0.05em;
+}
+
+/* --- directional delta lines (Disk ↔ Cache, Cache ↔ Server) --- */
+.couchdb-sync-delta {
+	display: flex;
+	gap: 0.6em;
+	align-items: baseline;
+	font-size: var(--font-ui-smaller);
+	margin-top: 0.45em;
+	padding: 0.45em 0.6em;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+}
+
+.couchdb-sync-delta-tag {
+	font-size: var(--font-ui-smaller);
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	text-transform: uppercase;
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.couchdb-sync-delta-txt {
+	color: var(--text-normal);
+}
+
+.couchdb-sync-delta-good .couchdb-sync-delta-txt {
+	color: var(--color-green);
+}
+
+.couchdb-sync-delta-warn .couchdb-sync-delta-txt {
+	color: #c4a846;
+}
+
+.couchdb-sync-delta-err .couchdb-sync-delta-txt {
+	color: var(--color-red);
+	font-weight: 600;
+}
+
+.couchdb-sync-delta-neutral .couchdb-sync-delta-txt {
+	color: var(--text-muted);
+}
+
+/* --- status counters as small widgets --- */
+.couchdb-sync-statgrid {
+	display: grid;
+	grid-template-columns: repeat(5, 1fr);
+	gap: 0.4em;
+	margin-top: 0.6em;
+}
+
+.couchdb-sync-stat {
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 0.5em 0.3em 0.45em;
+	text-align: center;
+}
+
+.couchdb-sync-stat-n {
+	font-size: 1.25em;
+	font-weight: 800;
+	line-height: 1.1;
+	font-variant-numeric: tabular-nums;
+}
+
+.couchdb-sync-stat-l {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.3em;
+	margin-top: 0.15em;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+
+.couchdb-sync-stat-zero .couchdb-sync-stat-n {
+	color: var(--text-muted);
+}
+
+.couchdb-sync-stat-zero .couchdb-sync-swatch {
+	opacity: 0.4;
+}
+
+.couchdb-sync-stat-btn {
+	cursor: pointer;
+	transition: border-color 120ms ease;
+}
+
+.couchdb-sync-stat-btn:hover {
+	border-color: var(--interactive-accent);
+}
+
+.couchdb-sync-stat.couchdb-sync-legend-busy {
+	opacity: 0.6;
+}
+
+/* --- Needs attention list --- */
+.couchdb-sync-attention.couchdb-sync-section {
+	border-left: 3px solid var(--color-red);
+}
+
+.couchdb-sync-attention-clear {
+	padding: 0.2em 0.8em 0.7em;
+	color: var(--color-green);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+}
+
+.couchdb-sync-attention-list {
+	padding: 0 0.6em 0.5em;
+}
+
+.couchdb-sync-attention-row {
+	display: flex;
+	align-items: center;
+	gap: 0.45em;
+	padding: 0.35em 0.2em;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.couchdb-sync-attention-row:first-child {
+	border-top: none;
+}
+
+.couchdb-sync-attention-chip {
+	font-size: var(--font-ui-smaller);
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	padding: 0.05em 0.5em;
+	border-radius: 10px;
+	background: var(--background-modifier-hover);
+	white-space: nowrap;
+}
+
+.couchdb-sync-attention-name {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+}
+
+.couchdb-sync-attention-more {
+	padding: 0.4em 0.2em 0.1em;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-style: italic;
+}
+
+/* --- per-store collapsible trees --- */
+.couchdb-sync-storetree-tag {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	font-weight: 600;
+}
+
+.couchdb-sync-storetree-hint {
+	margin-left: auto;
+	font-size: var(--font-ui-smaller);
+	font-weight: 700;
+}
+
+.couchdb-sync-hint-ok {
+	color: var(--color-green);
+}
+
+.couchdb-sync-hint-attn {
+	color: #c4a846;
+}
+
+.couchdb-sync-hint-err {
+	color: var(--color-red);
+}
+
+/* When a hint is present it takes the free space, so the count sits right after it. */
+.couchdb-sync-storetree .couchdb-sync-section-count {
+	margin-left: 0.5em;
+}
+
+.couchdb-sync-tree-empty {
+	padding: 0.6em 0.4em;
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.couchdb-sync-openpanel {
+	margin-top: 0.2em;
+}
+
+/* Narrow sidebar: let the store and stat grids wrap instead of squeezing. */
+.couchdb-sync-view .couchdb-sync-stores {
+	grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+}
+
+.couchdb-sync-view .couchdb-sync-statgrid {
+	grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
+}

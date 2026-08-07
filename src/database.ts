@@ -26,6 +26,26 @@ export interface ChunkBytes {
 	bytes: Uint8Array;
 }
 
+/**
+ * Result of scanning the REMOTE CouchDB directly (not the local replica). This is
+ * how the panel learns the true server state independently of whether replication
+ * is currently working — so a broken login shows up as `reachable:false` instead of
+ * a stale "all in sync" read from a frozen local cache.
+ */
+export interface RemoteScan {
+	reachable: boolean;
+	/** why the remote could not be read: bad credentials, missing DB, or transport. */
+	error?: "auth" | "notfound" | "network";
+	message?: string;
+	/** decrypted, non-deleted file paths that exist on the server */
+	paths: string[];
+	/** server paths that carry unresolved conflict revisions */
+	conflicts: string[];
+	count: number;
+	/** server docs that could not be decrypted with the current passphrase */
+	decryptFailed: number;
+}
+
 /** Normalize whatever PouchDB.getAttachment returns (Blob / Buffer / base64) to bytes. */
 async function attachmentToBytes(x: unknown): Promise<Uint8Array> {
 	if (x instanceof Uint8Array) return x; // node Buffer is a Uint8Array subclass
@@ -98,6 +118,8 @@ export class SyncDatabase {
 	 * refreshed from the live scan each time.
 	 */
 	private hydratedCache = new Map<string, { rev: string; doc: FileDoc }>();
+	/** Same cache, but for docs decrypted from the REMOTE scan (see scanRemote). */
+	private hydratedRemoteCache = new Map<string, { rev: string; doc: FileDoc }>();
 	/** Name + options are kept so the local handle can be re-opened after the OS closes it. */
 	private readonly localName: string;
 	private readonly localOptions?: PouchDB.Configuration.LocalDatabaseConfiguration;
@@ -297,6 +319,91 @@ export class SyncDatabase {
 	 */
 	getDecryptStats(): { seen: number; failed: number } {
 		return { seen: this.lastScanSeen, failed: this.lastScanFailed };
+	}
+
+	/**
+	 * Scan the REMOTE database directly for its file docs — the server's own truth,
+	 * NOT the local replica. Only file docs are read (range over the "f:" prefix, which
+	 * survives the HMAC id even when encryption is on), so chunk bytes never load. Each
+	 * doc is hydrated (decrypted) to recover its path; a per-rev cache makes repeated
+	 * scans cheap. A failure to reach the server (bad credentials, missing DB, transport)
+	 * is returned as `reachable:false` with a reason rather than thrown, so the caller can
+	 * render an honest "server unreachable (401)" instead of a false "in sync".
+	 */
+	async scanRemote(): Promise<RemoteScan> {
+		const r = this.remote ?? this.connectRemote();
+		let res: PouchDB.Core.AllDocsResponse<FileDoc>;
+		try {
+			res = await r.allDocs({
+				include_docs: true,
+				conflicts: true,
+				startkey: FILE_PREFIX,
+				endkey: FILE_PREFIX + RANGE_END,
+			});
+		} catch (e: unknown) {
+			const err = e as { status?: number; message?: string; name?: string };
+			const error =
+				err.status === 401 ? "auth" : err.status === 404 ? "notfound" : "network";
+			return {
+				reachable: false,
+				error,
+				message: err.message ?? err.name,
+				paths: [],
+				conflicts: [],
+				count: 0,
+				decryptFailed: 0,
+			};
+		}
+
+		const wires: Wire[] = [];
+		for (const row of res.rows) {
+			const d = row.doc as unknown as Wire | undefined;
+			if (d && d.type === "file") wires.push(d);
+		}
+		const out = new Array<FileDoc | null>(wires.length).fill(null);
+		const next = new Map<string, { rev: string; doc: FileDoc }>();
+		const misses: { i: number; d: Wire }[] = [];
+		for (let i = 0; i < wires.length; i++) {
+			const d = wires[i];
+			const rev = d._rev ?? "";
+			const cached = this.hydratedRemoteCache.get(d._id);
+			if (cached && cached.rev === rev) {
+				const doc: FileDoc = { ...cached.doc };
+				if (d._conflicts) doc._conflicts = d._conflicts;
+				else delete doc._conflicts;
+				out[i] = doc;
+				next.set(d._id, cached);
+			} else {
+				misses.push({ i, d });
+			}
+		}
+		let failed = 0;
+		const CONCURRENCY = 8;
+		for (let start = 0; start < misses.length; start += CONCURRENCY) {
+			const batch = misses.slice(start, start + CONCURRENCY);
+			await Promise.all(
+				batch.map(async ({ i, d }) => {
+					try {
+						const doc = await hydrateFile(d, this.settings);
+						out[i] = doc;
+						next.set(d._id, { rev: d._rev ?? "", doc });
+					} catch (e) {
+						failed++;
+						console.error("[couchdb-sync] cannot decrypt remote file doc", d._id, e);
+					}
+				})
+			);
+		}
+		this.hydratedRemoteCache = next;
+
+		const paths: string[] = [];
+		const conflicts: string[] = [];
+		for (const doc of out) {
+			if (!doc || doc.deleted) continue;
+			paths.push(doc.path);
+			if (Array.isArray(doc._conflicts) && doc._conflicts.length > 0) conflicts.push(doc.path);
+		}
+		return { reachable: true, paths, conflicts, count: paths.length, decryptFailed: failed };
 	}
 
 	async get(id: string): Promise<FileDoc | null> {
