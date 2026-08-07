@@ -399,20 +399,7 @@ export class SyncEngine {
 		// the whole vault is re-indexed and uploaded).
 		if (this.settings.liveSync) {
 			// continuous mode: watch the vault, poll hidden files, replicate live
-			this.attachVaultEvents();
-			if (this.settings.syncHidden) {
-				this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
-			}
-			// Self-healing slow path in BOTH directions: the live feed and vault events
-			// can be delayed or missed (a remote file waiting behind a big local upload;
-			// a mobile vault event dropped across an app suspension). A periodic sweep
-			// pulls new remote files to disk first, then re-pushes local changes the
-			// events dropped. See RECONCILE_INTERVAL_MS.
-			this.reconcileTimer = window.setInterval(
-				() => void this.reconcile(),
-				RECONCILE_INTERVAL_MS
-			);
-			this.startLiveSync();
+			this.beginLiveWatch();
 			void this.runInitialIndex();
 		} else {
 			// "sync on command" mode: one-shot pass, then go idle. No watching/polling.
@@ -421,6 +408,34 @@ export class SyncEngine {
 				if (!this.aborted) await this.replicateOnce();
 			})();
 		}
+	}
+
+	/**
+	 * Start (or resume) continuous live sync: watch vault events, poll hidden files,
+	 * run the periodic self-healing reconcile, and open the live replication feed.
+	 * Extracted so the one-shot bulk actions (Download/Upload from/to server) can hand
+	 * back to live sync when their forced pass is done, instead of leaving the engine
+	 * inert while the status card still reads "SYNC ON". Idempotent guards keep a second
+	 * call from stacking a duplicate feed or timer.
+	 */
+	private beginLiveWatch(): void {
+		if (this.aborted || !this.settings.liveSync) return;
+		if (this.eventRefs.length === 0) this.attachVaultEvents();
+		if (this.settings.syncHidden && this.hiddenTimer === null) {
+			this.hiddenTimer = window.setInterval(() => void this.scanHidden(), 30_000);
+		}
+		// Self-healing slow path in BOTH directions: the live feed and vault events can be
+		// delayed or missed (a remote file waiting behind a big local upload; a mobile
+		// vault event dropped across an app suspension). A periodic sweep pulls new remote
+		// files to disk first, then re-pushes local changes the events dropped. See
+		// RECONCILE_INTERVAL_MS.
+		if (this.reconcileTimer === null) {
+			this.reconcileTimer = window.setInterval(
+				() => void this.reconcile(),
+				RECONCILE_INTERVAL_MS
+			);
+		}
+		if (!this.syncHandler) this.startLiveSync();
 	}
 
 	private async runInitialIndex(): Promise<void> {
@@ -693,18 +708,23 @@ export class SyncEngine {
 		}
 	}
 
-	/** Connect and pull the server state once, without uploading. For followers. */
+	/** Connect and pull the server state once (server wins), then resume live sync. */
 	async startDownloadOnly(): Promise<void> {
 		this.setStatus(SYNC_STATE.CONNECTING);
 		this.db.connectRemote();
 		await this.loadSyncState();
 		if (this.aborted) return;
-		// background, then idle: pure download — no vault events, no upload, no live
 		void (async () => {
 			await this.cleanupTempFiles();
 			await this.downloadOnce();
 			if (!this.aborted) {
 				this.onReady();
+				// The forced one-shot pass is done. Hand back to continuous live sync so
+				// later edits keep propagating — otherwise the engine would sit inert while
+				// the status card still reads "SYNC ON" (the "sync stopped after Download"
+				// trap). initialIndexDone gates the periodic sweep, which is now safe to run.
+				this.initialIndexDone = true;
+				this.beginLiveWatch();
 				this.settle(SYNC_STATE.SYNCED);
 			}
 		})();
@@ -786,12 +806,16 @@ export class SyncEngine {
 		this.db.connectRemote();
 		await this.loadSyncState();
 		if (this.aborted) return;
-		// background, then idle: pure upload — no vault events, no live feed
 		void (async () => {
 			await this.cleanupTempFiles();
 			await this.uploadOnce();
 			if (!this.aborted) {
 				this.onReady();
+				// The forced one-shot pass is done. Hand back to continuous live sync so
+				// later edits keep propagating instead of the engine sitting inert while the
+				// status card still reads "SYNC ON" (the "sync stopped after Upload" trap).
+				this.initialIndexDone = true;
+				this.beginLiveWatch();
 				this.settle(SYNC_STATE.SYNCED);
 			}
 		})();
