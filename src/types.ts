@@ -5,7 +5,7 @@ export type ConflictStrategy = "master" | "newest";
  * that needs a one-time migration (see `migrateSettings` in main.ts). Fresh
  * installs are stamped with the current version and skip migration.
  */
-export const CURRENT_SETTINGS_VERSION = 2;
+export const CURRENT_SETTINGS_VERSION = 5;
 
 export interface CouchDBSyncSettings {
 	/** persisted settings schema version; drives one-time migrations */
@@ -119,14 +119,6 @@ export interface CouchDBSyncSettings {
 	connectionVerified: boolean;
 
 	/**
-	 * Privacy mode: destroy the local PouchDB on plugin disable / unload, so the
-	 * cached file metadata is not left behind on the machine when the user turns
-	 * the plugin off. Trade-off: re-enabling forces a full re-replication from
-	 * the server (no warm cache). Off by default.
-	 */
-	forgetCacheOnDisable: boolean;
-
-	/**
 	 * Plugin version whose "what's new" note the user has already seen. Empty on
 	 * a fresh install, so the note shows once; it is stamped with the running
 	 * version the moment the note is due, which also covers every later update
@@ -199,7 +191,6 @@ export const DEFAULT_SETTINGS: CouchDBSyncSettings = {
 	unsafeShutdown: false,
 	unsafeShutdownStreak: 0,
 	connectionVerified: false,
-	forgetCacheOnDisable: false,
 	lastWhatsNewVersion: "",
 };
 

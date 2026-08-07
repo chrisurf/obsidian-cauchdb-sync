@@ -133,3 +133,66 @@ describe("migrateSettings (v2) — autoStart folded into syncEnabled", () => {
 		expect("autoStart" in s).toBe(false);
 	});
 });
+
+describe("migrateSettings (v3) — encryption is always on", () => {
+	it("forces e2eeEnabled on for a config that had it off", () => {
+		const s = merged({ e2eeEnabled: false });
+		const changed = migrateSettings(s, 2, CONFIG_DIR);
+		expect(changed).toBe(true);
+		expect(s.e2eeEnabled).toBe(true);
+	});
+
+	it("leaves an already-encrypted config unchanged at v3", () => {
+		const s = merged({ e2eeEnabled: true });
+		expect(migrateSettings(s, 2, CONFIG_DIR)).toBe(false);
+		expect(s.e2eeEnabled).toBe(true);
+	});
+
+	it("does not re-enable for configs already at v3 (respects the schema gate)", () => {
+		const s = merged({ e2eeEnabled: false });
+		expect(migrateSettings(s, 3, CONFIG_DIR)).toBe(false);
+		expect(s.e2eeEnabled).toBe(false);
+	});
+});
+
+describe("migrateSettings (v4) — live sync is always on", () => {
+	it("forces liveSync on for a config that used one-shot mode", () => {
+		const s = merged({ liveSync: false });
+		const changed = migrateSettings(s, 3, CONFIG_DIR);
+		expect(changed).toBe(true);
+		expect(s.liveSync).toBe(true);
+	});
+
+	it("leaves an already-live config unchanged at v4", () => {
+		const s = merged({ liveSync: true });
+		expect(migrateSettings(s, 3, CONFIG_DIR)).toBe(false);
+		expect(s.liveSync).toBe(true);
+	});
+
+	it("does not re-enable for configs already at v4 (respects the schema gate)", () => {
+		const s = merged({ liveSync: false });
+		expect(migrateSettings(s, 4, CONFIG_DIR)).toBe(false);
+		expect(s.liveSync).toBe(false);
+	});
+});
+
+describe("migrateSettings (v5) — forget-cache-on-disable removed", () => {
+	it("strips the dead forgetCacheOnDisable key", () => {
+		const s = merged({ forgetCacheOnDisable: true });
+		const changed = migrateSettings(s, 4, CONFIG_DIR);
+		expect(changed).toBe(true);
+		expect("forgetCacheOnDisable" in s).toBe(false);
+	});
+
+	it("is a no-op when the key is already absent", () => {
+		const s = merged({});
+		delete (s as Record<string, unknown>).forgetCacheOnDisable;
+		expect(migrateSettings(s, 4, CONFIG_DIR)).toBe(false);
+	});
+
+	it("does not touch the key for configs already at v5", () => {
+		const s = merged({ forgetCacheOnDisable: true });
+		expect(migrateSettings(s, 5, CONFIG_DIR)).toBe(false);
+		expect("forgetCacheOnDisable" in s).toBe(true);
+	});
+});

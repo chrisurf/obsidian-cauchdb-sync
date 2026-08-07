@@ -331,7 +331,7 @@ describe("CouchDB Sync — status card actions", function () {
 			);
 		}
 		// …while the non-everyday actions stay available.
-		for (const kept of ["Download from server", "Wipe local cache"]) {
+		for (const kept of ["Download from server", "Upload to server", "Wipe local cache"]) {
 			assert.ok(card.settingNames.includes(kept), `"${kept}" should still be available`);
 		}
 	});

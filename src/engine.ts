@@ -715,26 +715,161 @@ export class SyncEngine {
 		this.markActivity();
 		const opts = { batch_size: 25, batches_limit: 2 };
 		try {
+			// Pull every server doc + chunk into the local replica. No per-change disk
+			// write here: the authoritative "server wins" write happens in
+			// overwriteAllFromServer below, which is the one place that also overwrites a
+			// file already on disk with DIFFERENT content — the whole point of this action.
 			await new Promise<void>((resolve, reject) => {
 				const rep = this.db.local.replicate.from(remote, opts);
 				this.oneShot = rep;
 				// See replicateOnce: the handle is thenable, the wrapper is what we await.
-				void rep
-					.on("change", (info) => {
-						void this.applyPulledDocs(info.docs ?? []);
-					})
-					.on("complete", () => resolve())
-					.on("error", (e) => reject(toError(e)));
+				void rep.on("complete", () => resolve()).on("error", (e) => reject(toError(e)));
 			});
 			this.oneShot = null;
 			await this.retryPending();
-			// Replication only re-emits docs changed since the last checkpoint, so a
-			// file already in the local replica but never written to disk would stay
-			// "remote only". Materialize any such files now.
-			await this.materializeRemoteOnly();
+			// Force the server's version of EVERY file onto disk — overwrite a divergent
+			// local copy, materialize a missing one. This is what makes "Download from
+			// server" a true server-wins snapshot rather than a catch-up that silently
+			// leaves a locally-edited file untouched.
+			await this.overwriteAllFromServer();
 			await this.resolveConflicts();
 		} catch (e) {
 			this.fail("download", e);
+		}
+	}
+
+	/**
+	 * "Server wins" write pass for the explicit Download action: write the server's
+	 * version of every file doc to disk, overwriting a divergent local copy and
+	 * creating a missing one. Unlike materializeRemoteOnly (which deliberately skips
+	 * files already on disk, for the everyday two-way sync), this one re-applies the
+	 * server doc even when the path exists locally — so a file edited on this device
+	 * but never pushed is replaced by the server's version. That local edit is not
+	 * lost: applyRemoteChange preserves it to history first, and when the disk already
+	 * equals the server it is a no-op. Local-only files are left in place; nothing is
+	 * uploaded or deleted.
+	 */
+	private async overwriteAllFromServer(): Promise<void> {
+		let docs: FileDoc[];
+		try {
+			docs = (await this.db.getAll()).filter((d) => !d.deleted);
+		} catch (e) {
+			if (!this.aborted) this.fail("scanning for downloads", e);
+			return;
+		}
+		for (const doc of docs) {
+			if (this.aborted) return;
+			const path = doc.path;
+			if (this.skip(path)) continue;
+			if (this.stuck.has(path)) continue; // known-unrecoverable — don't retry in a loop
+			// Clear the remembered hash so applyRemoteChange does not short-circuit on a
+			// path we think we already hold; it still no-ops when disk == server.
+			this.lastHash.delete(path);
+			try {
+				await this.applyRemoteChange(doc);
+			} catch (e) {
+				this.fail(`downloading ${path}`, e);
+			}
+			await this.yieldToUi();
+		}
+	}
+
+	/**
+	 * Connect and push this device's state to the server ONCE, overwriting the server's
+	 * version of every local file — the mirror of startDownloadOnly. "Local wins": a
+	 * file that differs on the server is replaced by this device's copy; a local-only
+	 * file is added. Server-only files are left in place (this does not delete), and
+	 * disk is never written. Used by the explicit "Upload to server" action.
+	 */
+	async startUploadOnly(): Promise<void> {
+		this.setStatus(SYNC_STATE.CONNECTING);
+		this.db.connectRemote();
+		await this.loadSyncState();
+		if (this.aborted) return;
+		// background, then idle: pure upload — no vault events, no live feed
+		void (async () => {
+			await this.cleanupTempFiles();
+			await this.uploadOnce();
+			if (!this.aborted) {
+				this.onReady();
+				this.settle(SYNC_STATE.SYNCED);
+			}
+		})();
+	}
+
+	private async uploadOnce(): Promise<void> {
+		const remote = this.db.remote ?? this.db.connectRemote();
+		this.markActivity();
+		const opts = { batch_size: 25, batches_limit: 2 };
+		try {
+			// Bring the local replica's doc REVISIONS up to date with the server WITHOUT
+			// writing any server content to disk (no applyPulledDocs handler): the upload
+			// direction must never let the server overwrite a local file. Knowing the
+			// current server rev lets each push below land as a new revision ON TOP of it
+			// — local wins cleanly instead of creating a conflicting leaf.
+			await new Promise<void>((resolve, reject) => {
+				const rep = this.db.local.replicate.from(remote, opts);
+				this.oneShot = rep;
+				void rep.on("complete", () => resolve()).on("error", (e) => reject(toError(e)));
+			});
+			this.oneShot = null;
+			// Push every local file, overwriting the server's version. pushPath adopts
+			// (and skips the write for) files whose content already matches the DB, so
+			// identical files cost nothing; everything else becomes a new, winning revision.
+			await this.uploadAllToServer();
+			// Ship the new local revisions to the server.
+			const repTo = this.db.local.replicate.to(remote, opts);
+			this.oneShot = repTo;
+			await repTo;
+			this.oneShot = null;
+			await this.resolveConflicts();
+			await this.persistSyncState();
+		} catch (e) {
+			this.fail("upload", e);
+		}
+	}
+
+	/**
+	 * "Local wins" push pass for the explicit Upload action: push every local file
+	 * (normal, plus hidden when hidden sync is on) so its content becomes the server's
+	 * current version. The remembered hash is cleared per path so a file we consider
+	 * "unchanged since we last synced" is still re-examined — the SERVER may hold a
+	 * different version (edited on another device) that this action must overwrite.
+	 * pushPath re-hashes and adopts identical content without writing, so unchanged
+	 * files are cheap.
+	 */
+	private async uploadAllToServer(): Promise<void> {
+		const todo = this.app.vault
+			.getFiles()
+			.filter((f) => !this.skip(f.path))
+			.sort((a, b) => a.stat.size - b.stat.size); // fewest chunks first
+		for (const file of todo) {
+			if (this.aborted) return;
+			this.lastHash.delete(file.path);
+			try {
+				if (await this.pushFile(file)) this.markActivity();
+			} catch (e) {
+				this.fail(`uploading ${file.path}`, e);
+			}
+			await this.yieldToUi();
+		}
+		if (this.settings.syncHidden) {
+			const adapter = this.app.vault.adapter;
+			const paths = (await listHidden(this.app, this.settings, () => this.aborted)).filter(
+				(p) => !this.skip(p)
+			);
+			for (const path of paths) {
+				if (this.aborted) return;
+				const st = await adapter.stat(path);
+				if (!st || st.type !== "file") continue;
+				this.lastHash.delete(path);
+				try {
+					await this.pushPath(path, st.mtime, st.ctime, st.size);
+				} catch (e) {
+					this.fail(`uploading ${path}`, e);
+				}
+				await this.yieldToUi();
+			}
 		}
 	}
 

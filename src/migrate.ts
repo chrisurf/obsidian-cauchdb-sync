@@ -16,6 +16,18 @@ import { CouchDBSyncSettings, defaultHiddenExclude } from "./types";
  * ran. A config that had auto-start OFF keeps that intent — sync is switched off,
  * visibly, rather than silently starting to replicate after an update. Everything
  * else is untouched, so the common case (auto-start on) simply keeps syncing.
+ *
+ * v3: encryption is now mandatory (the off switch was removed from the UI), so force
+ * `e2eeEnabled` on for any config that had it disabled. Encryption was on by default
+ * anyway, so this only affects the rare config that deliberately turned it off.
+ *
+ * v4: live (real-time) sync is now mandatory — its toggle was removed — so force
+ * `liveSync` on for any config that had it off (the old "sync only on command" mode).
+ *
+ * v5: the "forget local cache when plugin is disabled" feature was removed entirely
+ * (teardown runs on ordinary app close too, so an always-on wipe would destroy the
+ * cache on every quit; the explicit "Wipe local cache" action covers the privacy
+ * case). Strip the now-dead `forgetCacheOnDisable` key.
  */
 export function migrateSettings(
 	settings: CouchDBSyncSettings & Record<string, unknown>,
@@ -54,6 +66,34 @@ export function migrateSettings(
 		}
 		if ("autoStart" in settings) {
 			delete settings.autoStart;
+			changed = true;
+		}
+	}
+
+	if (priorVersion < 3) {
+		// Encryption is mandatory now — there is no UI toggle to turn it off — so any
+		// config that had it disabled is forced on. Everything a device syncs from here
+		// on is end-to-end encrypted.
+		if (settings.e2eeEnabled !== true) {
+			settings.e2eeEnabled = true;
+			changed = true;
+		}
+	}
+
+	if (priorVersion < 4) {
+		// Live (real-time) sync is mandatory now — the toggle is gone — so any config
+		// left in the old one-shot ("sync only on command") mode is switched to live.
+		if (settings.liveSync !== true) {
+			settings.liveSync = true;
+			changed = true;
+		}
+	}
+
+	if (priorVersion < 5) {
+		// The "forget local cache on disable" feature is gone; drop its dead key so it
+		// stops lingering in data.json.
+		if ("forgetCacheOnDisable" in settings) {
+			delete settings.forgetCacheOnDisable;
 			changed = true;
 		}
 	}
