@@ -801,6 +801,19 @@ export default class CouchDBSyncPlugin extends Plugin {
 	}
 
 	/**
+	 * Passphrase health for the settings UI, read synchronously from the most recent
+	 * cache scan (getDecryptStats, kept fresh by the status panel). "empty" = none set;
+	 * "mismatch" = the local cache holds encrypted docs and every one failed to decrypt
+	 * (a wrong passphrase); "ok" = they decrypt, or there is nothing yet to contradict
+	 * it (a fresh, empty cache can't prove the passphrase wrong).
+	 */
+	passphraseStatus(): "empty" | "mismatch" | "ok" {
+		if (!this.settings.passphrase) return "empty";
+		const { seen, failed } = this.getSharedDb().getDecryptStats();
+		return seen > 0 && failed === seen ? "mismatch" : "ok";
+	}
+
+	/**
 	 * Index/drift report for the settings view. Works even when sync is idle: if no
 	 * session is running, it reads the local DB directly so the user always sees the
 	 * full picture (counts, percentage, file tree — including hidden files).

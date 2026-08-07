@@ -25,7 +25,9 @@ describe("CouchDB Sync — settings UI", function () {
 	});
 
 	it("renders the connection section heading", async function () {
-		assert.ok(snap.headings.includes("CouchDB connection"), `headings were: ${snap.headings.join(", ")}`);
+		// Connection and encryption are one collapsible section now; on a fresh vault it
+		// is expanded (connection not verified), so its heading is present.
+		assert.ok(snap.headings.includes("Connection & encryption"), `headings were: ${snap.headings.join(", ")}`);
 	});
 
 	it("renders the core connection settings", async function () {

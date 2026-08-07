@@ -983,7 +983,9 @@
 
 .couchdb-sync-stores {
 	display: grid;
-	grid-template-columns: repeat(3, 1fr);
+	/* auto-fit + minmax so the store cards WRAP on a narrow width (mobile settings)
+	   instead of overflowing to the right; on a wide tab the three still sit in a row. */
+	grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
 	gap: 0.5em;
 	margin-top: 0.5em;
 }
@@ -1069,10 +1071,47 @@
 	color: var(--text-muted);
 }
 
+/* --- collapsible connection & encryption section --- */
+/* Green tint on the collapsed summary row so "all set up" reads at a glance. */
+.couchdb-sync-conn-ok .setting-item-name {
+	color: var(--color-green);
+}
+
+.couchdb-sync-conn-banner {
+	width: 100%;
+	border-radius: 8px;
+	padding: 0.55em 0.75em;
+	font-size: var(--font-ui-small);
+}
+
+.couchdb-sync-conn-banner ul {
+	margin: 0;
+	padding-left: 1.2em;
+}
+
+.couchdb-sync-conn-banner-err {
+	background: var(--background-modifier-error);
+	color: var(--text-error);
+	border: 1px solid var(--color-red);
+}
+
+.couchdb-sync-conn-banner-ok {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75em;
+	flex-wrap: wrap;
+	background: var(--background-secondary);
+	color: var(--color-green);
+	border: 1px solid var(--background-modifier-border);
+}
+
 /* --- status counters as small widgets --- */
 .couchdb-sync-statgrid {
 	display: grid;
-	grid-template-columns: repeat(5, 1fr);
+	/* auto-fit + minmax so the status chips WRAP on a narrow width (mobile settings)
+	   instead of running off-screen; on a wide tab all five still fit on one row. */
+	grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
 	gap: 0.4em;
 	margin-top: 0.6em;
 }
@@ -1219,11 +1258,5 @@
 	margin-top: 0.2em;
 }
 
-/* Narrow sidebar: let the store and stat grids wrap instead of squeezing. */
-.couchdb-sync-view .couchdb-sync-stores {
-	grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
-}
-
-.couchdb-sync-view .couchdb-sync-statgrid {
-	grid-template-columns: repeat(auto-fit, minmax(76px, 1fr));
-}
+/* The store and stat grids now wrap responsively via their base rules (used by both
+   the sidebar view and the settings tab), so no sidebar-specific override is needed. */
