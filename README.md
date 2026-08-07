@@ -250,7 +250,8 @@ Available from Obsidian's command palette (`Ctrl/Cmd + P`).
 | Sync hidden files | off | Also sync `.obsidian` (your settings, themes, plugins), `.git`, etc. |
 | …except these | a safe default list | With hidden sync on: which hidden folders to leave out |
 | …but still sync these | _(empty)_ | With hidden sync off: which hidden folders to include anyway |
-| Download from server | — | One-way catch-up: pull everything, upload nothing |
+| Download from server | — | **Server wins here:** overwrite this device's files with the server's version and fetch anything missing. Uploads nothing; local-only files are kept; any overwritten edit is saved to history |
+| Upload to server | — | **This device wins on the server:** overwrite the server's copy of every file with this device's, and add local-only files. Server-only files are kept (not deleted). Affects every other device |
 | Wipe local cache | — | Deletes this device's copy. The server is not touched |
 
 > **Changing the passphrase changes how everything is stored.** If you change the

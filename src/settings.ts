@@ -3,6 +3,7 @@ import type CouchDBSyncPlugin from "./main";
 import { SyncDatabase } from "./database";
 import { selfTest } from "./crypto";
 import { IndexPanel } from "./indexpanel";
+import { confirm } from "./history";
 
 /**
  * The plugin's settings tab: the sync status panel at the top, then the settings
@@ -326,15 +327,44 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				items: [
 					row(
 						"Download from server",
-						"Pull the server's state to this device WITHOUT uploading local changes, then " +
-							"materialize anything that is in the local index but missing on disk. " +
-							"Useful on a follower device, after a Google Drive desync, or to force the master's state.",
+						"Make the SERVER win on this device: write the server's version of every file to " +
+							"disk, overwriting a divergent local copy and fetching anything missing. Nothing " +
+							"is uploaded, and local-only files are kept. Any overwritten local edit is saved " +
+							"to history first. Useful on a follower device or to force the master's state.",
 						(setting) =>
 							setting.addButton((b) =>
 								b.setButtonText("Download only").onClick(async () => {
 									new Notice("Downloading from server…");
 									await this.plugin.downloadFromServer();
 								})
+							)
+					),
+					row(
+						"Upload to server",
+						"Make THIS DEVICE win on the server: overwrite the server's version of every file " +
+							"with this device's copy, and add any local-only files. Server-only files are kept " +
+							"(this does not delete). This changes what every other device sees, so use it when " +
+							"this vault is the one you trust — e.g. after a desync.",
+						(setting) =>
+							setting.addButton((b) =>
+								b
+									.setDestructive()
+									.setButtonText("Upload to server")
+									.onClick(() => {
+										confirm(this.app, {
+											title: "Upload everything to the server?",
+											body:
+												"This overwrites the server's copy of every file with this device's " +
+												"version. Other devices will pick up this state on their next sync. " +
+												"Server-only files are kept, not deleted. Continue?",
+											cta: "Upload to server",
+											danger: true,
+											onConfirm: async () => {
+												new Notice("Uploading to server…");
+												await this.plugin.uploadToServer();
+											},
+										});
+									})
 							)
 					),
 					row(

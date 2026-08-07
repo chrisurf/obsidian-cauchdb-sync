@@ -525,7 +525,16 @@ export default class CouchDBSyncPlugin extends Plugin {
 		return this.restartLock;
 	}
 
-	private async doRestart(mode: "sync" | "download" = "sync"): Promise<void> {
+	/** Push this device's state to the server, overwriting the server's copy of each file. */
+	uploadToServer(): Promise<void> {
+		this.engine?.abort();
+		this.restartLock = this.restartLock
+			.catch(() => undefined)
+			.then(() => this.doRestart("upload"));
+		return this.restartLock;
+	}
+
+	private async doRestart(mode: "sync" | "download" | "upload" = "sync"): Promise<void> {
 		// Preserve the outgoing engine's sync records across the restart churn (mobile
 		// resume-recovery, Force sync, toggle). stop() cancels the debounced write, so
 		// without this flush the rebuilt engine would re-hash the whole vault. The shared
@@ -597,6 +606,7 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.engine = engine;
 		try {
 			if (mode === "download") await engine.startDownloadOnly();
+			else if (mode === "upload") await engine.startUploadOnly();
 			else await engine.start();
 		} catch (e) {
 			const err = toError(e);
