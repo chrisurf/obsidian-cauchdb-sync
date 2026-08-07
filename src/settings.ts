@@ -29,7 +29,9 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 	constructor(app: App, plugin: CouchDBSyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
-		this.panel = new IndexPanel(plugin);
+		// Settings shows the high-level card only (status + store widgets); the full
+		// detail (attention list + the three store trees) lives in the sidebar panel.
+		this.panel = new IndexPanel(plugin, "compact");
 	}
 
 	hide(): void {

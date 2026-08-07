@@ -22,7 +22,8 @@ export class SyncStatusView extends ItemView {
 	constructor(leaf: WorkspaceLeaf, plugin: CouchDBSyncPlugin) {
 		super(leaf);
 		this.plugin = plugin;
-		this.panel = new IndexPanel(plugin);
+		// The sidebar is the full view: status + store widgets + attention list + trees.
+		this.panel = new IndexPanel(plugin, "full");
 	}
 
 	getViewType(): string {

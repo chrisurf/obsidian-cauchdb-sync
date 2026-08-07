@@ -142,8 +142,11 @@ describe("CouchDB Sync — status bar controls and sidebar view", function () {
 			const text = document.querySelector<HTMLElement>(".couchdb-sync-status-text")!;
 			const before = a.workspace.getLeavesOfType(viewType).length;
 			text.click();
+			// Wait for the counters, not just the card: the card mounts synchronously but
+			// the legend/counters are painted a tick later once the first report resolves,
+			// so checking on the card alone races the async render (flaky under load).
 			for (let i = 0; i < 40; i++) {
-				if (document.querySelector(".couchdb-sync-view .couchdb-sync-card")) break;
+				if (document.querySelector(".couchdb-sync-view .couchdb-sync-legend-item")) break;
 				await new Promise((r) => setTimeout(r, 100));
 			}
 			const view = document.querySelector(".couchdb-sync-view");
@@ -162,7 +165,7 @@ describe("CouchDB Sync — status bar controls and sidebar view", function () {
 		assert.equal(res.hasLegend, true, "the panel must render the legend");
 	});
 
-	it("gives the sidebar panel the same working tree and actions as the settings tab", async function () {
+	it("shows the full tree + per-file actions in the sidebar, and a compact summary in settings", async function () {
 		const res = await browser.executeObsidian(async ({ app }, id, viewType) => {
 			const a = app as unknown as {
 				workspace: { getLeavesOfType(t: string): unknown[] };
@@ -171,8 +174,13 @@ describe("CouchDB Sync — status bar controls and sidebar view", function () {
 			// Panel already open from the previous test; render settings alongside it.
 			const tab = (a.setting.pluginTabs ?? []).find((t) => t.id === id)!;
 			tab.display();
+			// Wait until BOTH panels have finished their async first render: the sidebar's
+			// full tree and the settings tab's compact counters. They are separate panel
+			// instances, so their reports land independently.
 			for (let i = 0; i < 40; i++) {
-				if (tab.containerEl.querySelector(".couchdb-sync-tree")) break;
+				const viewReady = !!document.querySelector(".couchdb-sync-view .couchdb-sync-tree");
+				const settingsReady = !!tab.containerEl.querySelector(".couchdb-sync-legend-item");
+				if (viewReady && settingsReady) break;
 				await new Promise((r) => setTimeout(r, 100));
 			}
 			const view = document.querySelector(".couchdb-sync-view")!;
@@ -193,15 +201,16 @@ describe("CouchDB Sync — status bar controls and sidebar view", function () {
 		}, PLUGIN_ID, VIEW_TYPE);
 
 		assert.equal(res.bothOpen, true, "the sidebar panel should still be open");
-		assert.equal(res.view.tree, true, "the sidebar panel must render the file tree");
+		// The sidebar is the FULL view: store trees, per-file actions and the counters.
+		assert.equal(res.view.tree, true, "the sidebar panel must render the file trees");
 		assert.ok(res.view.files > 0, "the sidebar panel must list files");
 		assert.ok(res.view.actionButtons > 0, "the sidebar panel must offer per-file actions");
-		// Same component, so the two must agree on what they show.
-		assert.deepEqual(
-			res.view,
-			res.settings,
-			"the sidebar panel and the settings tab must render the same panel",
-		);
+		assert.ok(res.view.legendItems > 0, "the sidebar panel must render the counters");
+		// Settings is deliberately high-level: the same counters, but no tree or per-file
+		// rows — details live in the sidebar panel so the settings tab stays short.
+		assert.equal(res.settings.tree, false, "settings must stay compact — no file tree");
+		assert.equal(res.settings.files, 0, "settings must not list per-file rows");
+		assert.ok(res.settings.legendItems > 0, "settings still shows the high-level counters");
 	});
 
 	it("stops the panel's timers when the sidebar is closed", async function () {
