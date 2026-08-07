@@ -252,7 +252,6 @@ Available from Obsidian's command palette (`Ctrl/Cmd + P`).
 | …but still sync these | _(empty)_ | With hidden sync off: which hidden folders to include anyway |
 | Download from server | — | One-way catch-up: pull everything, upload nothing |
 | Wipe local cache | — | Deletes this device's copy. The server is not touched |
-| Forget local cache when plugin is disabled | off | Privacy mode: destroy the local copy whenever you turn the plugin off |
 
 > **Changing the passphrase changes how everything is stored.** If you change the
 > passphrase, wipe the local cache and start from a fresh, empty database —
@@ -273,9 +272,8 @@ which pieces repeat, and when versions were created. Nothing that reveals a
 title, a folder, or a word you wrote.
 
 **On this device** — the local cache keeps some information in the clear (file
-paths, sizes, fingerprints) so the status panel can work offline. Turn on
-**Forget local cache when plugin is disabled** if you want that removed whenever
-the plugin is off.
+paths, sizes, fingerprints) so the status panel can work offline. Use **Wipe
+local cache** any time you want that removed; it only ever touches this device.
 
 **Your credentials** — your server password and your passphrase are stored in
 plain text in the plugin's own `data.json` file inside your vault, exactly as

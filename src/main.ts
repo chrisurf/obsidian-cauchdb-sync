@@ -327,25 +327,14 @@ export default class CouchDBSyncPlugin extends Plugin {
 		this.engine?.abort();
 		await this.restartLock.catch(() => undefined); // let any in-flight start wind down
 		// Flush the session's sync records before tearing down (the debounce that would
-		// have written them is cancelled by stop()). Skipped when we are about to wipe the
-		// cache anyway. Keeps the next launch from re-hashing the whole vault.
-		if (!this.settings.forgetCacheOnDisable) {
-			await this.engine?.flushState().catch(() => undefined);
-		}
+		// have written them is cancelled by stop()). Keeps the next launch from
+		// re-hashing the whole vault. The local cache is deliberately kept — teardown
+		// runs on ordinary app close too, so wiping here would destroy the cache on
+		// every quit; use the explicit "Wipe local cache" action instead.
+		await this.engine?.flushState().catch(() => undefined);
 		this.engine?.stop();
 		// Drain any in-flight index report before touching the shared handle.
 		if (this.reportInFlight) await this.reportInFlight.catch(() => undefined);
-		// Privacy mode: destroy the local PouchDB before closing so the cached
-		// metadata is not left behind when the plugin is disabled. Must run
-		// BEFORE close() (destroy on a closed handle is a no-op in PouchDB).
-		if (this.settings.forgetCacheOnDisable) {
-			try {
-				await this.getSharedDb().destroyLocal();
-			} catch (e) {
-				console.warn("[couchdb-sync] forget-on-disable failed", e);
-			}
-			this.db = null; // already destroyed; don't try to close()
-		}
 		await this.db?.close().catch(() => undefined);
 		this.engine = null;
 		this.db = null;

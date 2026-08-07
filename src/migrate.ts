@@ -23,6 +23,11 @@ import { CouchDBSyncSettings, defaultHiddenExclude } from "./types";
  *
  * v4: live (real-time) sync is now mandatory — its toggle was removed — so force
  * `liveSync` on for any config that had it off (the old "sync only on command" mode).
+ *
+ * v5: the "forget local cache when plugin is disabled" feature was removed entirely
+ * (teardown runs on ordinary app close too, so an always-on wipe would destroy the
+ * cache on every quit; the explicit "Wipe local cache" action covers the privacy
+ * case). Strip the now-dead `forgetCacheOnDisable` key.
  */
 export function migrateSettings(
 	settings: CouchDBSyncSettings & Record<string, unknown>,
@@ -80,6 +85,15 @@ export function migrateSettings(
 		// left in the old one-shot ("sync only on command") mode is switched to live.
 		if (settings.liveSync !== true) {
 			settings.liveSync = true;
+			changed = true;
+		}
+	}
+
+	if (priorVersion < 5) {
+		// The "forget local cache on disable" feature is gone; drop its dead key so it
+		// stops lingering in data.json.
+		if ("forgetCacheOnDisable" in settings) {
+			delete settings.forgetCacheOnDisable;
 			changed = true;
 		}
 	}

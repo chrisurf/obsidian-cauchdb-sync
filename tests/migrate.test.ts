@@ -175,3 +175,24 @@ describe("migrateSettings (v4) — live sync is always on", () => {
 		expect(s.liveSync).toBe(false);
 	});
 });
+
+describe("migrateSettings (v5) — forget-cache-on-disable removed", () => {
+	it("strips the dead forgetCacheOnDisable key", () => {
+		const s = merged({ forgetCacheOnDisable: true });
+		const changed = migrateSettings(s, 4, CONFIG_DIR);
+		expect(changed).toBe(true);
+		expect("forgetCacheOnDisable" in s).toBe(false);
+	});
+
+	it("is a no-op when the key is already absent", () => {
+		const s = merged({});
+		delete (s as Record<string, unknown>).forgetCacheOnDisable;
+		expect(migrateSettings(s, 4, CONFIG_DIR)).toBe(false);
+	});
+
+	it("does not touch the key for configs already at v5", () => {
+		const s = merged({ forgetCacheOnDisable: true });
+		expect(migrateSettings(s, 5, CONFIG_DIR)).toBe(false);
+		expect("forgetCacheOnDisable" in s).toBe(true);
+	});
+});

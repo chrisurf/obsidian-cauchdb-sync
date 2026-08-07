@@ -352,22 +352,6 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 									})
 							)
 					),
-					row(
-						"Forget local cache when plugin is disabled",
-						"Privacy mode. When you disable or uninstall the plugin, the local PouchDB " +
-							"is destroyed. The local cache always keeps some cleartext metadata on this " +
-							"device — the per-file sync-state index holds vault paths, sizes and hashes " +
-							"even with E2EE on (E2EE protects what reaches the server, not the local " +
-							"cache). Trade-off: re-enabling forces a full re-download from the server. " +
-							"Off by default.",
-						(setting) =>
-							setting.addToggle((t) =>
-								t.setValue(s.forgetCacheOnDisable).onChange(async (v) => {
-									s.forgetCacheOnDisable = v;
-									await this.plugin.saveSettings();
-								})
-							)
-					),
 					// Legacy cleanup: before vault isolation, every vault on the machine
 					// shared one global PouchDB. Offer to delete it so old-vault data stops
 					// leaking into the index status. Only shown once the probe finds it.
