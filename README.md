@@ -62,6 +62,15 @@ blobs — no titles, no folder names, no hints.
 
 ### 📊 A status panel that tells you the truth
 
+<p align="center">
+  <img src="./assets/panel-desktop.png" alt="CouchDB Sync status panel — this device, local cache and server all in sync" width="100%" />
+</p>
+
+See all three places your notes live at a glance — **this device**, the on-device
+**local cache**, and the **server** — with the exact delta between each pair. When
+they match it says so; when the server can't be reached it says *that* (e.g. a login
+error) instead of pretending everything is fine.
+
 Open it from the status bar and see how many files are in sync (`1,284 / 1,284 ·
 100%`) plus a folder tree of *every* file, colour-coded:
 
@@ -76,6 +85,13 @@ Open it from the status bar and see how many files are in sync (`1,284 / 1,284 �
 Folders show the most urgent state inside them, so a green folder really means
 "everything in here is fine". Files being transferred right now shimmer and show
 their progress.
+
+<p align="center">
+  <img src="./assets/panel-mobile.png" alt="The same status panel on a phone" width="360" />
+</p>
+
+The same panel on mobile — every store, every file, and the same per-file actions
+(a `⋯` menu on each row: upload, download, resolve, view history, and more).
 
 ### 🕰️ Every version, kept
 
