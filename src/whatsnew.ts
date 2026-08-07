@@ -44,9 +44,11 @@ export const BUY_ME_A_COFFEE_IMAGE_URL =
  * so a first-time reader and someone upgrading from an early version both come
  * away knowing where to click.
  */
-export const WHATS_NEW = `## ⚠️ Alpha — under active development
+export const WHATS_NEW = `## 🌱 Beta — and simpler than ever
 
-This is an early **alpha** release. It works, but it still has **known bugs** and rough edges, and behaviour may change between versions. Please keep backups of important vaults and expect the occasional hiccup — and thank you for helping test it. 🙏
+CouchDB Sync is now in **beta**: it works well and is genuinely useful for everyday syncing. It's still maturing and behaviour may change between versions, so — as with any sync tool — please keep backups of important vaults. Bug reports and feedback are very welcome. 🙏
+
+**The best part: syncing is now super simple.** Flip it on once and it just runs — every change uploads and downloads automatically in the background, across all your devices. Encryption is always on and live sync is always on, so there are no modes to choose and no buttons to babysit. Once your server and passphrase check out, the setup even tidies itself away so the settings stay clean.
 
 ## 🔌 First time here? Connect a server
 

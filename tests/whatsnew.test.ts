@@ -31,10 +31,15 @@ describe("shouldShowWhatsNew", () => {
 });
 
 describe("what's new content", () => {
-	it("leads with the alpha notice, then connecting a server", () => {
-		// The alpha/known-bugs notice is deliberately the first thing a reader sees.
-		expect(WHATS_NEW).toMatch(/^## ⚠️ Alpha — under active development/);
-		expect(WHATS_NEW).toMatch(/known bugs/i);
+	it("leads with the beta notice and the simpler-sync message, then connecting a server", () => {
+		// The beta notice is deliberately the first thing a reader sees (matches the README).
+		expect(WHATS_NEW).toMatch(/^## 🌱 Beta/);
+		expect(WHATS_NEW).toMatch(/\*\*beta\*\*/);
+		// It should NOT still call itself alpha or advertise known bugs.
+		expect(WHATS_NEW).not.toMatch(/alpha/i);
+		expect(WHATS_NEW).not.toMatch(/known bugs/i);
+		// It hints that syncing is now simple and automatic.
+		expect(WHATS_NEW).toMatch(/automatically/i);
 		// The connect-a-server step (what a fresh install is blocked on) follows it.
 		expect(WHATS_NEW).toMatch(/## 🔌 First time here\? Connect a server/);
 		expect(WHATS_NEW).toMatch(/Test connection/);

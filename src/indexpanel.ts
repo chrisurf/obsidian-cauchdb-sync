@@ -615,11 +615,6 @@ export class IndexPanel {
 		// live in the full side panel, so the settings tab stays short and uncluttered.
 		if (this.mode === "compact") {
 			driftBox.empty();
-			const open = driftBox.createEl("button", {
-				text: "Open full sync panel →",
-				cls: "couchdb-sync-rowbtn couchdb-sync-openpanel",
-			});
-			open.onclick = () => void this.plugin.revealStatusView();
 			treeBox.empty();
 			this.excludedToggleEl?.empty();
 			this.driftSig = this.treeSig = "";
