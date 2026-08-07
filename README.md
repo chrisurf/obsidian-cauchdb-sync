@@ -10,12 +10,11 @@
 
 # ☁️ CouchDB Sync for Obsidian
 
-> [!WARNING]
-> **Alpha — under active development.** This is an early **alpha** release. It
-> works and is genuinely useful, but it still has **known bugs** and rough edges,
-> and behaviour may change between versions. Please keep backups of important
-> vaults and expect the occasional hiccup. Bug reports are very welcome — thank
-> you for helping shape it. 🙏
+> [!IMPORTANT]
+> **Beta.** It works well and is genuinely useful for everyday syncing, but it's
+> still maturing and behaviour may change between versions. A little caution is
+> wise: as with any sync tool, please keep backups of important vaults. Bug
+> reports and feedback are very welcome — thank you for helping shape it. 🙏
 
 Keep the same notes on every device — on your own server, readable only by you.
 
