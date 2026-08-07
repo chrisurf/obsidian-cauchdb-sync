@@ -244,11 +244,9 @@ Available from Obsidian's command palette (`Ctrl/Cmd + P`).
 | Database name | `obsidian` | Which database on that server to use |
 | Username / Password | _(empty)_ | Your login for the server |
 | Test connection | — | Checks all of the above, and unlocks the status view |
-| End-to-end encryption | on | Locks note content *and* file names, sizes and dates before upload |
-| Passphrase | _(empty)_ | Your secret. Must be identical on every device |
+| Encryption passphrase | _(empty)_ | **Required.** Notes are always end-to-end encrypted (AES-256-GCM); use the same passphrase on every device |
 | Conflict strategy | newest wins | Who wins when two devices edit the same note |
 | This device is the master | off | With *master wins*: this device's version always wins. Turn on for exactly one device |
-| Live sync (real-time) | on | Keeps changes flowing continuously. Off = only when you press **Force sync** |
 | Sync hidden files | off | Also sync `.obsidian` (your settings, themes, plugins), `.git`, etc. |
 | …except these | a safe default list | With hidden sync on: which hidden folders to leave out |
 | …but still sync these | _(empty)_ | With hidden sync off: which hidden folders to include anyway |
@@ -256,10 +254,9 @@ Available from Obsidian's command palette (`Ctrl/Cmd + P`).
 | Wipe local cache | — | Deletes this device's copy. The server is not touched |
 | Forget local cache when plugin is disabled | off | Privacy mode: destroy the local copy whenever you turn the plugin off |
 
-> **Changing encryption or the passphrase changes how everything is stored.** If
-> you switch encryption on or off, or change the passphrase, wipe the local
-> cache and start from a fresh, empty database — otherwise old and new notes get
-> mixed and neither side can read the other.
+> **Changing the passphrase changes how everything is stored.** If you change the
+> passphrase, wipe the local cache and start from a fresh, empty database —
+> otherwise old and new notes get mixed and neither side can read the other.
 
 ---
 

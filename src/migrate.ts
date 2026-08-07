@@ -20,6 +20,9 @@ import { CouchDBSyncSettings, defaultHiddenExclude } from "./types";
  * v3: encryption is now mandatory (the off switch was removed from the UI), so force
  * `e2eeEnabled` on for any config that had it disabled. Encryption was on by default
  * anyway, so this only affects the rare config that deliberately turned it off.
+ *
+ * v4: live (real-time) sync is now mandatory — its toggle was removed — so force
+ * `liveSync` on for any config that had it off (the old "sync only on command" mode).
  */
 export function migrateSettings(
 	settings: CouchDBSyncSettings & Record<string, unknown>,
@@ -68,6 +71,15 @@ export function migrateSettings(
 		// on is end-to-end encrypted.
 		if (settings.e2eeEnabled !== true) {
 			settings.e2eeEnabled = true;
+			changed = true;
+		}
+	}
+
+	if (priorVersion < 4) {
+		// Live (real-time) sync is mandatory now — the toggle is gone — so any config
+		// left in the old one-shot ("sync only on command") mode is switched to live.
+		if (settings.liveSync !== true) {
+			settings.liveSync = true;
 			changed = true;
 		}
 	}

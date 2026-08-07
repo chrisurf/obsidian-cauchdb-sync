@@ -5,7 +5,7 @@ export type ConflictStrategy = "master" | "newest";
  * that needs a one-time migration (see `migrateSettings` in main.ts). Fresh
  * installs are stamped with the current version and skip migration.
  */
-export const CURRENT_SETTINGS_VERSION = 3;
+export const CURRENT_SETTINGS_VERSION = 4;
 
 export interface CouchDBSyncSettings {
 	/** persisted settings schema version; drives one-time migrations */

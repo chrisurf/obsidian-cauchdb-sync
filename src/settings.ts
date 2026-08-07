@@ -269,19 +269,8 @@ export class CouchDBSyncSettingTab extends PluginSettingTab {
 				type: "group",
 				heading: "Sync",
 				items: [
-					row(
-						"Live sync (real-time)",
-						"Keep changes flowing continuously in both directions. Off = sync only when you press “Force sync”. Takes effect immediately.",
-						(setting) =>
-							setting.addToggle((t) =>
-								t.setValue(s.liveSync).onChange(async (v) => {
-									s.liveSync = v;
-									await this.plugin.saveSettings();
-									if (v) await this.plugin.restartSync(); // start live now
-									else await this.plugin.stopSync(); // stop continuous sync now
-								})
-							)
-					),
+					// Live sync (real-time, both directions) is always on — there is no toggle
+					// to turn it off. Use the master Sync switch to stop syncing entirely.
 					row(
 						"Sync hidden files",
 						`Hidden files are things like ${cfg} (your settings & plugins) and .git. ` +
